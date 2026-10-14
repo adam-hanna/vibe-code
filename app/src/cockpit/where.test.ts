@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'vitest';
 import cockpit from './Cockpit.tsx?raw';
 import main from '../main.tsx?raw';
+import { SCALE_KEY, scaleKeyOf } from './appearance';
 import { NOWHERE, OPEN_PANELS, placeKeyOf, readWhere, startPanels, WHERE_KEY, writableWhere } from './where';
 
 /**
@@ -121,5 +122,22 @@ describe("a device's own place (#347)", () => {
     expect(cockpit).toMatch(/if \(placeKey === null\) return;\s*memory\.setItem\(\s*placeKey,/);
     expect(main).toMatch(/if \(SURFACE\.ownPlace\) \{[\s\S]*keepPlaceUnder\(placeKeyOf\(device\)\);[\s\S]*\}/);
     expect(main.indexOf('keepPlaceUnder(')).toBeLessThan(main.indexOf('createRoot('));
+  });
+});
+
+describe("a device's own text size (#347)", () => {
+  test('the desktop keeps its key, a phone its own, and a phone with no identity none', () => {
+    expect(scaleKeyOf(undefined)).toBe(SCALE_KEY);
+    expect(scaleKeyOf('abc123')).toBe(`${SCALE_KEY}.phone.abc123`);
+    expect(scaleKeyOf('abc123')).not.toBe(scaleKeyOf('def456'));
+    expect(scaleKeyOf(null)).toBeNull();
+  });
+
+  test('the cockpit reads and writes only the key it was given, set before it mounts', () => {
+    expect(cockpit).toMatch(/scaleKey === null \? 1 : readScale\(memory\.getItem\(scaleKey\)\)/);
+    expect(cockpit).toMatch(/if \(scaleKey === null\) return;\s*try \{\s*memory\.setItem\(scaleKey,/);
+    expect(cockpit).not.toMatch(/memory\.(get|set)Item\(SCALE_KEY/);
+    expect(main).toMatch(/if \(SURFACE\.ownPlace\) \{[\s\S]*keepScaleUnder\(scaleKeyOf\(device\)\);[\s\S]*\}/);
+    expect(main.indexOf('keepScaleUnder(')).toBeLessThan(main.indexOf('createRoot('));
   });
 });

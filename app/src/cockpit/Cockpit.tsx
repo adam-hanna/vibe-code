@@ -191,6 +191,12 @@ export function keepPlaceUnder(key: string | null): void {
   placeKey = key;
 }
 
+/** The key this device keeps its text size under (`scaleKeyOf`), the same way. */
+let scaleKey: string | null = SCALE_KEY;
+export function keepScaleUnder(key: string | null): void {
+  scaleKey = key;
+}
+
 /** Where the window was pointed when it last closed. See `where.ts`. */
 function storedWhere(): Where {
   if (placeKey === null) return NOWHERE;
@@ -290,7 +296,7 @@ export function Cockpit() {
    */
   const [scale, setScale] = useState(() => {
     try {
-      return readScale(memory.getItem(SCALE_KEY));
+      return scaleKey === null ? 1 : readScale(memory.getItem(scaleKey));
     } catch {
       // Storage can be unavailable. Text at the size it was designed is a
       // smaller failure than a window that will not render.
@@ -302,8 +308,9 @@ export function Cockpit() {
   }, [scale]);
   const rescale = useCallback((next: number) => {
     setScale(readScale(String(next)));
+    if (scaleKey === null) return;
     try {
-      memory.setItem(SCALE_KEY, writable(next));
+      memory.setItem(scaleKey, writable(next));
     } catch {
       // It still applies for this session. See above.
     }

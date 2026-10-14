@@ -1,7 +1,8 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { Boundary } from './Boundary';
-import { Cockpit, keepPlaceUnder } from './cockpit/Cockpit';
+import { scaleKeyOf } from './cockpit/appearance';
+import { Cockpit, keepPlaceUnder, keepScaleUnder } from './cockpit/Cockpit';
 import { placeKeyOf } from './cockpit/where';
 import * as host from './host';
 import { flushMemory, loadMemory, memory, memoryChanged } from './memory';
@@ -39,14 +40,15 @@ async function render(into: HTMLElement): Promise<void> {
   // would draw defaults and then save them over what was stored.
   await loadMemory();
   keepLedgerIn(memory);
-  // A phone keeps its place under its own key (#347), so it must know who it
-  // is before the cockpit reads that place. One that cannot say keeps none.
+  // A phone keeps its place and its text size under its own keys (#347), so it
+  // must know who it is before the cockpit reads them. One that cannot say keeps none.
   if (SURFACE.ownPlace) {
     const device = await local<{ endpointId: string }>('phone_identity').then(
       (r) => r.endpointId,
       () => null,
     );
     keepPlaceUnder(placeKeyOf(device));
+    keepScaleUnder(scaleKeyOf(device));
   }
   window.addEventListener('pagehide', flushMemory);
   createRoot(into).render(

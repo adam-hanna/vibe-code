@@ -41,9 +41,20 @@ export const WHERE_KEY = 'vibe.where';
  * the desktop's, because borrowing it is the defect this exists to stop.
  */
 export function placeKeyOf(device: string | null | undefined): string | null {
-  if (device === undefined) return WHERE_KEY;
+  return deviceKey(WHERE_KEY, device);
+}
+
+/**
+ * `base` as one device keeps it: the desktop's own key, a phone's beside it, or
+ * null for a phone that cannot say who it is. The rule `placeKeyOf` states, for
+ * every key that describes the device rather than the work - the place, and
+ * how big the text is drawn (`scaleKeyOf`), since a phone held at arm's length
+ * and a desktop monitor want different sizes and one moved the other.
+ */
+export function deviceKey(base: string, device: string | null | undefined): string | null {
+  if (device === undefined) return base;
   if (device === null || device.trim() === '') return null;
-  return `${WHERE_KEY}.phone.${device}`;
+  return `${base}.phone.${device}`;
 }
 
 /**
