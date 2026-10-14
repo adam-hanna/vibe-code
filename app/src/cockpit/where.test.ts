@@ -76,7 +76,13 @@ describe('where the window was', () => {
     expect(cockpit).toMatch(/\(\(\) => storedWhere\(\)\.tab\)/);
     expect(cockpit).toMatch(/\(\(\) => startPanels\(storedWhere\(\)\.panels, SURFACE\.overlayPanels\)\)/);
     expect(cockpit).toMatch(/\(\(\) => storedWhere\(\)\.bottom\)/);
-    expect(cockpit).toMatch(/writableWhere\(\{ tab, viewing, draftId, bottom, panels \}\)/);
+    // Case 2 (#347): the phone's Commands tab is the one tab never written,
+    // because the record is the desktop's too and there `commands` means the
+    // bottom panel. It writes the tab it was opened from; every other tab, and
+    // the other four fields, are written as the cockpit holds them.
+    expect(cockpit).toMatch(
+      /writableWhere\(\{ tab: tab === 'commands' \? cameFrom\.current : tab, viewing, draftId, bottom, panels \}\)/,
+    );
   });
 });
 

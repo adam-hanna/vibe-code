@@ -683,6 +683,12 @@ export function Cockpit() {
     // they are apart is that two places able to force is one too many.
     | 'runs'
     | 'settings'
+    // A phone's own tab for the commands pane (#347). The desktop docks it in
+    // the bottom panel, opened by a chord or the palette, and the phone has
+    // neither - nor the height for a split. So on a phone `open('commands')`
+    // lands here, and nothing else ever does. Never written to `where`: the
+    // record is the desktop's too, and there it means the bottom panel.
+    | 'commands'
     // **The pilot, not the output pane** (#211). The complaint was exact: *"I
     // thought my initial prompt would be given to the pilot and the pilot would
     // take control"*, and the app answered it with a form and a tab beside the
@@ -703,9 +709,9 @@ export function Cockpit() {
    * under them, so their way back is a press that returns here. The pilot when
    * nothing else is known, since that is where the window lands.
    */
-  const cameFrom = useRef<typeof tab>('pilot');
+  const cameFrom = useRef<Exclude<typeof tab, 'commands'>>('pilot');
   useEffect(() => {
-    if (tab !== 'settings' && tab !== 'runs') cameFrom.current = tab;
+    if (tab !== 'settings' && tab !== 'runs' && tab !== 'commands') cameFrom.current = tab;
   }, [tab]);
   const openSettings = useCallback((scope: 'global' | 'project') => {
     setSettingsScope(scope);
@@ -734,6 +740,10 @@ export function Cockpit() {
     // The pilot's `read_command` names the commands pane by its old tab name;
     // it lives in the bottom panel, so opening it opens that panel on it rather
     // than a main tab that is gone. The output is a main tab again (#284).
+    if (next === 'commands' && SURFACE.compactChrome) {
+      setTab('commands');
+      return;
+    }
     if (next === 'commands') {
       setBottom(next);
       setPanels((p) => (p.bottom ? p : { ...p, bottom: true }));
@@ -838,7 +848,10 @@ export function Cockpit() {
   const drafting = drafts.find((d) => d.id === draftId) ?? null;
   useEffect(() => {
     try {
-      memory.setItem(WHERE_KEY, writableWhere({ tab, viewing, draftId, bottom, panels }));
+      memory.setItem(
+        WHERE_KEY,
+        writableWhere({ tab: tab === 'commands' ? cameFrom.current : tab, viewing, draftId, bottom, panels }),
+      );
     } catch {
       // Storage switched off: the next launch lands on the pilot, as it used to.
     }
@@ -2391,6 +2404,18 @@ export function Cockpit() {
             >
               Verify{verifyOf.passes.length > 0 ? ` · ${String(verifyOf.passes.length)}` : ''}
             </button>
+            {/* The phone's way to the commands pane, which the desktop docks
+                below (#347). Its count is what is still running, as the bottom
+                panel's is. */}
+            {SURFACE.compactChrome && (
+              <button
+                className={cn(TAB, tab === 'commands' && TAB_ON)}
+                aria-current={tab === 'commands' ? 'page' : undefined}
+                onClick={() => open('commands')}
+              >
+                Commands{running(commands).length > 0 ? ` · ${String(running(commands).length)}` : ''}
+              </button>
+            )}
             {/*
               `5e`, in the place hi-fi 1 puts it: right-aligned in this bar,
               always visible, rather than costing a tab. It is the **readout**
@@ -2563,6 +2588,14 @@ export function Cockpit() {
               on a person would be destroyed by a glance at the output pane -
               which is the one thing this tab must not do. The other two panes
               hold nothing, so they stay conditional. */}
+          {tab === 'commands' && (
+            <CommandsPane
+              commands={commands}
+              dir={repoDir}
+              onRun={(program, args) => runCommand(repoDir, program, args)}
+              onStop={stopCommand}
+            />
+          )}
           <div className={cn('min-h-0 flex-1 flex-col', tab === 'pilot' ? 'flex' : 'hidden')} hidden={tab !== 'pilot'}>
             {/* One pane per conversation still doing something (#305), the
                 one on screen visible and the rest hidden but mounted, so a turn
@@ -2649,7 +2682,7 @@ export function Cockpit() {
             server's log can be read beside a plan. Toggled with the
             `toggleBottom` chord, and opened by `open('commands')`. The run's
             output was its other tab until it went back to the main bar (#284). */}
-        {panels.bottom && (
+        {panels.bottom && !SURFACE.compactChrome && (
           <>
           <ResizableSeparator orientation="vertical" />
           <ResizablePanel id="bottom" defaultSize={35} minSize="10%" className="flex min-h-0 min-w-0 flex-col">

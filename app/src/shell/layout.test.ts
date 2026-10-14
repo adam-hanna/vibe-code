@@ -42,7 +42,14 @@ describe('the regions', () => {
     // Case 2 (#284): output went back to the main bar, so the bottom panel
     // holds commands alone. What still holds is that opening either pane by
     // name lands on it, wherever it now lives.
-    expect(cockpit).toMatch(/panels\.bottom && \(/);
+    //
+    // Case 2 (#347): a phone draws no bottom panel - no chord or palette opens
+    // it there, and it has no height for a split - so the panel is drawn while
+    // open on the desktop only, and on a phone `open('commands')` lands on a
+    // Commands tab of its own, which draws the same pane.
+    expect(cockpit).toMatch(/panels\.bottom && !SURFACE\.compactChrome && \(/);
+    expect(cockpit).toMatch(/if \(next === 'commands' && SURFACE\.compactChrome\) \{\s*setTab\('commands'\);/);
+    expect(cockpit).toMatch(/\{tab === 'commands' && \(\s*<CommandsPane/);
     expect(cockpit).toMatch(/bottom === 'commands' && \(/);
     expect(cockpit).not.toMatch(/bottom === 'output'/);
     expect(cockpit).toMatch(/\{tab === 'output' && \(\s*<OutputPane/);
