@@ -1,5 +1,7 @@
 # The phone app (#345): its Rust tests, and a launch on an Android emulator and
-# an iOS simulator with the mock desktop, on every pull request that touches it.
+# an iOS simulator with the mock desktop, on every pull request into main that
+# touches it, and by hand. Not on develop, for ci.yml's reason: the macOS runner
+# is the most expensive minute this repository spends.
 #
 # The launches are the issue's done-when: the app builds for each platform,
 # starts, and draws the cockpit from frames - measured from the app's own log
@@ -10,7 +12,7 @@ name: Mobile
 
 on:
   pull_request:
-    branches: [develop, main]
+    branches: [main]
     paths:
       - app/mobile/**
       - app/remote/**
