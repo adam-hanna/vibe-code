@@ -77,14 +77,15 @@ describe('where the window was', () => {
     expect(cockpit).toMatch(/\(\(\) => storedWhere\(\)\.tab\)/);
     expect(cockpit).toMatch(/\(\(\) => startPanels\(storedWhere\(\)\.panels, SURFACE\.overlayPanels\)\)/);
     expect(cockpit).toMatch(/\(\(\) => storedWhere\(\)\.bottom\)/);
-    // Case 2 (#347): the phone's Commands and This phone tabs are the two
-    // tabs never written - the first because there `commands` means the
-    // bottom panel, the second because the desktop has no such tab. Each
-    // writes the tab it was opened from; every other tab, and the other four
-    // fields, are written as the cockpit holds them.
+    // Case 2 (#347): the phone's own views - Commands, This phone and
+    // Diagnostics - are never written: there `commands` means the bottom
+    // panel, and the desktop has no tab for the other two. Each writes the tab
+    // it was opened from; every other tab, and the other four fields, are
+    // written as the cockpit holds them.
     expect(cockpit).toMatch(
-      /writableWhere\(\{ tab: tab === 'commands' \|\| tab === 'phone' \? cameFrom\.current : tab, viewing, draftId, bottom, panels \}\)/,
+      /writableWhere\(\{ tab: isPhoneView\(tab\) \? cameFrom\.current : tab, viewing, draftId, bottom, panels \}\)/,
     );
+    expect(cockpit).toMatch(/return tab === 'commands' \|\| tab === 'phone' \|\| tab === 'diagnostics';/);
   });
 });
 

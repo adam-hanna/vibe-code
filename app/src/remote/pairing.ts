@@ -37,6 +37,33 @@ export function linkRows(status: RemoteStatus | null): { id: string; name: strin
   }));
 }
 
+/**
+ * How this phone reaches the desktop, for the phone's diagnostics (#347): the
+ * path the **desktop** measured for this phone's link, matched by the phone's
+ * own id. The phone's end of the connection is not measured in this build, so
+ * the desktop's reading is the one there is, and the note says whose it is.
+ * Each way of not knowing says which it is; none is drawn as `direct`.
+ */
+export function connectionOf(
+  status: RemoteStatus | null,
+  phoneId: string | null,
+): { value: string | null; note: string } {
+  if (phoneId === null) return { value: null, note: 'this phone has no id to find its connection by' };
+  if (status === null) return { value: null, note: 'the desktop has not said how this phone reaches it' };
+  if (status.endpoint.state !== 'up') {
+    return { value: null, note: 'the desktop reports its remote endpoint is not up, so it measures no connection' };
+  }
+  const link = status.endpoint.links.find((l) => l.id === phoneId);
+  if (link === undefined) return { value: null, note: 'the desktop lists no connection from this phone' };
+  const note =
+    link.path === 'none'
+      ? 'as the desktop measures it: the connection is moving between paths'
+      : link.path === 'relay'
+        ? 'as the desktop measures it. Relayed is not an error: it works, a little slower than direct'
+        : 'as the desktop measures it';
+  return { value: PATH_WORDS[link.path], note };
+}
+
 /** The phones turning remote access off would drop. Empty asks nothing. */
 export function offNeedsConfirm(status: RemoteStatus): string[] {
   return connectedNames(status);

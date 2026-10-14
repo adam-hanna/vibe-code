@@ -163,6 +163,24 @@ function desktop(command: string, args: Json): unknown {
   switch (command) {
     case 'host_status':
       return status();
+    // The desktop's remote access, as the bridge answers it: on, with this
+    // phone connected through the relay, so the diagnostics' link line can be seen.
+    case 'remote_status':
+      return {
+        endpointId: 'browser-mock-desktop',
+        identityUnreadable: null,
+        phones: [{ id: 'browser-mock-phone', name: 'Browser phone', pairedAt: 0, lastSeen: null, connected: true }],
+        phonesUnreadable: null,
+        settings: { enabled: true, startAtLogin: false, keepAwake: false, relay: null },
+        settingsUnreadable: null,
+        startAtLogin: { enabled: false, error: null },
+        awake: { held: false, error: null },
+        endpoint: {
+          state: 'up',
+          relays: [{ url: 'https://relay.example/', connected: true, error: null }],
+          links: [{ id: 'browser-mock-phone', path: 'relay' }],
+        },
+      };
     case 'host_send': {
       if (args['handle'] === LIVE_HOST) {
         liveSend(typeof args['line'] === 'string' ? args['line'] : '{}');

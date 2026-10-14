@@ -139,6 +139,10 @@ npm run stage:sidecar  # copy `dist/src` + a node runtime into the bundle
 npm run app:build      # the whole thing: vite, staging, cargo, installer
 ```
 
+**`dev:mobile:browser` does not reload `app/mobile/`.** Vite's watcher ignores that directory,
+so an edit to `mobile/browser-mock.ts` takes effect only after the server is restarted. Its
+`?live` query plays a desktop run held at a gate, for working on the run screens.
+
 **The app has its own `package.json` and its own gate.** `npm run typecheck && npm test` at
 the root still covers the core and does not see `app/`; run the app's commands as well when
 you touch it. `app/` is *not* in `files`, so it never ships to npm — the published package

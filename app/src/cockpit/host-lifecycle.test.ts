@@ -32,7 +32,9 @@ describe('status reads', () => {
   test('re-read on every exit, when a run host starts and when diagnostics open — and not on a result', () => {
     const exit = cockpit.slice(cockpit.indexOf('exit: (from, code) =>'), cockpit.indexOf('if (cancelled) {'));
     expect(exit).toMatch(/refreshStatus\(\);/);
-    expect(cockpit).toMatch(/if \(diagnostics\) refreshStatus\(\);/);
+    // Case 2 (#347): the phone's diagnostics are a screen rather than the
+    // popover, and opening it is the same re-read.
+    expect(cockpit).toMatch(/if \(diagnostics \|\| tab === 'diagnostics'\) refreshStatus\(\);/);
     const start = cockpit.slice(cockpit.indexOf('.startRunHost('), cockpit.indexOf('.finally(() => setBusy(false));'));
     // Case 2 (#246): the pid lands on that run's entry, not on a single field.
     const then = start.slice(start.indexOf('.then((pid) => {'), start.indexOf('.catch('));

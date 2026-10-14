@@ -8,6 +8,7 @@ import type { Build } from '../host';
 import type { Run, Staleness } from '../cockpit/model';
 import { StalenessNote } from '../cockpit/Staleness';
 import { cn } from '@/lib/utils';
+import { SURFACE } from '../surface';
 
 /**
  * The bar along the bottom: the window's standing facts, and the one control
@@ -244,7 +245,19 @@ export function StatusBar({
 
       {build !== null && <span className="font-mono text-mono-sm text-tertiary">{buildStamp(build)}</span>}
 
-      {!outside && (
+      {!outside && SURFACE.compactChrome && (
+        // A phone opens a screen instead (#347): the popover is wider than it.
+        <button
+          type="button"
+          className="flex size-5 cursor-pointer items-center justify-center rounded-sm border border-transparent bg-transparent text-secondary hover:text-emphasis"
+          aria-label="Diagnostics"
+          title="Diagnostics"
+          onClick={() => onDiagnostics(true)}
+        >
+          <Ellipsis className="size-4" aria-hidden />
+        </button>
+      )}
+      {!outside && !SURFACE.compactChrome && (
         <Popover open={diagnosticsOpen} onOpenChange={onDiagnostics}>
           <PopoverTrigger asChild>
             <button

@@ -13,6 +13,7 @@ import { CHECK_EVERY_MS, CHECK_KEY, SKIP_KEY, checkEnabled, shown } from '../she
 import type { UpdateInfo } from '../shell/update';
 import { Palette } from '../shell/Palette';
 import { PhoneSettings } from '../remote/PhoneSettings';
+import { PhoneDiagnostics } from '../remote/PhoneDiagnostics';
 import { SURFACE } from '../surface';
 import { statusBarControls } from '../shell/controls';
 import { StatusBar } from '../shell/StatusBar';
@@ -177,6 +178,16 @@ const TAB_ON = 'border-accent text-accent';
 
 /** How often the elapsed clock re-renders between heartbeats. */
 const TICK_MS = 1000;
+
+/**
+ * The phone's views of its own (#347): Commands, This phone and Diagnostics.
+ * None is ever written to `where` - the record is the desktop's too, where
+ * these tabs do not exist - so the tab they were opened from is written instead.
+ */
+type PhoneView = 'commands' | 'phone' | 'diagnostics';
+function isPhoneView(tab: string): tab is PhoneView {
+  return tab === 'commands' || tab === 'phone' || tab === 'diagnostics';
+}
 
 /** Where the last repository is remembered. See `repoDir` below. */
 const REPO_KEY = 'vibe.repo';
@@ -720,6 +731,10 @@ export function Cockpit() {
     // the desktop it reaches. Phone-only, reached from the sidebar's head, and
     // never written to `where` for the reason `commands` is not.
     | 'phone'
+    // The phone's diagnostics (#347): the desktop popover's facts as a screen,
+    // since a popover is wider than the phone. Opened from the status bar's
+    // •••, and never written to `where` either.
+    | 'diagnostics'
     // **The pilot, not the output pane** (#211). The complaint was exact: *"I
     // thought my initial prompt would be given to the pilot and the pilot would
     // take control"*, and the app answered it with a form and a tab beside the
@@ -746,9 +761,9 @@ export function Cockpit() {
    * under them, so their way back is a press that returns here. The pilot when
    * nothing else is known, since that is where the window lands.
    */
-  const cameFrom = useRef<Exclude<typeof tab, 'commands' | 'phone'>>('pilot');
+  const cameFrom = useRef<Exclude<typeof tab, PhoneView>>('pilot');
   useEffect(() => {
-    if (tab !== 'settings' && tab !== 'runs' && tab !== 'commands' && tab !== 'phone') cameFrom.current = tab;
+    if (tab !== 'settings' && tab !== 'runs' && !isPhoneView(tab)) cameFrom.current = tab;
   }, [tab]);
   const openSettings = useCallback((scope: 'global' | 'project') => {
     setSettingsScope(scope);
@@ -760,6 +775,11 @@ export function Cockpit() {
   /** The phone's own settings, opened the way the desktop's are: the sheets shut over it. */
   const openPhone = useCallback(() => {
     setTab('phone');
+    setPanels((p) => ({ ...p, sidebar: false, loop: false }));
+  }, []);
+  /** The phone's diagnostics screen, opened over whatever the status bar was under. */
+  const openPhoneDiagnostics = useCallback(() => {
+    setTab('diagnostics');
     setPanels((p) => ({ ...p, sidebar: false, loop: false }));
   }, []);
   /**
@@ -893,7 +913,7 @@ export function Cockpit() {
       if (placeKey === null) return;
       memory.setItem(
         placeKey,
-        writableWhere({ tab: tab === 'commands' || tab === 'phone' ? cameFrom.current : tab, viewing, draftId, bottom, panels }),
+        writableWhere({ tab: isPhoneView(tab) ? cameFrom.current : tab, viewing, draftId, bottom, panels }),
       );
     } catch {
       // Storage switched off: the next launch lands on the pilot, as it used to.
@@ -1151,8 +1171,8 @@ export function Cockpit() {
   // a figure measured at connect would be however long ago that was - stated as
   // though it were now.
   useEffect(() => {
-    if (diagnostics) refreshStatus();
-  }, [diagnostics, refreshStatus]);
+    if (diagnostics || tab === 'diagnostics') refreshStatus();
+  }, [diagnostics, tab, refreshStatus]);
 
   useEffect(() => {
     if (!host.inShell()) return;
@@ -1960,7 +1980,7 @@ export function Cockpit() {
       setPanels((p) => ({ ...p, loop: !p.loop, ...(SURFACE.overlayPanels && !p.loop ? { sidebar: false } : {}) })),
     toggleBottom: () => setPanels((p) => ({ ...p, bottom: !p.bottom })),
     settings: () => openSettings('global'),
-    diagnostics: () => setDiagnostics((o) => !o),
+    diagnostics: SURFACE.compactChrome ? openPhoneDiagnostics : () => setDiagnostics((o) => !o),
     goPilot: () => setTab('pilot'),
     goPlans: () => open('plans'),
     goCritique: () => open('critique'),
@@ -2387,7 +2407,7 @@ export function Cockpit() {
           */}
           {/* A view with no tab of its own is not one of the run's panes, so on
               a phone the run's tabs give way to the way back (#347). */}
-          {SURFACE.compactChrome && (tab === 'settings' || tab === 'runs' || tab === 'phone') ? (
+          {SURFACE.compactChrome && (tab === 'settings' || tab === 'runs' || tab === 'phone' || tab === 'diagnostics') ? (
             <div className="flex flex-none items-center gap-1 border-b border-rule-structure bg-page px-1 py-1">
               <Button variant="quiet" size="sm" onClick={() => setTab(cameFrom.current)}>
                 <ChevronLeft className="size-4" aria-hidden /> Back
@@ -2579,6 +2599,9 @@ export function Cockpit() {
               busy={busy}
               onResume={(runId, dir) => resume(runId, dir, undefined, false, viewing?.task ?? run.identity?.task ?? null)}
             />
+          )}
+          {tab === 'diagnostics' && (
+            <PhoneDiagnostics status={wire.status} remote={remoteStatus} identity={run.identity} />
           )}
           {tab === 'phone' && (
             <PhoneSettings
@@ -3133,9 +3156,12 @@ export function Cockpit() {
         onSpend={() => setTab('spend')}
         build={wire.status?.build ?? null}
         diagnosticsOpen={diagnostics}
-        onDiagnostics={setDiagnostics}
+        // On a phone the ••• opens a screen rather than a popover (#347).
+        onDiagnostics={SURFACE.compactChrome ? (open) => open && openPhoneDiagnostics() : setDiagnostics}
         diagnostics={<Diagnostics status={wire.status} expected={host.EXPECTED_PROTOCOL} identity={run.identity} />}
-        phones={connectedNames(remoteStatus)}
+        // The desktop's chip for a connected phone (#344). A phone reads the
+        // same status through the bridge, where the chip would name itself.
+        phones={SURFACE.compactChrome ? [] : connectedNames(remoteStatus)}
       />
     </div>
     </TooltipProvider>

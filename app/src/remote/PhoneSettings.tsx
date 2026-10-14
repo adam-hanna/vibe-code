@@ -26,6 +26,25 @@ import { local } from '../transport';
  * Nothing is drawn for them: a switch that does nothing would be a promise this
  * build does not keep.
  */
+/**
+ * This phone's id, asked of its own Rust: the id, the phone's sentence for why
+ * it has none, or null while the answer is on its way.
+ */
+export function usePhoneIdentity(): { id: string } | { why: string } | null {
+  const [identity, setIdentity] = useState<{ id: string } | { why: string } | null>(null);
+  useEffect(() => {
+    let live = true;
+    local<{ endpointId: string }>('phone_identity').then(
+      (r) => live && setIdentity({ id: r.endpointId }),
+      (err: unknown) => live && setIdentity({ why: err instanceof Error ? err.message : String(err) }),
+    );
+    return () => {
+      live = false;
+    };
+  }, []);
+  return identity;
+}
+
 export function PhoneSettings({
   scale,
   onScale,
@@ -41,18 +60,7 @@ export function PhoneSettings({
   /** The desktop's build, off its status, or null before one was read. */
   build: Build | null;
 }) {
-  const [identity, setIdentity] = useState<{ id: string } | { why: string } | null>(null);
-
-  useEffect(() => {
-    let live = true;
-    local<{ endpointId: string }>('phone_identity').then(
-      (r) => live && setIdentity({ id: r.endpointId }),
-      (err: unknown) => live && setIdentity({ why: err instanceof Error ? err.message : String(err) }),
-    );
-    return () => {
-      live = false;
-    };
-  }, []);
+  const identity = usePhoneIdentity();
 
   return (
     <div className={`${PANE} gap-6 px-4`}>
