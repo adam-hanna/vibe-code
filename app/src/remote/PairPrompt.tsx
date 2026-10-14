@@ -10,8 +10,8 @@ import * as remote from './remote';
  *
  * Mounted once in the cockpit, so the question reaches somebody who is not
  * looking at Settings. It draws only on `remote://pair-request`, which nothing
- * sends until the endpoint exists (#342) - so with the preview off, or before
- * that lands, it is never on screen.
+ * sends until the endpoint exists (#342) - so with remote access off it is
+ * never on screen.
  *
  * **Escape declines and a click outside does nothing**, which is `Modal`'s own
  * contract: a yes here admits a device to everything the window can do, so the

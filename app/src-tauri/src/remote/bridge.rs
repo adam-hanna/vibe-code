@@ -66,8 +66,31 @@ pub(crate) type Answer<'a> = Pin<Box<dyn Future<Output = Result<Value, String>> 
 /// Where an allowed call is run. The app's is [`TauriCommands`]; the tests
 /// record what reached it.
 pub(crate) trait Commands: Send + Sync + 'static {
-    fn call(&self, command: &str, args: Value) -> Answer<'_>;
+    fn call(&self, command: &str, args: Value, written: Written) -> Answer<'_>;
 }
+
+/// Resolves once a call's `Return` has reached the phone (#344): the peer
+/// acknowledged every byte of the control stream, the connection closed, or
+/// [`WRITTEN_CEILING`] passed. A command that is about to close this very
+/// connection - a phone turning remote access off - holds it and stops the
+/// endpoint only after it resolves, so the phone hears its answer first.
+///
+/// **Holding it ends the control stream** once the answer is written, because
+/// nothing more will be sent on a connection about to close. Every other call
+/// drops it, and the writer then carries on as before.
+pub(crate) struct Written(pub(crate) tokio::sync::oneshot::Receiver<()>);
+
+impl Written {
+    pub(crate) async fn wait(self) {
+        let _ = self.0.await;
+    }
+}
+
+/// The longest a closing command waits for its answer to be acknowledged. Not
+/// a measurement: iroh documents about 3s as how long closing takes on a poor
+/// connection, and a phone that has stopped answering must not keep remote
+/// access from turning off.
+const WRITTEN_CEILING: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// How a phone that unpairs itself is removed.
 pub(crate) trait Unpairer: Send + Sync + 'static {
@@ -208,9 +231,10 @@ async fn serve(inner: &Inner, conn: Connection) {
                     let commands = inner.commands.clone();
                     let tx = tx.clone();
                     let name = hello.phone_name.clone();
+                    let (reached, written) = tokio::sync::oneshot::channel();
                     tasks.spawn(async move {
-                        let outcome = answer(&*commands, &call.command, call.args, &name).await;
-                        let _ = tx.send(Outgoing::Return(Return { call: call.call, outcome }));
+                        let outcome = answer(&*commands, &call.command, call.args, &name, Written(written)).await;
+                        let _ = tx.send(Outgoing::Return(Return { call: call.call, outcome }, Some(reached)));
                     });
                 }
                 // The connection's own id, which the handshake authenticated;
@@ -247,16 +271,33 @@ async fn serve(inner: &Inner, conn: Connection) {
 /// taking calls whose answers could never arrive.
 async fn writer(conn: Connection, mut send: SendStream, mut rx: UnboundedReceiver<Outgoing>) {
     while let Some(out) = rx.recv().await {
+        let mut waiting = None;
         let message = match out {
             Outgoing::Event { name, payload } => match RawValue::from_string(payload.to_string()) {
                 Ok(payload) => ToPhone::Event(Event { name: name.into(), payload }),
                 Err(_) => continue,
             },
-            Outgoing::Return(ret) => ToPhone::Return(ret),
+            Outgoing::Return(ret, reached) => {
+                waiting = reached.filter(|r| !r.is_closed());
+                ToPhone::Return(ret)
+            }
         };
         if let Err(why) = write_message(&mut send, &message).await {
             crate::applog::app(&format!("remote access: phone {}: {why}", conn.remote_id()));
             conn.close(VarInt::from_u32(0), b"the control stream could not be written");
+            break;
+        }
+        // Somebody is about to close this connection and wants the phone to
+        // have its answer first: finish the stream and wait for the peer to
+        // acknowledge it, bounded.
+        if let Some(reached) = waiting.take() {
+            let _ = send.finish();
+            tokio::select! {
+                _ = send.stopped() => {}
+                _ = conn.closed() => {}
+                () = tokio::time::sleep(WRITTEN_CEILING) => {}
+            }
+            let _ = reached.send(());
             break;
         }
     }
@@ -267,11 +308,11 @@ fn refusal(command: &str) -> String {
     format!("{} is not a command a phone may call on this desktop", cut(command, 80))
 }
 
-async fn answer(commands: &dyn Commands, command: &str, args: Value, phone: &str) -> Outcome {
+async fn answer(commands: &dyn Commands, command: &str, args: Value, phone: &str, written: Written) -> Outcome {
     if !ALLOWED_COMMANDS.contains(&command) {
         return Outcome::Err(refusal(command));
     }
-    match commands.call(command, stamp(command, args, phone)).await {
+    match commands.call(command, stamp(command, args, phone), written).await {
         Ok(value) => Outcome::Ok(value),
         Err(why) => Outcome::Err(why),
     }
@@ -316,10 +357,10 @@ pub(crate) fn stamp(command: &str, mut args: Value, phone: &str) -> Value {
 pub(crate) struct TauriCommands(pub(crate) AppHandle);
 
 impl Commands for TauriCommands {
-    fn call(&self, command: &str, args: Value) -> Answer<'_> {
+    fn call(&self, command: &str, args: Value, written: Written) -> Answer<'_> {
         let app = self.0.clone();
         let command = command.to_string();
-        Box::pin(async move { run(app, &command, args).await })
+        Box::pin(async move { run(app, &command, args, written).await })
     }
 }
 
@@ -392,13 +433,18 @@ struct Id {
     id: String,
 }
 
+#[derive(Deserialize)]
+struct SetArgs {
+    patch: super::settings::Patch,
+}
+
 /// A phone's `page` opens nothing on the desktop: the phone opens the release
 /// page itself, from its own copy of the constant, on `openOnPhone`.
 fn open_on_phone() -> Result<(), String> {
     Ok(())
 }
 
-async fn run(app: AppHandle, command: &str, args: Value) -> Result<Value, String> {
+async fn run(app: AppHandle, command: &str, args: Value, written: Written) -> Result<Value, String> {
     use crate::host::HostProcess;
     use super::Remote;
     match command {
@@ -468,6 +514,13 @@ async fn run(app: AppHandle, command: &str, args: Value) -> Result<Value, String
             let a: Id = args_of(command, args)?;
             blocking(move || super::revoke_phone(&app, &app.state::<Remote>(), &a.id)).await
         }
+        // The one command that may close this very connection, so the one that
+        // holds `written` (#344): a stop waits until this answer has arrived.
+        "remote_set" => {
+            let a: SetArgs = args_of(command, args)?;
+            let remote = app.state::<Remote>();
+            value_of(super::set_remote_from_phone(&app, &remote, a.patch, written).await?)
+        }
         // Unreachable from a phone, which `answer` has already refused; said
         // rather than panicked, in case the allowed list grows without an arm.
         other => Err(refusal(other)),
@@ -499,6 +552,9 @@ mod tests {
         seen: Mutex<Vec<(String, Value)>>,
         release: Notify,
         resumed: AtomicBool,
+        /// Set by a test: `remote_set` closes these connections once written.
+        closing: Mutex<Option<(Live, EndpointId)>>,
+        order: Arc<Mutex<Vec<&'static str>>>,
     }
 
     impl Fake {
@@ -508,10 +564,24 @@ mod tests {
     }
 
     impl Commands for Fake {
-        fn call(&self, command: &str, args: Value) -> Answer<'_> {
+        fn call(&self, command: &str, args: Value, written: Written) -> Answer<'_> {
             let command = command.to_string();
             Box::pin(async move {
                 self.seen.lock().unwrap().push((command.clone(), args.clone()));
+                // What `set_remote_from_phone` does when the patch turns remote
+                // access off: answer now, close the connection once the
+                // answer has reached the phone.
+                if command == "remote_set" {
+                    let closing = self.closing.lock().unwrap().clone();
+                    if let Some((live, id)) = closing {
+                        let order = self.order.clone();
+                        tokio::spawn(async move {
+                            written.wait().await;
+                            order.lock().unwrap().push("written");
+                            live.close(&id);
+                        });
+                    }
+                }
                 if command == "pilot_models" {
                     self.release.notified().await;
                     self.resumed.store(true, Ordering::SeqCst);
@@ -540,8 +610,10 @@ mod tests {
         store
             .add(Phone { id: phone_key.public().to_string(), name: PHONE_NAME.into(), paired_at: 0, last_seen: None })
             .unwrap();
-        let live = Live::default();
         let hub = Arc::new(Hub::default());
+        // Announced through the hub, as the app's `start` wires it (#344).
+        let announce = hub.clone();
+        let live = Live::notifying(move || announce.event("remote://connections", Arc::from("null"), |_| {}));
         let fake = Arc::new(Fake::default());
         let bridge = Bridge::new(
             fake.clone(),
@@ -860,6 +932,58 @@ mod tests {
     }
 
     /// The command names a `generate_handler!` list registers.
+    #[tokio::test]
+    async fn a_phone_turning_remote_access_off_reads_its_return_before_the_close() {
+        let w = world("bridge-off-written").await;
+        let (mut phone, _) = welcomed(&w).await;
+        *w.fake.closing.lock().unwrap() = Some((w.live.clone(), w.phone_key.public()));
+
+        phone.call(4, "remote_set", json!({ "patch": { "enabled": false } })).await;
+        let answer = phone.next().await;
+        assert_eq!(answer["type"], "return", "{answer}");
+        assert_eq!(answer["call"], 4);
+        // Only now does the desktop close it - once the answer was acknowledged.
+        let (code, _) = phone.closed_with().await;
+        assert_eq!(code, NOT_PAIRED as u64);
+        assert_eq!(*w.fake.order.lock().unwrap(), ["written"]);
+        w.desktop.stop().await;
+    }
+
+    #[tokio::test]
+    async fn a_call_that_closes_nothing_leaves_the_stream_open() {
+        let w = world("bridge-not-closing").await;
+        let (mut phone, _) = welcomed(&w).await;
+        // No `closing` set: the command drops its `Written`, as every command
+        // that does not close the connection does.
+        phone.call(1, "remote_set", json!({ "patch": { "keepAwake": true } })).await;
+        assert_eq!(phone.next().await["call"], 1);
+        phone.call(2, "host_status", json!({})).await;
+        assert_eq!(phone.next().await["call"], 2, "the stream carries on");
+        w.desktop.stop().await;
+    }
+
+    #[tokio::test]
+    async fn a_phone_already_joined_hears_a_second_phone_connect() {
+        let w = world("bridge-connections").await;
+        let second = key();
+        w.store
+            .add(Phone { id: second.public().to_string(), name: "Tablet".into(), paired_at: 0, last_seen: None })
+            .unwrap();
+        let (mut first, _) = welcomed(&w).await;
+
+        let p = phone(second).await;
+        let conn = p.connect(addr_of(&w.desktop), REMOTE_ALPN).await.expect("the second phone connects");
+        let event = first.next().await;
+        assert_eq!(event["type"], "event", "{event}");
+        assert_eq!(event["name"], "remote://connections");
+        assert_eq!(event["payload"], Value::Null, "it carries nothing");
+
+        conn.close(0u32.into(), b"bye");
+        let event = first.next().await;
+        assert_eq!(event["name"], "remote://connections", "and again when it goes");
+        w.desktop.stop().await;
+    }
+
     fn registered_in(lib: &str) -> Vec<String> {
         let start = lib.find("generate_handler![").expect("lib.rs registers commands") + "generate_handler![".len();
         let body = &lib[start..start + lib[start..].find(']').expect("a closed list")];
@@ -902,10 +1026,12 @@ mod tests {
     /// decided about - which is what a real new command looks like to it.
     #[test]
     fn a_new_command_with_no_decision_fails_by_name() {
-        let lib = include_str!("../lib.rs").replacen("remote_revoke\n", "remote_revoke,\n            remote_set\n", 1);
+        // `remote_set` was this example until #344 decided it; the name is now
+        // one no command has.
+        let lib = include_str!("../lib.rs").replacen("            remote_set\n", "            remote_set,\n            remote_teleport\n", 1);
         let found = disagreements(&registered_in(&lib));
         assert_eq!(found.len(), 1, "{found:?}");
-        assert!(found[0].starts_with("remote_set is registered in generate_handler! with no remote decision"));
+        assert!(found[0].starts_with("remote_teleport is registered in generate_handler! with no remote decision"));
     }
 
     #[test]

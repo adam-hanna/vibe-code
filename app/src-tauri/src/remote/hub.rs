@@ -42,10 +42,12 @@ use crate::host::{Ended, Relayed, EXIT_EVENT, FRAME_EVENT, SERVICE};
 
 /// What a phone's one writer sends, in the order it was queued: an event the
 /// window was also sent - its name and the very bytes - or a call's answer.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) enum Outgoing {
     Event { name: &'static str, payload: Arc<str> },
-    Return(Return),
+    /// A call's answer, and who is waiting to hear it reached the phone - set
+    /// only on a call that will close this connection once it has (#344).
+    Return(Return, Option<tokio::sync::oneshot::Sender<()>>),
 }
 
 #[derive(Default)]
@@ -178,7 +180,7 @@ mod tests {
         while let Ok(o) = rx.try_recv() {
             match o {
                 Outgoing::Event { name, payload } => got.push((name, payload.to_string())),
-                Outgoing::Return(_) => panic!("the hub queues events only"),
+                Outgoing::Return(..) => panic!("the hub queues events only"),
             }
         }
         got

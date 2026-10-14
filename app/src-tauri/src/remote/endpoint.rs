@@ -121,12 +121,45 @@ impl EndpointHooks for PairedOnly {
 /// Weak handles: a strong one would keep a connection open after the bridge had
 /// finished with it, and iroh closes a connection when its last strong handle
 /// goes.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct Live {
     live: Arc<Mutex<HashMap<EndpointId, Vec<WeakConnectionHandle>>>>,
+    /// Told once when a paired phone connects and once when it goes (#344).
+    /// The app's emits `remote://connections`, which carries nothing: a client
+    /// re-reads `remote_status`, so there is one source for who is connected.
+    notify: Option<Arc<dyn Fn() + Send + Sync>>,
+}
+
+impl fmt::Debug for Live {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Live").field("notifies", &self.notify.is_some()).finish_non_exhaustive()
+    }
+}
+
+/// Held for as long as a paired phone's connection is being served, and says
+/// so when it goes - however that is: the phone closing, a revoke, an Unpair,
+/// or the endpoint stopping, which aborts the handler and drops this with it.
+/// So it is the one place a disconnect is announced, and it is announced once.
+struct Announced(Live);
+
+impl Drop for Announced {
+    fn drop(&mut self) {
+        self.0.announce();
+    }
 }
 
 impl Live {
+    /// A set that announces each paired phone's connect and disconnect.
+    pub fn notifying(notify: impl Fn() + Send + Sync + 'static) -> Self {
+        Live { live: Arc::default(), notify: Some(Arc::new(notify)) }
+    }
+
+    fn announce(&self) {
+        if let Some(notify) = &self.notify {
+            notify();
+        }
+    }
+
     fn add(&self, conn: &Connection) {
         let mut live = self.live.lock().unwrap_or_else(|p| p.into_inner());
         let handles = live.entry(conn.remote_id()).or_default();
@@ -204,6 +237,11 @@ impl<B: ProtocolHandler> ProtocolHandler for Remote<B> {
             conn.close(VarInt::from_u32(NOT_PAIRED), b"not paired");
             return Ok(());
         }
+        // Announced only once the gate has admitted it: an unpaired dial is not a
+        // phone connecting. No strong handle is kept, so the weak-handle rule
+        // above still holds.
+        self.connections.announce();
+        let _left = Announced(self.connections.clone());
         self.bridge.accept(conn).await
     }
 }
@@ -374,9 +412,8 @@ impl RemoteEndpoint {
     }
 
     /// Close every connection and the endpoint, which also stops publishing.
-    /// Nothing calls it yet but the tests: the switch that turns remote access
-    /// off is #344's, and until then an app that exits takes the socket with it.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// The remote-access switch turning off (#344) and a relay change are the
+    /// callers; each disconnect is announced by the connection's own guard.
     pub async fn stop(self) {
         let _ = self.router.shutdown().await;
     }
@@ -653,6 +690,76 @@ pub(crate) mod tests {
         d.stop().await;
     }
 
+    /// A desktop whose connection set counts its announcements (#344).
+    async fn announcing(gate: Arc<dyn Gate>) -> (RemoteEndpoint, Arc<AtomicUsize>) {
+        let announced = Arc::new(AtomicUsize::new(0));
+        let count = announced.clone();
+        let live = Live::notifying(move || {
+            count.fetch_add(1, Ordering::SeqCst);
+        });
+        let config = Config { key: key(), reach: Reach::Loopback };
+        let d = RemoteEndpoint::start_with(config, gate, live, Count::default(), Count::default())
+            .await
+            .expect("a loopback endpoint starts");
+        (d, announced)
+    }
+
+    async fn until_count(count: &AtomicUsize, n: usize) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while count.load(Ordering::SeqCst) < n {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("only {} announcements, waiting for {n}", count.load(Ordering::SeqCst)));
+    }
+
+    #[tokio::test]
+    async fn a_connect_and_a_disconnect_are_each_announced_once() {
+        let phone_key = key();
+        let (d, announced) = announcing(List::with(&[phone_key.public()])).await;
+        let p = phone(phone_key).await;
+
+        let conn = p.connect(addr_of(&d), REMOTE_ALPN).await.expect("connects");
+        until_count(&announced, 1).await;
+        settle().await;
+        assert_eq!(announced.load(Ordering::SeqCst), 1, "a connect is one announcement");
+
+        conn.close(0u32.into(), b"bye");
+        until_count(&announced, 2).await;
+        settle().await;
+        assert_eq!(announced.load(Ordering::SeqCst), 2, "and a disconnect one more");
+        d.stop().await;
+        assert_eq!(announced.load(Ordering::SeqCst), 2, "stopping with nobody connected says nothing");
+    }
+
+    #[tokio::test]
+    async fn stopping_with_a_phone_connected_announces_its_disconnect_once() {
+        let phone_key = key();
+        let (d, announced) = announcing(List::with(&[phone_key.public()])).await;
+        let p = phone(phone_key).await;
+        let conn = p.connect(addr_of(&d), REMOTE_ALPN).await.expect("connects");
+        until_count(&announced, 1).await;
+
+        d.stop().await;
+        tokio::time::timeout(Duration::from_secs(10), conn.closed()).await.expect("the phone is dropped");
+        settle().await;
+        assert_eq!(announced.load(Ordering::SeqCst), 2, "the guard is the only source");
+    }
+
+    #[tokio::test]
+    async fn an_unpaired_dial_announces_nothing() {
+        let (d, announced) = announcing(List::with(&[])).await;
+        let p = phone(key()).await;
+        assert_eq!(closing_code(&p, addr_of(&d), REMOTE_ALPN).await, Some(NOT_PAIRED as u64));
+        // Nor does a pairing connection: it is not a paired phone connecting.
+        let pairing = p.connect(addr_of(&d), PAIR_ALPN).await.expect("pairing is reachable");
+        settle().await;
+        pairing.close(0u32.into(), b"done");
+        settle().await;
+        assert_eq!(announced.load(Ordering::SeqCst), 0);
+        d.stop().await;
+    }
     #[test]
     fn the_wire_constants_are_pinned() {
         // A phone reads these from a desktop of another version. Changing one

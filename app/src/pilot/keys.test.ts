@@ -90,6 +90,11 @@ describe('the webview can store a key and can never read one', () => {
       'remote_pair_answer',
       'remote_pair_begin',
       'remote_revoke',
+      // Case 2 (#344): a fifth remote command, on purpose - the switch, start
+      // at login, keep awake and the relay, written to `remote.json`, a file
+      // Rust owns. It takes four settings and answers with the status; none is
+      // a key, and the login item and the sleep inhibitor are driven from Rust.
+      'remote_set',
       'remote_status',
       // Case 2 (#299): two commands, on purpose - the updater, driven from
       // Rust so the window gets no network access and no updater permission.
@@ -100,7 +105,7 @@ describe('the webview can store a key and can never read one', () => {
     ]);
   });
 
-  test('a plugin is a capability surface too, and there are three', () => {
+  test('a plugin is a capability surface too, and there are four', () => {
     // #189 added the first plugin whose commands the window actually calls, and
     // a plugin command does not appear in `generate_handler!` - so the list
     // above stopped being the complete answer to "what can the page invoke" on
@@ -113,7 +118,11 @@ describe('the webview can store a key and can never read one', () => {
     // `update_check` and `update_install` can drive it from Rust; the window is
     // granted none of its permissions, which the capability test below still
     // pins, so its own commands are out of the page's reach.
-    expect(plugins.sort()).toEqual(['dialog', 'single_instance', 'updater']);
+    //
+    // Case 2 (#344): the fourth, on purpose. Start at login is driven from Rust
+    // by `remote_set` through `autostart.rs`'s trait; the window is granted no
+    // autostart permission, which the capability test below pins.
+    expect(plugins.sort()).toEqual(['autostart', 'dialog', 'single_instance', 'updater']);
   });
 
   test('the dialog plugin is granted one permission by name, not its default set', () => {
@@ -290,15 +299,19 @@ const production = (source: string): string => {
 };
 
 describe('the device key is a third keychain entry no command reaches (#341)', () => {
-  test('the remote commands are exactly four, and none returns the identity', () => {
+  test('the remote commands are exactly five, and none returns the identity', () => {
     // The same guard as the one over `keys.rs`, for the module that holds the
     // device key. A `remote_identity` or a status that grew a `secretKey` would
     // be the window reading the one secret that makes a phone trust a desktop.
-    const commands = [...remoteMod.matchAll(/#\[tauri::command\]\s*pub fn (\w+)\(([\s\S]*?)\{/g)];
+    // `async` since #344, because `remote_set` answers once the endpoint has
+    // settled; the guard reads either.
+    const commands = [...remoteMod.matchAll(/#\[tauri::command\]\s*pub (?:async )?fn (\w+)\(([\s\S]*?)\{/g)];
     expect(commands.map((m) => m[1]).sort()).toEqual([
       'remote_pair_answer',
       'remote_pair_begin',
       'remote_revoke',
+      // Case 2 (#344): the settings. It reads no key either.
+      'remote_set',
       'remote_status',
     ]);
     for (const [, name, signature] of commands) {
@@ -333,7 +346,20 @@ describe('the device key is a third keychain entry no command reaches (#341)', (
       remoteWindow.indexOf('}', remoteWindow.indexOf('export interface RemoteStatus {')),
     );
     const fields = [...shape.matchAll(/^ {2}(\w+):/gm)].map((m) => m[1]);
-    expect(fields.sort()).toEqual(['endpoint', 'endpointId', 'identityUnreadable', 'phones', 'phonesUnreadable', 'preview']);
+    // Case 2 (#344): `preview` went with the env var, and the settings, why
+    // they could not be read, the login item and keep awake came in. Still no
+    // field a secret could live in.
+    expect(fields.sort()).toEqual([
+      'awake',
+      'endpoint',
+      'endpointId',
+      'identityUnreadable',
+      'phones',
+      'phonesUnreadable',
+      'settings',
+      'settingsUnreadable',
+      'startAtLogin',
+    ]);
     expect(fields.filter((f) => /secret|key/i.test(f ?? ''))).toEqual([]);
   });
 });

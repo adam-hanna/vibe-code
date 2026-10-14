@@ -2229,6 +2229,43 @@ for every phone and emits it to the window **under one lock**. Four things trave
   after the connection was closed is dropped. A control stream that cannot be written closes
   the connection.
 
+**The switch is `remote.json`, and `remote_set` is the one command that changes it** (#344).
+The file sits beside the paired list (`remote/settings.rs`): `enabled`, `startAtLogin`,
+`keepAwake` and `relay`. Rust reads it in `setup`, before any window or host exists. A missing
+file is the defaults. A file that cannot be read is **off, with the sentence**, and is never
+overwritten, which is `store.rs`'s rule. No key of it is in vibe's config. Six things travel
+with it:
+
+- **One reconcile, under one async lock.** `reconcile_locked` makes the endpoint match the
+  settings. It stops an old endpoint **completely** before it binds a new one, so a relay
+  change never leaves two. Off turns `NoKey` and `Failed` into `Off` as well as stopping an
+  endpoint that is up. The window's `remote_set` answers once that has happened.
+- **A phone's closing change answers first.** Turning access off from a phone closes that
+  phone's own connection. So the phone's call takes the lock before it answers. It answers
+  with the decided state. The stop then waits on `Written` until the peer has acknowledged
+  the answer, or the connection closed, or 3s passed. Nothing else can stop or start the
+  endpoint in between.
+- **The connection's own guard is the only source of `remote://connections`.** `Announced`
+  is held across the bridge for a paired phone, so a connect and a disconnect are each one
+  event, however the connection ends. Nothing emits after a stop. The event carries
+  nothing. A client reads `remote_status` once after it joins and again on each event. No
+  timer polls.
+- **Start at login is a plugin behind a trait.** `autostart.rs` holds the plugin behind a
+  trait, and no test reaches the plugin. The plugin launches the app with `--autostart`.
+  `main` is `visible: false`, and `shows_window(argv)` is the one rule `setup` and the
+  single-instance callback apply. Without the argument the window is shown. The switch
+  shows what the OS says, not what the file says. The plugin is pinned to 2.5, because 2.6
+  needs tauri 2.12. 2.5.1 already points the Linux entry at `$APPIMAGE`.
+- **Keep awake is decided under the host lock and done on its own thread.**
+  `HostProcess::decide_awake` runs where `spawn` inserts and where `reap` and `stop` remove.
+  It sends `Take` or `Release` to `awake.rs`'s thread, which owns the `keepawake` guard. It
+  holds idle and system sleep, never the display. A stalled D-Bus never blocks a spawn, and
+  a failed take is a log line and a sentence. It never stops a run.
+- **Attribution in the window is gates only, and only a phone.** `reduce` folds
+  `gate_released`/`gate_stopped`'s `origin` into `Run.decidedFrom`. The footer then says
+  *Continued from* or *Stopped from* the phone. `remote/origin.ts` is the app's one spelling
+  of `phone:`, and a test reads it out of `bridge.rs`.
+
 **The phone app is `app/mobile/`, and it is a client only** (#345). Its own Tauri crate
 and `package.json`, built from the same `app/src`; no Node host, no agent CLI, nothing
 that runs a turn. Four things carry it:
@@ -2385,6 +2422,9 @@ app/src-tauri/src/update.rs  the other: checking for a newer app, and installing
 app/src-tauri/src/remote/    a phone dialling this desktop: the device key, pairing, the paired list, the iroh endpoint
 app/src-tauri/src/remote/bridge.rs  a paired phone's control stream: its calls, run through the window's own command bodies
 app/src-tauri/src/remote/hub.rs     the one seam every event leaves through, to the window and the phones, and the live-run buffer
+app/src-tauri/src/remote/settings.rs  remote.json: the switch, start at login, keep awake and the relay - Rust's file, never vibe's config
+app/src-tauri/src/autostart.rs       start at login behind a trait, and whether a launch shows the window
+app/src-tauri/src/awake.rs           keep awake: decided under the host lock, the OS calls on a thread of its own
 app/remote/          what the phone and the desktop share: the pairing wire, the control wire, the framing, the ALPNs, the key rules, how to reach n0 - a path dependency of both, tested with `-p vibe-remote`
 app/mobile/          the phone app: its Tauri crate, the mock desktop and its recorder, the launch checks
 app/src/transport.ts where the window's commands go - Tauri on the desktop, the paired desktop on a phone
@@ -3330,9 +3370,9 @@ repo" means.
 in Rust: the pilot's vendor adapters below, and the updater (`src-tauri/src/update.rs`, #299),
 which fetches one public file and, when a person asks, the bundle it names. A third piece is
 coming, and it is the first **inbound** one: the iroh endpoint a phone dials
-(`src-tauri/src/remote/endpoint.rs`, #342). It starts only under `VIBE_REMOTE_PREVIEW=1`,
-the stand-in for #344's switch, and only once a device key exists; with the flag unset nothing
-binds and nothing is published. Its rules are in the phone section above. The core keeps
+(`src-tauri/src/remote/endpoint.rs`, #342). It starts only while the switch in `remote.json`
+is on (#344), and only once a device key exists; with it off, or with a file that cannot be
+read, nothing binds and nothing is published. Its rules are in the phone section above. The core keeps
 *"every external call is a child process"* exactly, and the published package gains no HTTP
 dependency and no credential handling. If this ever moves into `src/` "because the CLI might
 want it too", that sentence stops being true of everything shipped — and it is a sentence

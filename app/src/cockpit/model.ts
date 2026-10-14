@@ -1,5 +1,6 @@
 import type { ArchiveStats, Frame, Level, Narration } from '../host';
 import { tokens as fmtTokens } from './format';
+import { phoneOf } from '../remote/origin';
 
 /**
  * The run, assembled from frames and from nothing else (#159).
@@ -697,6 +698,15 @@ export interface Run {
    */
   lastGate: string | null;
   output: readonly OutputLine[];
+  /**
+   * Who answered the last gate, when the frame said it was a phone (#344):
+   * `gate_released` and `gate_stopped` carry the answer's `origin`, and the
+   * bridge writes `phone:<name>` on every frame a phone sends. **Only a phone
+   * is drawn.** The window's own answers carry no origin, and `gates` (a
+   * matrix stop) and `pilot` are not a person on another device - calling any
+   * of them *from this desktop* would be inventing it.
+   */
+  decidedFrom: { how: 'continued' | 'stopped'; boundary: string | null; phone: string } | null;
   /** Set when the run ended, with how. Null while it is going. */
   ended: { how: 'approved' | 'stopped'; detail: string } | null;
   /**
@@ -840,6 +850,7 @@ export function emptyRun(): Run {
     running: null,
     gate: null,
     lastGate: null,
+    decidedFrom: null,
     output: [],
     ended: null,
     reason: null,
@@ -924,6 +935,12 @@ function readResumedFrom(v: unknown): ResumedFrom | null {
   // At least one thing has to have been legible for this to be history rather
   // than a payload nobody could read.
   return Object.values(from).some((x) => x !== null) ? from : null;
+}
+
+/** A gate's answer attributed to a phone, from what the frame carried; null otherwise. */
+function decidedFrom(how: 'continued' | 'stopped', data: Record<string, unknown>): Run['decidedFrom'] {
+  const phone = phoneOf(data['origin']);
+  return phone === null ? null : { how, boundary: str(data['boundary']), phone };
 }
 
 function str(v: unknown): string | null {
@@ -1973,12 +1990,13 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
       }
 
       case 'gate_released':
-        return { ...next, gate: null };
+        return { ...next, gate: null, decidedFrom: decidedFrom('continued', data) };
 
       case 'gate_stopped':
         return {
           ...endRunning(next, at),
           gate: null,
+          decidedFrom: decidedFrom('stopped', data),
           ended: { how: 'stopped', detail: str(data['reason']) ?? frame.message },
         };
 
