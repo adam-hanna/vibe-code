@@ -114,7 +114,7 @@ jobs:
         run: |
           npx tauri ios init --ci
           npx tauri ios build --target aarch64-sim --debug --features mock-desktop --ci
-          find src-tauri/gen/apple/build -name '*.app' -maxdepth 6 | tee /tmp/apps.txt
+          find "$PWD/src-tauri/gen/apple/build" -name '*.app' -maxdepth 6 | tee /tmp/apps.txt
       - name: Launch on a simulator
         run: app/mobile/scripts/launch-ios.sh "$(grep -i sim /tmp/apps.txt | head -1 || head -1 /tmp/apps.txt)" launch
       - if: always()
