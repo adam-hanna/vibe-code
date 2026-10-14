@@ -41,6 +41,8 @@
 //! decides what a usable repository is, exactly as it does today.
 
 mod applog;
+mod autostart;
+mod awake;
 mod host;
 mod keys;
 mod pilot;
@@ -51,7 +53,8 @@ mod update;
 
 use host::{app_quit, host_send, host_start, host_status, launch, HostProcess};
 use keys::{key_clear, key_set, key_status};
-use remote::{remote_pair_answer, remote_pair_begin, remote_revoke, remote_status, Remote};
+use autostart::{shows_window, PluginAutostart, AUTOSTART_ARG};
+use remote::{remote_pair_answer, remote_pair_begin, remote_revoke, remote_set, remote_status, Remote};
 use pilot::models::pilot_models;
 use pilot::{pilot_cancel, pilot_send, Pilot};
 use tauri::menu::{Menu, MenuItem};
@@ -88,8 +91,9 @@ fn tray_quit(app: &tauri::AppHandle) {
 
 /// Bring the window back, creating nothing and assuming nothing.
 ///
-/// Used by the tray, by a click on the tray icon, and by a second launch. All
-/// three mean the same thing and none of them should behave differently.
+/// Used by the tray, by a click on the tray icon, by a second launch and by
+/// `setup` (#344) - the last two unless it was a launch at login. All mean the
+/// same thing and none of them should behave differently.
 fn show(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
@@ -104,8 +108,13 @@ pub fn run() {
         // First, and it has to be: two windows driving two hosts against one run
         // directory is a way to corrupt a run, and `src/lock.ts` is written
         // expecting one process. A second launch raises the first window instead.
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            show(app);
+        //
+        // A launch at login never raises the window of a copy already running:
+        // it opens to the tray, and so does the second copy it becomes (#344).
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            if shows_window(&argv) {
+                show(app);
+            }
         }))
         // The repository field's directory chooser (#189), and the only plugin
         // besides single-instance that the window can reach. A plugin command is
@@ -117,6 +126,12 @@ pub fn run() {
         // call the plugin's own commands, has no network access, and never names
         // a URL. `update.rs` says what it fetches and when.
         .plugin(tauri_plugin_updater::Builder::new().build())
+        // Start at login (#344). Registered so `remote_set` can drive it from
+        // Rust through `autostart.rs`'s trait; the window is granted no
+        // autostart permission, so it cannot reach the plugin's own commands.
+        // The argument is fixed here, and it is what opens a launch at login to
+        // the tray. On macOS it is a LaunchAgent, the plugin's default.
+        .plugin(tauri_plugin_autostart::Builder::new().args([AUTOSTART_ARG]).app_name("Vibe").build())
         .manage(HostProcess::default())
         .manage(Pilot::default())
         .manage(update::Pending::default())
@@ -151,7 +166,7 @@ pub fn run() {
             // endpoint is config or `VIBE_UPDATE_ENDPOINT`, the page a constant.
             update_check,
             update_install,
-            // Remote access (#341): the paired-phones list, a pairing code to
+            // Remote access (#341, #344): the paired-phones list, a pairing code to
             // show, the answer to *Allow this phone?*, and revoking one. None
             // of them reads, returns or deletes the device key - status names
             // only its public id - and there is deliberately no command that
@@ -159,7 +174,11 @@ pub fn run() {
             remote_status,
             remote_pair_begin,
             remote_pair_answer,
-            remote_revoke
+            remote_revoke,
+            // The switch, start at login, keep awake and a relay of one's own
+            // (#344). It writes `remote.json`, a file Rust owns and the core
+            // never reads, and answers with the status that follows.
+            remote_set
         ])
         .setup(|app| {
             // Before `launch`, because the first thing worth keeping is why the
@@ -178,6 +197,14 @@ pub fn run() {
             // never silently pointing every check somewhere else (#299).
             update::log_override();
 
+            // Remote access's own settings (#344), before any host exists and
+            // before the window is shown, because a start at login opens to the
+            // tray and the endpoint has to start without a window. Keep awake is
+            // in the same file and holds from the first run host.
+            let remote_settings = remote::load_settings(app.handle());
+            remote::set_autostart(app.handle(), std::sync::Arc::new(PluginAutostart(app.handle().clone())));
+            app.state::<HostProcess>().set_keep_awake(remote_settings.keep_awake);
+
             // Before the tray, and before a window can ask. The service host IS
             // the app; a webview that fails to load should leave a running host
             // and a stderr line saying so, not a silent nothing.
@@ -186,9 +213,10 @@ pub fn run() {
             // and it can show the reason - which is far more use than an app that
             // refuses to start and explains itself to no one.
             let _ = launch(app.handle());
-            // The endpoint a phone dials (#342), only under the preview flag
-            // and only once a device key exists. It binds on Tauri's runtime
-            // and does not hold up the window.
+            // The endpoint a phone dials (#342), only while the switch in
+            // `remote.json` is on and only once a device key exists - with or
+            // without a window (#344). It binds on Tauri's runtime and does not
+            // hold up the window.
             remote::start(app.handle());
 
             let quit = MenuItem::with_id(app, "quit", "Quit Vibe", true, None::<&str>)?;
@@ -217,6 +245,13 @@ pub fn run() {
                     _ => {}
                 })
                 .build(app)?;
+
+            // Shown here rather than by the config, which keeps `main` hidden:
+            // a launch at login opens to the tray, and every other launch shows
+            // the window (#344).
+            if shows_window(&std::env::args().collect::<Vec<_>>()) {
+                show(app.handle());
+            }
 
             Ok(())
         })

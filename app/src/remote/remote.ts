@@ -1,8 +1,8 @@
 import { invoke, listen } from '../transport';
 
 /**
- * The window's end of remote access (#341): the four commands and the two
- * events, typed, and nothing decided here.
+ * The window's end of remote access (#341, #344): the five commands and the
+ * three events, typed, and nothing decided here.
  *
  * Every shape mirrors `src-tauri/src/remote/mod.rs`. **None carries the device
  * key or a pairing secret except `PairBegin.payload`**, which is the QR code's
@@ -19,7 +19,7 @@ export interface PhoneStatus {
   connected: boolean;
 }
 
-/** What `remote_status` answers. It never fails, so `preview` always arrives. */
+/** What `remote_status` and `remote_set` answer. It never fails. */
 export interface RemoteStatus {
   /** The device's public id, or null when no key has been made yet. */
   endpointId: string | null;
@@ -28,10 +28,39 @@ export interface RemoteStatus {
   phones: PhoneStatus[];
   /** Why the list could not be read, or null. Never drawn as an empty list. */
   phonesUnreadable: string | null;
-  /** Whether the section is drawn at all. */
-  preview: boolean;
-  /** The endpoint a phone dials. `off` whenever `preview` is false. */
+  /** `remote.json` as read - all off when it could not be. */
+  settings: RemoteSettings;
+  /** Why `remote.json` could not be read, which is why remote access is off. */
+  settingsUnreadable: string | null;
+  /** What the system says about start at login, which wins over the file. */
+  startAtLogin: LoginReport;
+  /** Whether keep awake holds the system awake now, and why it could not. */
+  awake: AwakeReport;
+  /** The endpoint a phone dials. `off` whenever the switch is. */
   endpoint: EndpointReport;
+}
+
+/** The four settings in `remote.json`, a file Rust owns (#344). */
+export interface RemoteSettings {
+  enabled: boolean;
+  startAtLogin: boolean;
+  keepAwake: boolean;
+  /** An https URL naming a relay of one's own, or null for n0's. */
+  relay: string | null;
+}
+
+/** A change to some of them. `relay: null` clears it; an absent field is left alone. */
+export type RemotePatch = Partial<RemoteSettings>;
+
+/** Start at login as the system reports it. `enabled` is null when it could not say. */
+export interface LoginReport {
+  enabled: boolean | null;
+  error: string | null;
+}
+
+export interface AwakeReport {
+  held: boolean;
+  error: string | null;
 }
 
 /** One home relay, as the endpoint sees it. `error` is iroh's own text. */
@@ -143,10 +172,86 @@ export function revoke(id: string): Promise<void> {
   return invoke('remote_revoke', { id });
 }
 
+/**
+ * Change the settings. Rust writes `remote.json`, applies it, and answers with
+ * the status that follows - from the window, once the endpoint has settled.
+ */
+export function set(patch: RemotePatch): Promise<RemoteStatus> {
+  return invoke<RemoteStatus>('remote_set', { patch });
+}
+
+/**
+ * `remote://connections`: a paired phone connected or went. It carries
+ * nothing - re-read `status()`, so there is one source for who is connected.
+ */
+export function onConnections(handler: () => void): Promise<() => void> {
+  return listen<null>('remote://connections', () => handler());
+}
+
 export function onPairRequest(handler: (request: PairRequest) => void): Promise<() => void> {
   return listen<PairRequest>('remote://pair-request', (event) => handler(event.payload));
 }
 
 export function onPairEnded(handler: (ended: PairEnded) => void): Promise<() => void> {
   return listen<PairEnded>('remote://pair-ended', (event) => handler(event.payload));
+}
+
+/** A subscription, as `onConnections` and its siblings return one. */
+export type Subscribe = (handler: () => void) => Promise<() => void>;
+
+/** Following `remote_status`: re-read it, or take an answer that carries it. */
+export interface Follower {
+  /** Read the status again. Any read started before this one is ignored. */
+  refresh(): void;
+  /** A status that came back from a change: drawn, then read once more. */
+  accept(next: RemoteStatus): void;
+  stop(): void;
+}
+
+/**
+ * Follow `remote_status` on pushed events (#344). Two rules, both about a
+ * snapshot that would otherwise go stale with no later event to correct it:
+ *
+ * - **Subscribe, then read.** The first read starts only once every listener
+ *   is installed, so an event between the read and the subscription is not
+ *   lost.
+ * - **Only the newest read is drawn.** Every read takes a number, and an
+ *   answer to any but the newest is dropped, so two events in quick succession
+ *   cannot resolve out of order and leave the older snapshot on screen. A
+ *   change's own answer is drawn and then read once more, because an event may
+ *   have arrived after Rust took it.
+ */
+export function followStatus(
+  onStatus: (status: RemoteStatus | null) => void,
+  events: Subscribe[],
+  read: () => Promise<RemoteStatus> = status,
+): Follower {
+  let latest = 0;
+  let live = true;
+  const refresh = () => {
+    const mine = ++latest;
+    const settle = (s: RemoteStatus | null) => {
+      if (live && mine === latest) onStatus(s);
+    };
+    // A rejection is the IPC itself failing - the command never refuses.
+    read().then(settle, () => settle(null));
+  };
+  const stops = events.map((on) => on(() => live && refresh()));
+  void Promise.all(stops).then(
+    () => live && refresh(),
+    () => live && refresh(),
+  );
+  return {
+    refresh,
+    accept(next) {
+      if (!live) return;
+      ++latest;
+      onStatus(next);
+      refresh();
+    },
+    stop() {
+      live = false;
+      for (const s of stops) void s.then((f) => f(), () => undefined);
+    },
+  };
 }

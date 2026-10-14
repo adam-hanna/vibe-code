@@ -167,6 +167,10 @@ pub const ALLOWED_COMMANDS: &[&str] = &[
     "remote_pair_begin",
     "remote_pair_answer",
     "remote_revoke",
+    // The switch, start at login, keep awake and the relay (#344). Allowed, so a
+    // phone can turn remote access off: full parity. Its answer reaches the
+    // phone before its own connection closes.
+    "remote_set",
 ];
 
 /// Desktop commands decided to be the desktop window's alone. None yet: a name
@@ -188,6 +192,11 @@ pub const REMOTE_EVENTS: &[&str] = &[
     "app://update-progress",
     "remote://pair-request",
     "remote://pair-ended",
+    // A paired phone connected or went (#344). It carries nothing: it means
+    // the `remote_status` a client holds is stale, so a client reads
+    // `remote_status` once after it joins and again on every one of these.
+    // Forwarded because a phone draws the connected clients too.
+    "remote://connections",
 ];
 
 /// The events that never leave the desktop: `app://quit-requested` is the

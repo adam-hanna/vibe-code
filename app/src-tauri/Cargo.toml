@@ -38,6 +38,19 @@ tauri-plugin-dialog = "2"
 # 2.12 because 2.13 requires tauri 2.12, which would move the whole tauri stack
 # (and the `@tauri-apps/api` it must match) for no reason of this change.
 tauri-plugin-updater = "~2.12"
+# Start at login (#344): a login item that launches the app with
+# `--autostart`, which opens it to the tray. Driven from Rust by `remote_set`
+# behind `autostart.rs`'s trait; the window is granted no autostart
+# permission. Pinned to 2.5 because 2.6 and later require tauri 2.12, which
+# would move the whole tauri stack for no reason of this change - the same
+# reason the updater is pinned. 2.5.1's setup already points the entry at
+# `$APPIMAGE` on Linux when the app runs as an AppImage.
+tauri-plugin-autostart = "~2.5"
+# Keep awake while a run host is alive (#344): the platform's sleep inhibitor -
+# logind/ScreenSaver over D-Bus on Linux, IOKit on macOS,
+# SetThreadExecutionState on Windows. Only ever called from `awake.rs`'s own
+# thread, because the Linux calls block.
+keepawake = "0.6.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

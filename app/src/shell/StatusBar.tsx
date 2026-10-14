@@ -28,6 +28,8 @@ import { cn } from '@/lib/utils';
  *   that has spent nothing has not spent zero, it has not been measured.
  * - **The build stamp**, because two builds of one version are otherwise
  *   identical (#201).
+ * - **The connected phones**, one chip each by the paired list's name, only
+ *   while one is connected (#344).
  *
  * Every phrase for an ending comes from `format.ts`'s closed map; a code this
  * build does not know shows as the number.
@@ -54,6 +56,7 @@ export function StatusBar({
   diagnosticsOpen,
   onDiagnostics,
   diagnostics,
+  phones,
 }: {
   /** A browser preview, with no host at all. */
   outside: boolean;
@@ -91,6 +94,11 @@ export function StatusBar({
   onDiagnostics: (open: boolean) => void;
   /** The popover's body. */
   diagnostics: ReactNode;
+  /**
+   * The paired phones connected now, by the paired list's names (#344). One
+   * chip each while any is connected, nothing otherwise.
+   */
+  phones: readonly string[];
 }) {
   const live = run.running !== null || run.preflight !== null;
   const how = run.completed === null ? null : ending(run.completed.exit);
@@ -118,6 +126,14 @@ export function StatusBar({
           protocol {protocol} · expected {expected}
         </Badge>
       )}
+
+      {/* A phone that can do everything this window can is a fact worth having
+          in sight while it is true (#344). */}
+      {phones.map((name) => (
+        <Badge key={name} variant="quiet" title={`${name} is connected to this desktop`}>
+          {name}
+        </Badge>
+      ))}
 
       {project !== null && <span className="truncate text-tertiary">{project}</span>}
 

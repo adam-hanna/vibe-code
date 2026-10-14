@@ -1,18 +1,64 @@
-import type { PairRequest, PhoneStatus, QrMatrix, RemoteStatus } from './remote';
+import type { PairRequest, PathKind, PhoneStatus, QrMatrix, RemoteStatus } from './remote';
 
 /**
  * What the window decides about remote access, and nothing it could get wrong
- * (#341). Pure, for `model.ts`'s reason: the app has no jsdom, so a rule in a
- * component is a rule nothing tests.
+ * (#341, #344). Pure, for `model.ts`'s reason: the app has no jsdom, so a rule
+ * in a component is a rule nothing tests.
  */
 
 /**
- * Whether the Remote access section is drawn at all. **The one gate**: every
- * piece of it - the status, an error, a refused pairing - is behind this, so a
- * build with the preview off shows nothing new whatever the status says.
+ * The paired phones connected now, by the name on the paired list - never a
+ * name a phone sent when it connected. Empty draws no chip.
  */
-export function remoteVisible(status: RemoteStatus | null): boolean {
-  return status?.preview === true;
+export function connectedNames(status: RemoteStatus | null): string[] {
+  if (status === null) return [];
+  return status.phones.filter((p) => p.connected).map((p) => p.name);
+}
+
+/** How a connected phone is travelling, in the diagnostics' words. */
+const PATH_WORDS: Record<PathKind, string> = {
+  direct: 'direct',
+  relay: 'through the relay',
+  none: 'between paths',
+};
+
+/**
+ * Every connected phone with its path, from the endpoint's own links. The name
+ * comes from the paired list; a link the list does not name is shown as its id
+ * rather than given a name nobody chose.
+ */
+export function linkRows(status: RemoteStatus | null): { id: string; name: string; path: string }[] {
+  if (status === null || status.endpoint.state !== 'up') return [];
+  const phones = status.phones;
+  return status.endpoint.links.map((link) => ({
+    id: link.id,
+    name: phones.find((p) => p.id === link.id)?.name ?? link.id,
+    path: PATH_WORDS[link.path],
+  }));
+}
+
+/** The phones turning remote access off would drop. Empty asks nothing. */
+export function offNeedsConfirm(status: RemoteStatus): string[] {
+  return connectedNames(status);
+}
+
+/**
+ * Start at login is drawn as the system reports it. This is the sentence
+ * beside it when that is not what the settings file says, or when the system
+ * could not say - somebody may have removed the entry by hand.
+ */
+export function loginSentence(status: RemoteStatus): string | null {
+  const { enabled, error } = status.startAtLogin;
+  if (enabled === null) {
+    return `The system could not say whether Vibe starts at login${error === null ? '.' : `: ${error}`}`;
+  }
+  if (error !== null) return error;
+  if (enabled !== status.settings.startAtLogin) {
+    return enabled
+      ? 'The system starts Vibe at login, though it was last turned off here.'
+      : 'The system no longer starts Vibe at login - the entry may have been removed by hand.';
+  }
+  return null;
 }
 
 /** The pairing prompt: nothing, or a phone waiting for a yes or a no. */

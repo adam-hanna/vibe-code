@@ -129,6 +129,8 @@ import type { Raise } from './argv';
 import type { Caps } from './Footer';
 import type { Effect } from '../pilot/tools';
 import { memory } from '../memory';
+import { connectedNames } from '../remote/pairing';
+import { useRemoteStatus } from '../remote/useRemoteStatus';
 import type { Run } from './model';
 
 /**
@@ -411,6 +413,8 @@ export function Cockpit() {
   }, []);
   /** Whether the diagnostics popover is open (#201, #204). ⌘⇧D toggles it. */
   const [diagnostics, setDiagnostics] = useState(false);
+  // Who is connected from a phone, pushed by Rust (#344): the status bar's chips.
+  const remoteStatus = useRemoteStatus();
   /**
    * Whether each side column is open (#223).
    *
@@ -2886,6 +2890,7 @@ export function Cockpit() {
         diagnosticsOpen={diagnostics}
         onDiagnostics={setDiagnostics}
         diagnostics={<Diagnostics status={wire.status} expected={host.EXPECTED_PROTOCOL} identity={run.identity} />}
+        phones={connectedNames(remoteStatus)}
       />
     </div>
     </TooltipProvider>

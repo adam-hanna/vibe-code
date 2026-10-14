@@ -1,10 +1,10 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { Check, Copy, X } from 'lucide-react';
 import { buildStamp, uptime } from './format';
-import { inShell } from '../host';
 import type { Build, Status } from '../host';
-import { endpointNote, status as remoteStatus } from '../remote/remote';
-import type { RemoteStatus } from '../remote/remote';
+import { endpointNote } from '../remote/remote';
+import { linkRows } from '../remote/pairing';
+import { useRemoteStatus } from '../remote/useRemoteStatus';
 
 /**
  * Hi-fi 15 — the four facts, out of the chrome (#201, #204, #207).
@@ -85,25 +85,23 @@ export interface DiagnosticsProps {
 }
 
 /**
- * The endpoint a phone dials, asked for when the popover opens. Remote access
- * off draws nothing, so this line is new only to somebody who turned it on.
+ * The endpoint a phone dials, read when the popover opens and again whenever a
+ * phone connects or goes (#344). Remote access off draws nothing, so this is
+ * new only to somebody who turned it on. Below it, one row per connected
+ * phone: the paired list's name, and whether its path is direct or relayed.
  */
 function RemoteFact() {
-  const [remote, setRemote] = useState<RemoteStatus | null>(null);
-  useEffect(() => {
-    if (!inShell()) return;
-    let live = true;
-    remoteStatus().then(
-      (s) => live && setRemote(s),
-      () => live && setRemote(null),
-    );
-    return () => {
-      live = false;
-    };
-  }, []);
+  const remote = useRemoteStatus();
   const note = remote === null ? null : endpointNote(remote.endpoint);
   if (remote === null || note === null) return null;
-  return <Fact label="remote" value={remote.endpoint.state === 'up' ? remote.endpointId : null} note={note} />;
+  return (
+    <>
+      <Fact label="remote" value={remote.endpoint.state === 'up' ? remote.endpointId : null} note={note} />
+      {linkRows(remote).map((row) => (
+        <Fact key={row.id} label="phone" value={row.name} note={row.path} />
+      ))}
+    </>
+  );
 }
 
 export function Diagnostics({ status, expected, identity }: DiagnosticsProps) {

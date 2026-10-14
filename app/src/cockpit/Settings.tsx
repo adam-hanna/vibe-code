@@ -1365,8 +1365,8 @@ export function Settings({
               from there (#345). Never drawn on the desktop, which has Quit. */}
           {!SURFACE.tray && <QuitDesktop />}
 
-          {/* Remote access (#341): drawn only while previewed, until the real
-              switch lands. `RemoteAccess` decides that itself, error included. */}
+          {/* Remote access (#341, #344): always drawn - the switch, keep awake,
+              and, while it is on, start at login, the relay and pairing. */}
           <RemoteAccess problem={remoteProblem} onProblemSeen={() => onRemoteProblemSeen?.()} />
 
           {/* ---- how each vendor is reached (#223) ---------------------------- */}

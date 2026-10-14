@@ -1,8 +1,18 @@
 import { describe, expect, test } from 'vitest';
-import { NO_PROMPT, phoneRows, promptClosesIn, promptStep, qrRects, remoteVisible } from './pairing';
+import {
+  NO_PROMPT,
+  connectedNames,
+  linkRows,
+  loginSentence,
+  offNeedsConfirm,
+  phoneRows,
+  promptClosesIn,
+  promptStep,
+  qrRects,
+} from './pairing';
 import type { PairRequest, RemoteStatus } from './remote';
 
-/** Remote access in the window (#341): the prompt, the gate, the QR and the list. */
+/** Remote access in the window (#341, #344): the prompt, who is connected, the QR and the list. */
 
 const request = (over: Partial<PairRequest> = {}): PairRequest => ({
   phoneName: 'Pixel',
@@ -16,7 +26,10 @@ const status = (over: Partial<RemoteStatus> = {}): RemoteStatus => ({
   identityUnreadable: null,
   phones: [],
   phonesUnreadable: null,
-  preview: true,
+  settings: { enabled: false, startAtLogin: false, keepAwake: false, relay: null },
+  settingsUnreadable: null,
+  startAtLogin: { enabled: false, error: null },
+  awake: { held: false, error: null },
   endpoint: { state: 'off' },
   ...over,
 });
@@ -51,16 +64,58 @@ describe('the pairing prompt', () => {
   });
 });
 
-describe('the section is hidden unless previewed', () => {
-  test('only preview: true draws anything', () => {
-    expect(remoteVisible(null)).toBe(false);
-    expect(remoteVisible(status({ preview: false }))).toBe(false);
-    expect(
-      remoteVisible(
-        status({ preview: false, identityUnreadable: 'locked', phonesUnreadable: 'no data directory' }),
-      ),
-    ).toBe(false);
-    expect(remoteVisible(status({ preview: true }))).toBe(true);
+// Case 2 (#344): this pinned that only `preview: true` drew the section. The
+// preview flag is gone and the section is always drawn, so what is pinned now
+// is what it draws from the status: who is connected, by the paired list's
+// names, and what the system says about start at login.
+describe('connected phones and start at login', () => {
+  const phone = (id: string, name: string, connected: boolean) => ({
+    id,
+    name,
+    pairedAt: 0,
+    lastSeen: null,
+    connected,
+  });
+
+  test('the connected phones are named from the paired list', () => {
+    expect(connectedNames(null)).toEqual([]);
+    const s = status({ phones: [phone('a', "Adam's iPhone", true), phone('b', 'Tablet', false)] });
+    expect(connectedNames(s)).toEqual(["Adam's iPhone"]);
+    expect(offNeedsConfirm(s)).toEqual(["Adam's iPhone"]);
+    expect(offNeedsConfirm(status())).toEqual([]);
+  });
+
+  test('each link is named from the list, and an unlisted one is its id rather than an invented name', () => {
+    expect(linkRows(status())).toEqual([]);
+    const s = status({
+      phones: [phone('a', "Adam's iPhone", true)],
+      endpoint: {
+        state: 'up',
+        relays: [],
+        links: [
+          { id: 'a', path: 'direct' },
+          { id: 'zz', path: 'relay' },
+        ],
+      },
+    });
+    expect(linkRows(s)).toEqual([
+      { id: 'a', name: "Adam's iPhone", path: 'direct' },
+      { id: 'zz', name: 'zz', path: 'through the relay' },
+    ]);
+  });
+
+  test('the system wins over the file, with a sentence when they disagree', () => {
+    const on = (enabled: boolean | null, remembered: boolean, error: string | null = null) =>
+      status({
+        settings: { enabled: true, startAtLogin: remembered, keepAwake: false, relay: null },
+        startAtLogin: { enabled, error },
+      });
+    expect(loginSentence(on(true, true))).toBeNull();
+    expect(loginSentence(on(false, false))).toBeNull();
+    expect(loginSentence(on(false, true))).toMatch(/removed by hand/);
+    expect(loginSentence(on(true, false))).toMatch(/starts Vibe at login/);
+    expect(loginSentence(on(null, true, 'no D-Bus'))).toMatch(/could not say.*no D-Bus/);
+    expect(loginSentence(on(false, true, 'no autostart directory'))).toBe('no autostart directory');
   });
 });
 
