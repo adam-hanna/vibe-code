@@ -50,6 +50,7 @@ export function StatusBar({
   pausing,
   stopping,
   controls,
+  onGate,
   staleness,
   onSpend,
   build,
@@ -82,6 +83,14 @@ export function StatusBar({
    * never draws two sets one above the other. `statusBarControls` decides.
    */
   controls: boolean;
+  /**
+   * On a phone (#347), what the held gate's one control opens: the gate sheet,
+   * which draws the footer's whole gate block. A phone's bar has no room for
+   * the boundary and two buttons - they ran off its edge - and a gate is a
+   * decision worth its evidence, so it is one press away rather than two
+   * buttons with none. Absent on a desktop, which keeps its row.
+   */
+  onGate?: (() => void) | undefined;
   /**
    * How quiet the live turn is (`7c`). Its `thinking` and `cannot tell` states
    * are drawn here rather than as a strip above the columns, which pushed the
@@ -135,7 +144,11 @@ export function StatusBar({
         </Badge>
       ))}
 
-      {project !== null && <span className="truncate text-tertiary">{project}</span>}
+      {/* Given up on a phone while a gate holds (#347): the bar has room for the
+          gate's control or the name, and the name was cut to its first letter. */}
+      {project !== null && !(onGate !== undefined && run.gate !== null) && (
+        <span className="truncate text-tertiary">{project}</span>
+      )}
 
       {/* Before the spacer, so it takes the spacer's room as it comes and goes
           and nothing to its right moves (#267). */}
@@ -153,6 +166,12 @@ export function StatusBar({
       ) : run.gate !== null ? (
         <span className="flex items-center gap-1.5">
           <Badge variant="accent">holding</Badge>
+          {onGate !== undefined ? (
+            <Button size="sm" variant="primary" onClick={onGate}>
+              decide
+            </Button>
+          ) : (
+          <>
           <span>at {boundary(run.gate.boundary)}</span>
           {controls && (
           <>
@@ -175,6 +194,8 @@ export function StatusBar({
           >
             <Square className="size-3" aria-hidden /> stop
           </Button>
+          </>
+          )}
           </>
           )}
         </span>

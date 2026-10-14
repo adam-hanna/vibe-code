@@ -24,6 +24,52 @@ const fixture = recorded as unknown as {
   artifact: Record<string, Json>;
 };
 
+/**
+ * `?live`: a run the desktop started, as a phone joining it sees it (#347).
+ *
+ * The bridge replays a live run host's frames to a phone that connects, and the
+ * phone's cockpit watches a host it did not launch. This plays the recorded
+ * run's narration from planning to the plan critique on a desktop run host and
+ * then holds the `plan-approved` gate, so the run screen and the gate sheet can
+ * be worked on. `mock.rs` has no equivalent: it is for the layout in a browser.
+ */
+const LIVE = typeof location !== 'undefined' && new URLSearchParams(location.search).has('live');
+const LIVE_HOST = 'run-1099511627777';
+const LIVE_INVOKE = 1099511627777;
+const LIVE_ASK = 900;
+const steps = ((fixture.answers['replay']?.['steps'] ?? []) as { narration: Json }[]).map((s) => s.narration);
+
+function liveFrame(frame: Json): void {
+  void emit('host://frame', { host: LIVE_HOST, frame });
+}
+
+function playLive(): void {
+  // Through the critique's census: planning, the plan, the critique and its counts.
+  const through = steps.findIndex((n) => n['id'] === 'findings_reported');
+  for (const n of steps.slice(0, through + 1)) liveFrame({ type: 'narration', ...n });
+  liveFrame({
+    type: 'ask',
+    id: LIVE_ASK,
+    context: { boundary: 'plan-approved', phase: 'planning', planRound: 0, questionRound: 0, reviewRound: 0, verifyRound: 0 },
+  });
+}
+
+/** What the desktop's run host does with a line the phone sent it. */
+function liveSend(line: string): void {
+  const request = JSON.parse(line) as Json;
+  if (request['type'] !== 'answer') return;
+  const decision = (request['decision'] ?? {}) as Json;
+  const stop = decision['kind'] === 'stop';
+  liveFrame({
+    type: 'narration',
+    level: 'info',
+    message: stop ? 'Stopped at plan-approved' : 'Continuing past plan-approved',
+    id: stop ? 'gate_stopped' : 'gate_released',
+    data: { boundary: 'plan-approved', origin: 'phone:browser' },
+  });
+  if (stop) liveFrame({ type: 'result', id: LIVE_INVOKE, exit: 2 });
+}
+
 /** `mock.rs`'s `answer`: the recorded frame under the request's id, or an error naming it. */
 function answer(line: string): Json {
   let request: Json;
@@ -55,7 +101,7 @@ function status(): Json {
     failure: null,
     uncontained: null,
     build: { version: 'browser', commit: null, at: null },
-    runs: [],
+    runs: LIVE ? [{ handle: LIVE_HOST, pid: 4242, uptimeSecs: 60, uncontained: null, invokeId: LIVE_INVOKE }] : [],
   };
 }
 
@@ -64,6 +110,10 @@ function desktop(command: string, args: Json): unknown {
     case 'host_status':
       return status();
     case 'host_send': {
+      if (args['handle'] === LIVE_HOST) {
+        liveSend(typeof args['line'] === 'string' ? args['line'] : '{}');
+        return null;
+      }
       const frame = answer(typeof args['line'] === 'string' ? args['line'] : '');
       // After the call returns, as the relay's frame arrives after `host_send` does.
       setTimeout(() => void emit('host://frame', { host: 'service', frame }), 0);
@@ -90,3 +140,15 @@ mockIPC(
   },
   { shouldMockEvents: true },
 );
+
+
+// Once the cockpit is on screen, and so listening, as the bridge's replay
+// follows a phone's connect. A status read is no signal: the memory load makes
+// one before the cockpit exists, and an event nobody listens for is dropped.
+if (LIVE) {
+  const wait = setInterval(() => {
+    if (document.querySelector('[aria-label=panes]') === null) return;
+    clearInterval(wait);
+    setTimeout(playLive, 300);
+  }, 100);
+}

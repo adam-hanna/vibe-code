@@ -719,6 +719,12 @@ export function Cockpit() {
    */
   const [settingsScope, setSettingsScope] = useState<'global' | 'project'>('global');
   /**
+   * The phone's gate sheet (#347): the footer's gate block over the run, opened
+   * from the status bar's one control. Never opened by the gate itself - a
+   * sheet that appeared on its own would cover whatever was being read.
+   */
+  const [gateOpen, setGateOpen] = useState(false);
+  /**
    * The tab a view with no tab of its own was opened from (#347). `settings`
    * and `runs` have no button in the bar, and on a phone the bar is not drawn
    * under them, so their way back is a press that returns here. The pilot when
@@ -1963,6 +1969,12 @@ export function Cockpit() {
   const paletteShortcut = ACTIONS.find((a) => a.id === 'palette')?.shortcut;
   const paletteChord =
     paletteShortcut === undefined ? '' : chordLabel(paletteShortcut, typeof navigator === 'undefined' ? '' : navigator.platform);
+  // A sheet over a gate that has gone would hold a decision nobody can make:
+  // answered here, elsewhere or by the run ending, it shuts.
+  const heldAsk = run.gate?.askId ?? null;
+  useEffect(() => {
+    if (heldAsk === null) setGateOpen(false);
+  }, [heldAsk]);
   // The ⬆ tool, while a newer unskipped version exists (#299). The activity
   // bar draws it above ⚙; the phone, which has no bar, at the head of the
   // Explorer sheet beside ⚙ (#347).
@@ -2306,9 +2318,10 @@ export function Cockpit() {
         <ResizablePanel id="main" minSize="20%" className="flex min-h-0 min-w-0 flex-col">
         <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-page" role="main">
           {/* A phone draws no heading: its title repeats the selected tab, and
-              the tab row carries the run-status toggle instead (#347). An
-              opened run's label survives as one quiet line. */}
-          {SURFACE.compactChrome && viewing !== null && tab !== 'settings' && tab !== 'runs' && (
+              the tab row carries the run-status toggle instead (#347). A past
+              run's label survives as one quiet line - only a past one, since a
+              live run opened from the sidebar is not the archive. */}
+          {SURFACE.compactChrome && past && tab !== 'settings' && tab !== 'runs' && (
             <p className="m-0 flex-none bg-page px-4 pt-1.5 text-label text-tertiary">Run archive</p>
           )}
           {!SURFACE.compactChrome && (
@@ -3015,6 +3028,43 @@ export function Cockpit() {
           )}
         </SideRegion>
         </ResizableGroup>
+        {/* The gate sheet (#347): the same footer the loop column draws, for
+            the run the status bar is holding for, over the run. A press on the
+            scrim only shuts it - the decision is the sheet's buttons. */}
+        {SURFACE.compactChrome && gateOpen && run.gate !== null && (
+          <>
+            <div className="absolute inset-0 z-30 bg-page/60" aria-hidden="true" onClick={() => setGateOpen(false)} />
+            <div
+              role="dialog"
+              aria-label="The run is holding"
+              className="absolute inset-x-0 bottom-0 z-40 flex max-h-[85%] flex-col border-t border-rule-structure bg-column shadow-overlay"
+            >
+              <div className="flex flex-none items-center justify-between pr-1.5 pl-4 pt-1">
+                <span className="text-chip uppercase tracking-[0.12em] text-tertiary">Decide</span>
+                <Button variant="quiet" size="icon-sm" aria-label="Close" onClick={() => setGateOpen(false)}>
+                  <X className="size-4" aria-hidden />
+                </Button>
+              </div>
+              <div className="min-h-0 overflow-y-auto">
+                <Footer
+                  run={run}
+                  busy={busy}
+                  onDecide={answer}
+                  onPause={pause}
+                  onUnpause={unpause}
+                  onStop={() => setConfirmStop(true)}
+                  onResume={(runId, dir, raise) => resume(runId, dir, raise, false, run.identity?.task ?? null)}
+                  onImplement={(runId, dir) => implement(runId, dir, run.identity?.task ?? null)}
+                  caps={caps}
+                  gates={gates}
+                  order={order}
+                  pausing={pausing}
+                  stopping={stopping}
+                />
+              </div>
+            </div>
+          </>
+        )}
       </div>
 
       {/* The status bar (the UI rework): the window's standing facts in one
@@ -3038,6 +3088,14 @@ export function Cockpit() {
         stopping={stopping}
         // Only while the footer is not showing them for this run (#264).
         controls={statusBarControls(panels.loop, columnRun === run)}
+        onGate={
+          SURFACE.compactChrome
+            ? () => {
+                shutSheets();
+                setGateOpen(true);
+              }
+            : undefined
+        }
         staleness={quiet}
         onSpend={() => setTab('spend')}
         build={wire.status?.build ?? null}
