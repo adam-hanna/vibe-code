@@ -2238,7 +2238,10 @@ npx tauri android build --apk --target aarch64 --debug --features mock-desktop
 node scripts/record-mock-desktop.mjs                       # after `npm run build` at the root
 ```
 
-Gradle 8.14 does not run on JDK 25, so point `JAVA_HOME` at a 21. `gen/` is generated
+Gradle 8.14 does not run on JDK 25, so point `JAVA_HOME` at a 21. On iOS, iroh's network
+watcher and DNS resolver need Apple's SystemConfiguration framework, which Tauri's generated
+Xcode project does not link unless `bundle.iOS.frameworks` names it: without it the link
+fails on fifty `_SC*` symbols. `gen/` is generated
 by `tauri <platform> init` on each machine and in CI, because iOS's needs macOS to make.
 `.github/workflows/mobile.yml` launches both mock builds - an Android emulator and an iOS
 simulator - and fails unless the cockpit read the recorded run.

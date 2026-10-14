@@ -25,6 +25,7 @@
       "icons/icon.ico",
       "icons/icon.png"
     ],
-    "android": { "minSdkVersion": 24 }
+    "android": { "minSdkVersion": 24 },
+    "iOS": { "frameworks": ["SystemConfiguration"], "minimumSystemVersion": "15.0" }
   }
 }
