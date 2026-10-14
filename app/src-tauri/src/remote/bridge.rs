@@ -145,7 +145,10 @@ fn cut(text: &str, max: usize) -> String {
 }
 
 async fn read<T: DeserializeOwned>(conn: &Connection, recv: &mut RecvStream, what: &str) -> Option<Result<T, String>> {
+    // `biased`: a connection that has been closed - a revoke, an Unpair -
+    // reads nothing more, even with a message already waiting on the stream.
     tokio::select! {
+        biased;
         _ = conn.closed() => None,
         read = read_message::<T>(recv, CONTROL_MAX, what) => Some(read),
     }
@@ -194,10 +197,13 @@ async fn serve(inner: &Inner, conn: Connection) {
     };
     let mut tasks = JoinSet::new();
     if write_message(&mut send, &welcome).await.is_ok() {
-        tasks.spawn(writer(send, rx));
+        tasks.spawn(writer(conn.clone(), send, rx));
         loop {
             match read::<ToDesktop>(&conn, &mut recv, "control message").await {
                 None => break,
+                // A close the select had not seen yet: a call read after the
+                // phone's access ended is never run.
+                Some(Ok(ToDesktop::Call(_))) if conn.close_reason().is_some() => break,
                 Some(Ok(ToDesktop::Call(call))) => {
                     let commands = inner.commands.clone();
                     let tx = tx.clone();
@@ -209,13 +215,15 @@ async fn serve(inner: &Inner, conn: Connection) {
                 }
                 // The connection's own id, which the handshake authenticated;
                 // the message names none. A removal closes this connection,
-                // and the next read sees it.
-                Some(Ok(ToDesktop::Unpair)) => {
-                    if let Err(why) = inner.unpair.unpair(&who) {
-                        // Still paired, so the connection stays.
-                        crate::applog::app(&format!("remote access: phone {who} asked to unpair and could not be: {why}"));
+                // and nothing after the Unpair is read: the phone's access
+                // ends here, not when the close is next noticed.
+                Some(Ok(ToDesktop::Unpair)) => match inner.unpair.unpair(&who) {
+                    Ok(()) => break,
+                    // Still paired, so the connection stays.
+                    Err(why) => {
+                        crate::applog::app(&format!("remote access: phone {who} asked to unpair and could not be: {why}"))
                     }
-                }
+                },
                 Some(Err(why)) => {
                     crate::applog::app(&format!("remote access: phone {who}: {why}"));
                     conn.close(VarInt::from_u32(0), b"unreadable control message");
@@ -234,8 +242,10 @@ async fn serve(inner: &Inner, conn: Connection) {
     while tasks.join_next().await.is_some() {}
 }
 
-/// The connection's one writer: everything queued for the phone, in order.
-async fn writer(mut send: SendStream, mut rx: UnboundedReceiver<Outgoing>) {
+/// The connection's one writer: everything queued for the phone, in order. A
+/// stream that cannot be written closes the connection, so the reader stops
+/// taking calls whose answers could never arrive.
+async fn writer(conn: Connection, mut send: SendStream, mut rx: UnboundedReceiver<Outgoing>) {
     while let Some(out) = rx.recv().await {
         let message = match out {
             Outgoing::Event { name, payload } => match RawValue::from_string(payload.to_string()) {
@@ -244,7 +254,9 @@ async fn writer(mut send: SendStream, mut rx: UnboundedReceiver<Outgoing>) {
             },
             Outgoing::Return(ret) => ToPhone::Return(ret),
         };
-        if write_message(&mut send, &message).await.is_err() {
+        if let Err(why) = write_message(&mut send, &message).await {
+            crate::applog::app(&format!("remote access: phone {}: {why}", conn.remote_id()));
+            conn.close(VarInt::from_u32(0), b"the control stream could not be written");
             break;
         }
     }
@@ -630,6 +642,11 @@ mod tests {
         w.hub.event("pilot://event", Arc::from(r#"{"turn":4}"#), |_| {});
         let event = phone.next().await;
         assert_eq!(event, json!({ "type": "event", "name": "pilot://event", "payload": { "turn": 4 } }));
+        // The pairing prompt's ending reaches the phone too, so its copy closes.
+        w.hub.event("remote://pair-ended", Arc::from(r#"{"outcome":"paired"}"#), |_| {});
+        let ended = phone.next().await;
+        assert_eq!(ended["name"], "remote://pair-ended");
+        assert_eq!(ended["payload"]["outcome"], "paired");
 
         // A slow call does not hold up the next one.
         phone.call(2, "pilot_models", json!({ "provider": "anthropic" })).await;
@@ -780,6 +797,46 @@ mod tests {
         w.fake.release.notify_one();
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert!(!w.fake.resumed.load(Ordering::SeqCst), "the call in flight was cancelled, not finished");
+        w.desktop.stop().await;
+    }
+
+    /// A control stream the desktop can no longer write closes the connection
+    /// and leaves the hub, rather than taking calls whose answers go nowhere.
+    #[tokio::test]
+    async fn a_control_stream_that_cannot_be_written_closes_the_connection() {
+        let w = world("bridge-writer-fails").await;
+        let (mut phone, _) = welcomed(&w).await;
+        phone.recv.stop(VarInt::from_u32(7)).unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        w.hub.event("pilot://event", Arc::from(r#"{"turn":1}"#), |_| {});
+        let (code, reason) = phone.closed_with().await;
+        assert_eq!(code, 0);
+        assert_eq!(reason, b"the control stream could not be written");
+        until("the phone leaves the hub", || w.hub.phone_count() == 0).await;
+        w.desktop.stop().await;
+    }
+
+    /// A call sent right behind an Unpair is never run: the phone's access
+    /// ends at the Unpair.
+    #[tokio::test]
+    async fn nothing_after_an_unpair_is_run() {
+        let w = world("bridge-unpair-then-call").await;
+        let (mut phone, _) = welcomed(&w).await;
+        let mut bytes = vibe_remote::framing::encode(&ToDesktop::Unpair).unwrap();
+        bytes.extend(
+            vibe_remote::framing::encode(&ToDesktop::Call(vibe_remote::control::Call {
+                call: 1,
+                command: "host_status".into(),
+                args: json!({}),
+            }))
+            .unwrap(),
+        );
+        phone.send.write_all(&bytes).await.unwrap();
+        let (code, _) = phone.closed_with().await;
+        assert_eq!(code, NOT_PAIRED as u64);
+        until("the phone leaves the hub", || w.hub.phone_count() == 0).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(w.fake.seen().is_empty(), "the call behind the Unpair ran: {:?}", w.fake.seen());
         w.desktop.stop().await;
     }
 

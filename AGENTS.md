@@ -2221,10 +2221,13 @@ for every phone and emits it to the window **under one lock**. Four things trave
 - **A revoke or an `Unpair` aborts every task the bridge started for that connection.**
   Work a call had already started (a run, a pilot turn) goes on, exactly as when the window
   that started it goes away.
-- **`remote://pair-ended` is held back**: it is not on the event list #343 was given, so a
-  phone's copy of the *Allow?* prompt closes on its own answer or at its expiry.
-  `DESKTOP_ONLY_EVENTS` says so, and a test fails on any event name the desktop's sources
-  emit that is on neither list.
+- **`remote://pair-ended` is forwarded beside `remote://pair-request`**, though the issue's
+  event list named only the second: it is what closes the *Allow?* prompt, so without it a
+  phone's copy would stay up after the desktop answered. A test fails on any event name the
+  desktop's sources emit that is neither in `REMOTE_EVENTS` nor in `DESKTOP_ONLY_EVENTS`.
+- **An Unpair ends the phone's access at once**: nothing read after it runs, and a call read
+  after the connection was closed is dropped. A control stream that cannot be written closes
+  the connection.
 
 **The phone app is `app/mobile/`, and it is a client only** (#345). Its own Tauri crate
 and `package.json`, built from the same `app/src`; no Node host, no agent CLI, nothing

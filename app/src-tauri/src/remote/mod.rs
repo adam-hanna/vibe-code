@@ -111,8 +111,8 @@ pub(crate) trait Emit {
 
 struct TauriEmit(AppHandle);
 
-/// Through the hub, like every event: `pair-request` reaches the connected
-/// phones as well as the window, and `pair-ended` the window only (#343).
+/// Through the hub, like every event: both reach the connected phones as well
+/// as the window (#343), so a prompt any client answers closes on all of them.
 impl Emit for TauriEmit {
     fn pair_request(&self, request: &PairRequest) {
         hub::emit(&self.0, "remote://pair-request", request);

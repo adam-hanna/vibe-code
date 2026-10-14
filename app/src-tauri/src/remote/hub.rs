@@ -234,7 +234,7 @@ mod tests {
         }
         assert_eq!(window.len(), 4, "the window is sent everything");
         let names: Vec<_> = drain(&mut rx).into_iter().map(|(n, _)| n).collect();
-        assert_eq!(names, ["pilot://event", "remote://pair-request"]);
+        assert_eq!(names, ["pilot://event", "remote://pair-request", "remote://pair-ended"]);
     }
 
     #[test]

@@ -176,8 +176,10 @@ pub const REFUSED_COMMANDS: &[&str] = &[];
 /// The events forwarded to every connected phone, in emit order.
 ///
 /// `remote://pair-request` reaches phones because `remote_pair_answer` is
-/// allowed from one. It never reaches the phone being paired, which is not on
-/// the paired list yet and so has no control stream.
+/// allowed from one, and `remote://pair-ended` with it, because that is what
+/// closes the prompt on every client when any one of them answers. Neither
+/// reaches the phone being paired, which is not on the paired list yet and so
+/// has no control stream.
 pub const REMOTE_EVENTS: &[&str] = &[
     "host://frame",
     "host://log",
@@ -185,15 +187,12 @@ pub const REMOTE_EVENTS: &[&str] = &[
     "pilot://event",
     "app://update-progress",
     "remote://pair-request",
+    "remote://pair-ended",
 ];
 
-/// The events that never leave the desktop.
-///
-/// - `app://quit-requested` is the desktop tray asking the desktop window.
-/// - `remote://pair-ended` is not on the event list #343 was given. A phone's
-///   prompt still closes on its own answer and at the expiry the request
-///   carries; forwarding this too is a decision for the phone's screens.
-pub const DESKTOP_ONLY_EVENTS: &[&str] = &["app://quit-requested", "remote://pair-ended"];
+/// The events that never leave the desktop: `app://quit-requested` is the
+/// desktop tray asking the desktop window.
+pub const DESKTOP_ONLY_EVENTS: &[&str] = &["app://quit-requested"];
 
 #[cfg(test)]
 mod tests {
