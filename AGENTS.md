@@ -2239,7 +2239,10 @@ with it:
 - **One reconcile, under one async lock.** `reconcile_locked` makes the endpoint match the
   settings. It stops an old endpoint **completely** before it binds a new one, so a relay
   change never leaves two. Off turns `NoKey` and `Failed` into `Off` as well as stopping an
-  endpoint that is up. The window's `remote_set` answers once that has happened.
+  endpoint that is up. The window's `remote_set` answers once that has happened. **Every
+  `remote_set` writes its patch under that lock** (`patch_locked`), so a patch and the change
+  it decides are one step: written before the lock, a phone's *off* could be acted on by the
+  window's reconcile first, closing the phone before its answer.
 - **A phone's closing change answers first.** Turning access off from a phone closes that
   phone's own connection. So the phone's call takes the lock before it answers. It answers
   with the decided state. The stop then waits on `Written` until the peer has acknowledged
@@ -2248,7 +2251,8 @@ with it:
 - **The connection's own guard is the only source of `remote://connections`.** `Announced`
   is held across the bridge for a paired phone, so a connect and a disconnect are each one
   event, however the connection ends. Nothing emits after a stop. The event carries
-  nothing. A client reads `remote_status` once after it joins and again on each event. No
+  nothing. A client listens first, then reads `remote_status`, and again on each event, drawing only
+  the newest read (`followStatus` in the window). No
   timer polls.
 - **Start at login is a plugin behind a trait.** `autostart.rs` holds the plugin behind a
   trait, and no test reaches the plugin. The plugin launches the app with `--autostart`.

@@ -779,14 +779,32 @@ fn apply_patch(app: &AppHandle, remote: &Remote, patch: &Patch) -> Result<Settin
     Ok(next)
 }
 
+/// Take the transition lock, **then** apply a patch, and hand the lock back.
+///
+/// Every `remote_set` - the window's and a phone's - goes through here, so a
+/// patch and the endpoint change it decides are one step. A patch written
+/// before the lock let another caller's reconcile act on it first: a phone's
+/// *off*, written and then waiting for the lock, was stopped by the window's
+/// reconcile, and found nothing left to hold for its own answer. The order is
+/// the transition lock, then the settings lock, everywhere.
+async fn patch_locked<F>(remote: &Remote, apply: F) -> Result<tokio::sync::OwnedMutexGuard<()>, String>
+where
+    F: FnOnce() -> Result<Settings, String>,
+{
+    let guard = remote.transition.clone().lock_owned().await;
+    apply()?;
+    Ok(guard)
+}
+
 /// `remote_set`: the switch, start at login, keep awake and the relay (#344).
 ///
 /// **The window's call answers once the endpoint has reached the new state**,
 /// so *off* means nothing is listening any more.
 #[tauri::command]
 pub async fn remote_set(patch: Patch, app: AppHandle, remote: State<'_, Remote>) -> Result<RemoteStatus, String> {
-    apply_patch(&app, &remote, &patch)?;
-    reconcile(&app, &remote).await;
+    let _guard = patch_locked(&remote, || apply_patch(&app, &remote, &patch)).await?;
+    let built = app.clone();
+    reconcile_locked(&remote, || identity::read(&Keychain), move |key, relay| build_endpoint(built, key, relay), None).await;
     Ok(status_now(&app, &remote))
 }
 
@@ -800,8 +818,8 @@ fn closes_connections(running: &Running, desired: &Settings) -> bool {
 ///
 /// A change that keeps the endpoint is applied before the answer, as the
 /// window's is. **A change that stops it would close the phone's own
-/// connection**, so the transition lock is taken first - nothing else can
-/// stop or start the endpoint from here on - the answer describes the state
+/// connection**, so the transition lock is taken before the patch is written -
+/// nothing else can stop or start the endpoint from here on - the answer describes the state
 /// that has been decided, and the stop waits for `written`: until the phone's
 /// answer has reached it.
 pub(crate) async fn set_remote_from_phone(
@@ -810,8 +828,7 @@ pub(crate) async fn set_remote_from_phone(
     patch: Patch,
     written: Written,
 ) -> Result<RemoteStatus, String> {
-    apply_patch(app, remote, &patch)?;
-    let guard = remote.transition.clone().lock_owned().await;
+    let guard = patch_locked(remote, || apply_patch(app, remote, &patch)).await?;
     let desired = remote.desired();
     if !closes_connections(&remote.running(), &desired) {
         drop(written);
@@ -1680,6 +1697,66 @@ mod tests {
         closed(&conn).await;
         assert_eq!(builds.load(Ordering::SeqCst), 1);
         assert!(matches!(rig.report(), EndpointReport::Up { .. }));
+    }
+
+    /// The race a patch written before the lock allowed: a phone's *off* on
+    /// disk, the window's reconcile taking the lock first and stopping the
+    /// endpoint, and the phone then finding nothing to hold for its answer.
+    /// With the patch written under the lock, the window's reconcile waits, so
+    /// the phone still decides the close and its answer arrives first.
+    #[tokio::test]
+    async fn a_phone_s_patch_and_its_close_decision_are_one_step() {
+        let rig = Arc::new(Rig::new());
+        want(&rig.remote, true, None);
+        rig.reconcile().await;
+        let (_p, conn) = rig.connect().await;
+
+        // The window is mid-change: it holds the lock, so the phone's patch waits.
+        let window = rig.remote.transition.clone().lock_owned().await;
+        let written_yet = Arc::new(AtomicUsize::new(0));
+        let phone = {
+            let rig = rig.clone();
+            let written_yet = written_yet.clone();
+            tokio::spawn(async move {
+                patch_locked(&rig.remote, || {
+                    written_yet.store(1, Ordering::SeqCst);
+                    want(&rig.remote, false, None);
+                    Ok(rig.remote.desired())
+                })
+                .await
+                .unwrap()
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(written_yet.load(Ordering::SeqCst), 0, "a patch is never written while another change holds the lock");
+        drop(window);
+        let guard = phone.await.unwrap();
+
+        // A window reconcile arriving now cannot act on the phone's patch first.
+        let desktop = {
+            let rig = rig.clone();
+            tokio::spawn(async move { rig.reconcile().await })
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            closes_connections(&rig.remote.running(), &rig.remote.desired()),
+            "the endpoint is still the phone's to stop, after its answer"
+        );
+        let (reached, written) = tokio::sync::oneshot::channel();
+        let stop = {
+            let rig = rig.clone();
+            tokio::spawn(async move {
+                reconcile_locked(&rig.remote, || panic!("off reads no key"), rig.build(), Some(Written(written))).await;
+                drop(guard);
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(conn.close_reason().is_none(), "nothing closed the phone before its answer arrived");
+        reached.send(()).unwrap();
+        stop.await.unwrap();
+        desktop.await.unwrap();
+        closed(&conn).await;
+        assert_eq!(rig.report(), EndpointReport::Off);
     }
 
     #[test]

@@ -195,3 +195,63 @@ export function onPairRequest(handler: (request: PairRequest) => void): Promise<
 export function onPairEnded(handler: (ended: PairEnded) => void): Promise<() => void> {
   return listen<PairEnded>('remote://pair-ended', (event) => handler(event.payload));
 }
+
+/** A subscription, as `onConnections` and its siblings return one. */
+export type Subscribe = (handler: () => void) => Promise<() => void>;
+
+/** Following `remote_status`: re-read it, or take an answer that carries it. */
+export interface Follower {
+  /** Read the status again. Any read started before this one is ignored. */
+  refresh(): void;
+  /** A status that came back from a change: drawn, then read once more. */
+  accept(next: RemoteStatus): void;
+  stop(): void;
+}
+
+/**
+ * Follow `remote_status` on pushed events (#344). Two rules, both about a
+ * snapshot that would otherwise go stale with no later event to correct it:
+ *
+ * - **Subscribe, then read.** The first read starts only once every listener
+ *   is installed, so an event between the read and the subscription is not
+ *   lost.
+ * - **Only the newest read is drawn.** Every read takes a number, and an
+ *   answer to any but the newest is dropped, so two events in quick succession
+ *   cannot resolve out of order and leave the older snapshot on screen. A
+ *   change's own answer is drawn and then read once more, because an event may
+ *   have arrived after Rust took it.
+ */
+export function followStatus(
+  onStatus: (status: RemoteStatus | null) => void,
+  events: Subscribe[],
+  read: () => Promise<RemoteStatus> = status,
+): Follower {
+  let latest = 0;
+  let live = true;
+  const refresh = () => {
+    const mine = ++latest;
+    const settle = (s: RemoteStatus | null) => {
+      if (live && mine === latest) onStatus(s);
+    };
+    // A rejection is the IPC itself failing - the command never refuses.
+    read().then(settle, () => settle(null));
+  };
+  const stops = events.map((on) => on(() => live && refresh()));
+  void Promise.all(stops).then(
+    () => live && refresh(),
+    () => live && refresh(),
+  );
+  return {
+    refresh,
+    accept(next) {
+      if (!live) return;
+      ++latest;
+      onStatus(next);
+      refresh();
+    },
+    stop() {
+      live = false;
+      for (const s of stops) void s.then((f) => f(), () => undefined);
+    },
+  };
+}

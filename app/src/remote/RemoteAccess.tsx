@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Modal } from '../design';
 import { Badge } from '@/ui/badge';
 import { Button } from '@/ui/button';
@@ -48,19 +48,20 @@ export function RemoteAccess({
   const [confirmOff, setConfirmOff] = useState<string[] | null>(null);
   const [relay, setRelay] = useState('');
 
-  const refresh = useCallback(() => {
-    if (!inShell()) return;
-    // A rejection leaves the status null, which draws nothing: this is the
-    // IPC itself failing, and the command never refuses.
-    remote.status().then(setStatus, () => setStatus(null));
-  }, []);
+  // One follower for every read and every change's answer, so only the
+  // newest is drawn. A null status draws nothing: the IPC itself failed.
+  const follower = useRef<remote.Follower | null>(null);
+  const refresh = useCallback(() => follower.current?.refresh(), []);
 
   useEffect(() => {
-    refresh();
     if (!inShell()) return;
-    const stops = [remote.onPairEnded(refresh), remote.onConnections(refresh)];
-    return () => stops.forEach((stop) => void stop.then((f) => f()));
-  }, [refresh]);
+    const f = remote.followStatus(setStatus, [(h) => remote.onPairEnded(h), remote.onConnections]);
+    follower.current = f;
+    return () => {
+      f.stop();
+      follower.current = null;
+    };
+  }, []);
 
   // The field shows what is in force whenever that changes.
   const inForce = status?.settings.relay ?? '';
@@ -76,7 +77,7 @@ export function RemoteAccess({
       .set(patch)
       .then(
         (next) => {
-          setStatus(next);
+          follower.current?.accept(next);
           return next;
         },
         (why: unknown) => {
@@ -133,7 +134,9 @@ export function RemoteAccess({
 
   const on = status.settings.enabled;
   const list = phoneRows(status);
-  const login = status.startAtLogin.enabled ?? status.settings.startAtLogin;
+  // What the OS says, never the file: null is a system that could not say,
+  // drawn unticked and not pressable, with the sentence beside it.
+  const login = status.startAtLogin.enabled;
   const loginNote = loginSentence(status);
   const relayChanged = relay.trim() !== inForce;
 
@@ -164,7 +167,7 @@ export function RemoteAccess({
         </p>
       )}
 
-      {on && offerLogin && !login && (
+      {on && offerLogin && login !== true && (
         <div className="flex items-center gap-3 rounded-sm bg-active px-3 py-2 text-body-sm text-secondary">
           <span>Start Vibe at login too, so a phone can reach this desktop after it restarts?</span>
           <Button
@@ -182,13 +185,13 @@ export function RemoteAccess({
         </div>
       )}
 
-      {on && !(offerLogin && !login) && (
+      {on && !(offerLogin && login !== true) && (
         <>
           <label className={CHECK}>
             <input
               type="checkbox"
-              checked={login}
-              disabled={busy}
+              checked={login === true}
+              disabled={busy || login === null}
               onChange={(e) => {
                 setOfferLogin(false);
                 void apply({ startAtLogin: e.target.checked });
