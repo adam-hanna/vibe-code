@@ -1809,13 +1809,24 @@ export function Cockpit() {
   };
   const panes = mountedPanes(shownPane, knownPanes, busyPanes, drafts);
   /**
-   * Choosing a run or a draft from the sidebar sheet puts the sheet away on a
-   * phone (#347), so the tap lands on what was chosen rather than on the list
-   * covering it. A desktop's sidebar is a column beside the run and stays.
+   * On a phone (#347) a press inside a sheet that changes what the MAIN pane
+   * shows puts the sheet away, so the press lands on what it opened rather than
+   * under the sheet that covers it - a run or a draft from the sidebar, a round
+   * card, *back to the live run*, a resume or an implement from the footer.
+   * Presses that act in the sheet itself (expanding a project, answering a
+   * gate) leave it open. A desktop's side columns sit beside the main pane and
+   * never need this.
    */
-  const shutSheet = (): void => {
-    if (SURFACE.overlayPanels) setPanels((p) => ({ ...p, sidebar: false }));
+  const shutSheets = (): void => {
+    if (SURFACE.overlayPanels) setPanels((p) => (p.sidebar || p.loop ? { ...p, sidebar: false, loop: false } : p));
   };
+  // The composer is a dialog over everything, and what it starts lands in the
+  // main pane, so on a phone opening it puts any sheet away.
+  useEffect(() => {
+    if (composing !== null && SURFACE.overlayPanels) {
+      setPanels((p) => (p.sidebar || p.loop ? { ...p, sidebar: false, loop: false } : p));
+    }
+  }, [composing]);
 
   /**
    * Every action the shell offers, by id (`shell/actions.ts`). The palette, the
@@ -2101,7 +2112,7 @@ export function Cockpit() {
               setDraftId(d.id);
               rememberRepo(d.dir);
               open('pilot');
-              shutSheet();
+              shutSheets();
             }}
             onForgetDraft={forgetDraft}
             onSettled={settleDrafts}
@@ -2144,7 +2155,7 @@ export function Cockpit() {
               setDraftId(null);
               setViewing({ dir: next, runId, task });
               setOpenAt(null);
-              shutSheet();
+              shutSheets();
             }}
             onProject={(next) => {
               rememberRepo(next);
@@ -2681,7 +2692,14 @@ export function Cockpit() {
                 the sidebar. The way back is the one thing that had to stay. */}
             <span className="ml-auto flex items-center gap-1">
               {past && viewing !== null && (
-                <Button variant="quiet" size="sm" onClick={() => setViewing(null)}>
+                <Button
+                  variant="quiet"
+                  size="sm"
+                  onClick={() => {
+                    setViewing(null);
+                    shutSheets();
+                  }}
+                >
                   back to the live run
                 </Button>
               )}
@@ -2796,7 +2814,10 @@ export function Cockpit() {
                 now={now}
                 compact
                 hostPid={past ? null : (shownLive?.pid ?? null)}
-                onOpen={open}
+                onOpen={(next, round) => {
+                  open(next, round);
+                  shutSheets();
+                }}
                 archive={archive}
               />
               {/* `4g`, and only on the ending that means the loop finished.
@@ -2817,8 +2838,14 @@ export function Cockpit() {
               onPause={pause}
               onUnpause={unpause}
               onStop={() => setConfirmStop(true)}
-              onResume={(runId, dir, raise) => resume(runId, dir, raise, false, columnRun.identity?.task ?? null)}
-              onImplement={(runId, dir) => implement(runId, dir, columnRun.identity?.task ?? null)}
+              onResume={(runId, dir, raise) => {
+                shutSheets();
+                return resume(runId, dir, raise, false, columnRun.identity?.task ?? null);
+              }}
+              onImplement={(runId, dir) => {
+                shutSheets();
+                return implement(runId, dir, columnRun.identity?.task ?? null);
+              }}
               caps={caps}
               gates={gates}
               order={order}
