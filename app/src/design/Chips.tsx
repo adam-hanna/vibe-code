@@ -42,7 +42,13 @@ export function SeverityChip({
 }) {
   return (
     <span className={`${CHIP} ${VARIANT[severity ?? 'zero']}`}>
-      <span>{label ?? severity ?? 'none'}</span>
+      {/* A count follows its label after a colon - `P1: 1` - since `P1 1` read
+          as one name, or as a round number. A chip with no count is a
+          finding's own severity and takes none. */}
+      <span>
+        {label ?? severity ?? 'none'}
+        {count !== undefined && ':'}
+      </span>
       {count !== undefined && <span>{count}</span>}
     </span>
   );
