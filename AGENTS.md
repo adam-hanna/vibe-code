@@ -2205,6 +2205,30 @@ are the rules the code is held to:
   config, because Rust reads them before any window exists and no project file may reach
   them.
 
+**The bridge is `app/src-tauri/src/remote/bridge.rs`, and the hub beside it is the one seam
+every event leaves through** (#343). The wire is `app/remote/src/control.rs`. The design
+named `app.listen_any` for the fan-out, and it was not used: in Tauri 2.11 a Rust listener
+is not called in emit order (a contended emit is parked in a pending queue and drained
+after a later one), so a phone could fold one host's frames in another order than the
+window. So every emit goes through `remote::hub`, which keeps a run host's frame, queues it
+for every phone and emits it to the window **under one lock**. Four things travel with it:
+
+- **The live-run buffer is one list in emission order**, not one per host, so a phone that
+  joins mid-run replays cross-host order too. It always runs, whether or not remote access
+  is on, and a host's frames go when its exit is emitted, which is after the reap.
+- **A run start is stamped as well as a `host_send`**, because since #246 the invoke
+  travels as `host_start`'s `line`.
+- **A revoke or an `Unpair` aborts every task the bridge started for that connection.**
+  Work a call had already started (a run, a pilot turn) goes on, exactly as when the window
+  that started it goes away.
+- **`remote://pair-ended` is forwarded beside `remote://pair-request`**, though the issue's
+  event list named only the second: it is what closes the *Allow?* prompt, so without it a
+  phone's copy would stay up after the desktop answered. A test fails on any event name the
+  desktop's sources emit that is neither in `REMOTE_EVENTS` nor in `DESKTOP_ONLY_EVENTS`.
+- **An Unpair ends the phone's access at once**: nothing read after it runs, and a call read
+  after the connection was closed is dropped. A control stream that cannot be written closes
+  the connection.
+
 **The phone app is `app/mobile/`, and it is a client only** (#345). Its own Tauri crate
 and `package.json`, built from the same `app/src`; no Node host, no agent CLI, nothing
 that runs a turn. Four things carry it:
@@ -2359,7 +2383,9 @@ app/src-tauri/src/keys.rs    the OS keychain, and the read the window cannot rea
 app/src-tauri/src/pilot/     one of the app's two network clients - two adapters, one vocabulary
 app/src-tauri/src/update.rs  the other: checking for a newer app, and installing it when asked
 app/src-tauri/src/remote/    a phone dialling this desktop: the device key, pairing, the paired list, the iroh endpoint
-app/remote/          what the phone and the desktop share: the pairing wire, the framing, the ALPNs, the key rules, how to reach n0 - a path dependency of both, tested with `-p vibe-remote`
+app/src-tauri/src/remote/bridge.rs  a paired phone's control stream: its calls, run through the window's own command bodies
+app/src-tauri/src/remote/hub.rs     the one seam every event leaves through, to the window and the phones, and the live-run buffer
+app/remote/          what the phone and the desktop share: the pairing wire, the control wire, the framing, the ALPNs, the key rules, how to reach n0 - a path dependency of both, tested with `-p vibe-remote`
 app/mobile/          the phone app: its Tauri crate, the mock desktop and its recorder, the launch checks
 app/src/transport.ts where the window's commands go - Tauri on the desktop, the paired desktop on a phone
 app/mobile-swaps.ts  the modules the phone build replaces, and nothing else

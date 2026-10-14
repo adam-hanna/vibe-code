@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Manager};
 
 use crate::reaper::Reaper;
 
@@ -258,15 +258,18 @@ pub trait Relay: Send + Sync {
 
 struct TauriRelay(AppHandle);
 
+/// Every event leaves through `remote::hub`, which hands the same bytes, in the
+/// same order, to the window and to every connected phone, and keeps a run
+/// host's frames for a phone that joins later (#343).
 impl Relay for TauriRelay {
     fn frame(&self, host: &str, frame: serde_json::Value) {
-        let _ = self.0.emit(FRAME_EVENT, Relayed { host: host.into(), frame });
+        crate::remote::hub::emit_frame(&self.0, host, &Relayed { host: host.into(), frame });
     }
     fn log(&self, host: &str, line: String) {
-        let _ = self.0.emit(LOG_EVENT, Logged { host: host.into(), line });
+        crate::remote::hub::emit(&self.0, LOG_EVENT, &Logged { host: host.into(), line });
     }
     fn exit(&self, host: &str, code: Option<i32>) {
-        let _ = self.0.emit(EXIT_EVENT, Ended { host: host.into(), code });
+        crate::remote::hub::emit_exit(&self.0, host, &Ended { host: host.into(), code });
     }
 }
 
@@ -1106,12 +1109,17 @@ pub fn launch(app: &AppHandle) -> Result<u32, String> {
 /// command, because `keys.test.ts` pins the list.
 #[tauri::command]
 pub fn host_start(app: AppHandle, handle: Option<String>, line: Option<String>) -> Result<u32, String> {
+    start_host(&app, handle, line)
+}
+
+/// `host_start`'s body, shared with a phone's call through the bridge (#343).
+pub(crate) fn start_host(app: &AppHandle, handle: Option<String>, line: Option<String>) -> Result<u32, String> {
     match handle {
         None => {
             start_refusal(SERVICE, line.as_deref())?;
-            launch(&app)
+            launch(app)
         }
-        Some(handle) => app.state::<HostProcess>().start(&app, &handle, line.as_deref()),
+        Some(handle) => app.state::<HostProcess>().start(app, &handle, line.as_deref()),
     }
 }
 
@@ -1139,10 +1147,15 @@ pub fn host_status(state: tauri::State<'_, HostProcess>) -> Status {
 /// question, rather than a second door.
 #[tauri::command]
 pub fn app_quit(app: AppHandle, quit: bool) {
+    quit_app(&app, quit);
+}
+
+/// `app_quit`'s body, shared with a phone's call through the bridge (#343).
+pub(crate) fn quit_app(app: &AppHandle, quit: bool) {
     let hosts = app.state::<HostProcess>();
     hosts.clear_quit();
     if quit {
-        hosts.quit(&app);
+        hosts.quit(app);
     }
 }
 

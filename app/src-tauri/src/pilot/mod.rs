@@ -65,7 +65,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Manager};
 
 use crate::keys::{self, Provider};
 use event::{PilotEvent, EVENT};
@@ -123,7 +123,7 @@ impl Pilot {
     }
 
     /// Ask a turn to stop. Unknown ids are refused rather than ignored.
-    fn cancel(&self, turn: u64) -> Result<(), String> {
+    pub(crate) fn cancel(&self, turn: u64) -> Result<(), String> {
         let running = self
             .running
             .lock()
@@ -318,9 +318,10 @@ fn drive(app: &AppHandle, turn_id: u64, turn: Turn, cancel: Arc<AtomicBool>) {
         Err(why) => {
             // Our own sentence, and there is no key to redact from it - the read
             // is what failed.
-            let _ = app.emit(
+            crate::remote::hub::emit(
+                app,
                 EVENT,
-                PilotEvent::Failed {
+                &PilotEvent::Failed {
                     turn: turn_id,
                     message: why,
                 },
@@ -332,9 +333,10 @@ fn drive(app: &AppHandle, turn_id: u64, turn: Turn, cancel: Arc<AtomicBool>) {
     // **The one seam every event leaves through**, so redaction cannot be
     // forgotten at one of the four places a failure is built.
     let emit = |event: PilotEvent| {
-        let _ = app.emit(
+        crate::remote::hub::emit(
+            app,
             EVENT,
-            match event {
+            &match event {
                 PilotEvent::Failed { turn, message } => PilotEvent::Failed {
                     turn,
                     message: redact(&message, &key),
@@ -459,6 +461,11 @@ pub fn pilot_send(
     state: tauri::State<'_, Pilot>,
     turn: Turn,
 ) -> Result<u64, String> {
+    send_turn(&app, &state, turn)
+}
+
+/// `pilot_send`'s body, shared with a phone's call through the bridge (#343).
+pub(crate) fn send_turn(app: &AppHandle, state: &Pilot, turn: Turn) -> Result<u64, String> {
     // Before an id is handed out, before a key is read, before a socket opens.
     turn.check()?;
 

@@ -1,7 +1,8 @@
 import { invoke, listen, local } from './transport';
 import type { PilotAccess } from './pilot/access';
 import type { Outcome, UpdateInfo, UpdateProgress } from './shell/update';
-import { isOwn } from './changed';
+import { requestIds } from './changed';
+import type { RequestIds } from './changed';
 
 /**
  * The webview's end of the wire.
@@ -1474,15 +1475,30 @@ export async function pilotTurn(turn: PilotTurn): Promise<number> {
   return id;
 }
 
-/** Ids the app allocates for its own requests. Gate ids come from the host. */
-let nextId = 0;
+/**
+ * Ids the app allocates for its own requests. Gate ids come from the host, and
+ * are shared on purpose: whichever client answers a gate first answers it for
+ * all, and the host refuses a second answer.
+ *
+ * The desktop window counts from 1. A phone counts from its connection's
+ * `idBase` (#343), so no two clients ever allocate the same id.
+ */
+let ids: RequestIds = requestIds(0);
 export function nextRequestId(): number {
-  return (nextId += 1);
+  return ids.next();
 }
 
-/** Whether this window sent the request with this id (#354). */
+/**
+ * Count this client's ids from `base` from now on: a phone calls it with the
+ * `idBase` its connection's `Welcome` carried. The desktop window never does.
+ */
+export function startRequestIds(base: number): void {
+  ids = requestIds(base);
+}
+
+/** Whether this client sent the request with this id (#354). */
 export function allocatedHere(id: number): boolean {
-  return isOwn(id, nextId);
+  return ids.own(id);
 }
 
 /**
