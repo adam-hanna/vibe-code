@@ -46,26 +46,17 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
-use iroh::address_lookup::AddressLookupBuilder;
-use iroh::endpoint::{
-    presets, AfterHandshakeOutcome, Connection, EndpointHooks, VarInt, WeakConnectionHandle,
-};
+use iroh::endpoint::{AfterHandshakeOutcome, Connection, EndpointHooks, VarInt, WeakConnectionHandle};
 use iroh::protocol::{AcceptError, ProtocolHandler, Router};
-use iroh::{Endpoint, EndpointId, RelayMap, RelayMode, RelayUrl, SecretKey, Watcher};
+use iroh::{EndpointId, RelayUrl, SecretKey, Watcher};
+// The internet builder is the shared crate's; only the loopback one is built here.
+#[cfg(test)]
+use iroh::Endpoint;
 use serde::Serialize;
 
-/// The pairing handshake. Anybody may open it; the one-time secret is the bound.
-pub const PAIR_ALPN: &[u8] = b"vibe/pair/1";
-
-/// Everything a paired phone does. Paired endpoint ids only.
-pub const REMOTE_ALPN: &[u8] = b"vibe/remote/1";
-
-/// The close code for an endpoint id that is not on the paired list, including
-/// one that was revoked while connected.
-///
-/// A stable number on the wire: the phone draws *`<desktop>` removed this phone*
-/// from it, and an older phone has to read a newer desktop's code. Never renumber.
-pub const NOT_PAIRED: u32 = 1;
+/// The two ALPNs and the close code are the phone's too, so they live in the
+/// shared crate (#345).
+pub use vibe_remote::{NOT_PAIRED, PAIR_ALPN, REMOTE_ALPN};
 
 /// Who may open `vibe/remote/1`.
 ///
@@ -294,19 +285,10 @@ impl RemoteEndpoint {
     ) -> Result<Self, String> {
         let hook = PairedOnly { gate: gate.clone() };
         let builder = match &config.reach {
-            Reach::Internet { relay, mdns } => {
-                let mut b = Endpoint::builder(presets::N0);
-                if let Some(url) = relay {
-                    b = b.relay_mode(RelayMode::Custom(RelayMap::from(url.clone())));
-                }
-                if *mdns {
-                    b = b.address_lookup(mdns_lookup());
-                }
-                b
-            }
+            Reach::Internet { relay, mdns } => vibe_remote::reach::internet(relay.clone(), *mdns),
             #[cfg(test)]
-            Reach::Loopback => Endpoint::builder(presets::Minimal)
-                .relay_mode(RelayMode::Disabled)
+            Reach::Loopback => Endpoint::builder(iroh::endpoint::presets::Minimal)
+                .relay_mode(iroh::RelayMode::Disabled)
                 .clear_address_lookup()
                 .bind_addr(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
                 .map_err(|e| format!("could not bind to loopback: {e}"))?,
@@ -397,15 +379,11 @@ impl RemoteEndpoint {
     }
 }
 
-/// The local-network lookup, typed out so the builder call above reads plainly.
-fn mdns_lookup() -> impl AddressLookupBuilder {
-    iroh_mdns_address_lookup::MdnsAddressLookup::builder()
-}
-
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use iroh::endpoint::{ApplicationClose, ConnectionError};
+    use iroh::endpoint::{presets, ApplicationClose, ConnectionError};
+    use iroh::RelayMode;
     use iroh::EndpointAddr;
     use std::collections::HashSet;
     use std::sync::atomic::{AtomicUsize, Ordering};

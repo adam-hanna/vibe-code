@@ -9,20 +9,14 @@
 //! like them it never crosses the IPC boundary. No command reads it, deletes it
 //! or names it; `read` is `pub(crate)` for the same reason `keys::read` is.
 
-use iroh_base::SecretKey;
 use keyring::Entry;
 
 /// The account inside the service. Stable - changing it orphans the key.
 pub(crate) const ACCOUNT: &str = "remote-identity";
 
-/// Where the raw 32 bytes are kept. A trait so the tests never touch the real
-/// keychain, which is the user's.
-pub(crate) trait Vault {
-    /// The stored bytes, `None` when nothing is stored, `Err` when the store
-    /// could not say.
-    fn get(&self) -> Result<Option<Vec<u8>>, String>;
-    fn set(&self, bytes: &[u8; 32]) -> Result<(), String>;
-}
+/// When a key is made and when a store is refused is the phone's rule too, so
+/// it is the shared crate's (#345). This file is the keychain it is kept in.
+pub(crate) use vibe_remote::identity::{read, read_or_create, Vault};
 
 /// The OS keychain.
 pub(crate) struct Keychain;
@@ -48,34 +42,10 @@ impl Vault for Keychain {
             .set_secret(bytes)
             .map_err(|e| format!("the keychain refused to store the device key: {e}"))
     }
-}
 
-/// The device key, or `None` if there is none yet. Never creates one.
-pub(crate) fn read(vault: &dyn Vault) -> Result<Option<SecretKey>, String> {
-    let bytes = vault
-        .get()
-        .map_err(|e| format!("the keychain refused to read the device key: {e}"))?;
-    let Some(bytes) = bytes else { return Ok(None) };
-    let bytes: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
-        format!(
-            "the device key in the keychain is {} bytes, not 32, so it cannot be used and will not be replaced",
-            bytes.len()
-        )
-    })?;
-    Ok(Some(SecretKey::from_bytes(&bytes)))
-}
-
-/// The device key, made and stored the first time it is needed.
-///
-/// Only an entry that is **known absent** gets a new key. A read that failed
-/// returns its sentence and nothing is written.
-pub(crate) fn read_or_create(vault: &dyn Vault) -> Result<SecretKey, String> {
-    if let Some(key) = read(vault)? {
-        return Ok(key);
+    fn called(&self) -> &'static str {
+        "the keychain"
     }
-    let key = SecretKey::generate();
-    vault.set(&key.to_bytes())?;
-    Ok(key)
 }
 
 #[cfg(test)]
@@ -103,6 +73,9 @@ pub(crate) mod tests {
             *self.stored.borrow_mut() = Some(bytes.to_vec());
             Ok(())
         }
+        fn called(&self) -> &'static str {
+            "the keychain"
+        }
     }
 
     #[test]
@@ -110,51 +83,8 @@ pub(crate) mod tests {
         assert_eq!(ACCOUNT, "remote-identity");
     }
 
-    #[test]
-    fn a_key_is_generated_once_stored_and_read_back() {
-        let vault = FakeVault::default();
-        let made = read_or_create(&vault).expect("generates");
-        assert_eq!(vault.writes.get(), 1);
-        let again = read(&vault).expect("reads").expect("present");
-        assert_eq!(again.public(), made.public());
-    }
-
-    #[test]
-    fn a_reload_makes_no_new_key() {
-        let vault = FakeVault::default();
-        let first = read_or_create(&vault).expect("generates");
-        let second = read_or_create(&vault).expect("reloads");
-        assert_eq!(vault.writes.get(), 1);
-        assert_eq!(first.public(), second.public());
-    }
-
-    #[test]
-    fn an_unreadable_keychain_fails_closed_and_generates_nothing() {
-        let vault = FakeVault {
-            unreadable: Some("DBus error: Remote peer disconnected".into()),
-            ..FakeVault::default()
-        };
-        let why = read_or_create(&vault).map(|_| ()).expect_err("refuses");
-        assert!(why.contains("DBus error"), "{why}");
-        assert!(why.contains("device key"), "{why}");
-        assert_eq!(vault.writes.get(), 0);
-    }
-
-    #[test]
-    fn a_stored_value_of_the_wrong_length_is_never_replaced() {
-        let vault = FakeVault { stored: RefCell::new(Some(vec![1, 2, 3])), ..FakeVault::default() };
-        let why = read_or_create(&vault).map(|_| ()).expect_err("refuses");
-        assert!(why.contains("3 bytes"), "{why}");
-        assert_eq!(vault.writes.get(), 0);
-        assert_eq!(*vault.stored.borrow(), Some(vec![1, 2, 3]));
-    }
-
-    #[test]
-    fn reading_an_empty_vault_creates_nothing() {
-        let vault = FakeVault::default();
-        assert!(read(&vault).expect("reads").is_none());
-        assert_eq!(vault.writes.get(), 0);
-    }
+    // The rules themselves - made once, never replaced, fail closed - are
+    // tested beside them in `app/remote/src/identity.rs` (#345).
 
     /// The issue's *"survives a restart and a reboot"*, against the real store.
     ///

@@ -42,9 +42,9 @@ These are AGENTS.md's, restated for this surface:
 
 | Path | What |
 |---|---|
-| `app/remote/` | A Rust crate shared by both apps: the wire types, pairing, the allowed-command list, and the iroh endpoint setup. A workspace member, so neither app copies it |
+| `app/remote/` | A Rust crate shared by both apps: the wire types, pairing, the allowed-command list, and the iroh endpoint setup. A path dependency of both apps, so neither copies it. Not a workspace member, as first written here: a workspace at `app/` would move the desktop's `target/` to `app/target`, and `release.yml` names the old path (#345) |
 | `app/src-tauri/src/remote/` | The desktop's side: the accepting endpoint, the bridge into the existing commands, the paired-phones store, and the remote-access settings |
-| `app/mobile/` | The mobile app: its own Tauri 2 crate (`app/mobile/src-tauri`) and `package.json`, built from the same `app/src` with `VITE_TARGET=mobile` |
+| `app/mobile/` | The mobile app: its own Tauri 2 crate (`app/mobile/src-tauri`) and `package.json`, built from the same `app/src` with `vite build --mode mobile` (`VITE_TARGET=mobile` as first written) |
 
 The mobile app is a **separate Tauri crate** rather than a mobile target of the
 desktop crate, because nearly everything the desktop crate does is absent on a
@@ -52,7 +52,7 @@ phone: spawning hosts, the Node sidecar (`externalBin`), the tray, the updater, 
 reaper and single-instance. Building those out with `cfg` would put the two
 products' rules in one file.
 
-`VITE_TARGET=mobile` swaps exactly the modules listed under
+`vite build --mode mobile` swaps exactly the modules listed under
 [Desktop-only pieces](#desktop-only-pieces) and adds the phone's own screens
 (desktops list, pairing, phone settings). `copy.test.ts`, `audit:contrast` and
 every cockpit test run against the same source.
@@ -65,9 +65,11 @@ every cockpit test run against the same source.
   on and stored in the OS keychain under its own entry, `remote-identity`. No
   command reads it, deletes it or names it. `keys.test.ts` pins that: the window's
   `key_*` commands still refuse anything but the two vendor providers.
-- **On the phone** the key is wrapped by a key held in the Android Keystore or the
-  iOS Keychain, because neither store hands out raw ed25519 bytes and iroh needs
-  them. The wrapped key lives in the app's private storage.
+- **On the phone** the key is wrapped by a key held in the Android Keystore, because
+  the Keystore hands out no raw ed25519 bytes and iroh needs them. The wrapped key
+  lives in the app's private storage. **On iOS it is a Keychain item itself**
+  (`AfterFirstUnlockThisDeviceOnly`), as built in #345: the Keychain holds arbitrary
+  bytes under the device's protection, so a wrapping key would guard nothing more.
 - **A reinstall that keeps the keychain keeps the endpoint id.** A reset keychain
   means a new id. See [the spec correction](#corrections-to-the-product-spec) on
   what a phone can tell in that case.
@@ -138,7 +140,7 @@ constant in `app/remote/`, and a test fails when a command is added to the deskt
 | `host_start`, `host_send`, `host_status` | allowed, as is |
 | `key_set`, `key_clear`, `key_status` | allowed. `key_set` writes the desktop's keychain; nothing reads it back |
 | `pilot_send`, `pilot_cancel`, `pilot_models` | allowed |
-| `update_check`, `update_install` | allowed. `update_install`'s `Opened` outcome becomes `OpenOnPhone`, carrying the release page's constant URL, and the phone opens it |
+| `update_check`, `update_install` | allowed. `update_install`'s `Opened` outcome becomes `openOnPhone`, and the phone opens the release page itself. No URL travels: both apps have the same constant, `vibe_remote::RELEASE_PAGE` (#345) |
 | `app_quit` | allowed, with the spec's confirmation on the phone |
 | `remote_*` (below) | allowed, including turning remote access off and revoking |
 
@@ -171,7 +173,7 @@ reach them. This is the [third spec correction](#corrections-to-the-product-spec
 
 ### Desktop-only pieces
 
-| On the desktop | On the phone (`VITE_TARGET=mobile`) |
+| On the desktop | On the phone (`--mode mobile`) |
 |---|---|
 | `pick.ts` opens the OS folder picker (`plugin-dialog`) | a folder browser over the existing `fs` read frame. Its roots are the host's, so a phone can browse exactly what the pilot can |
 | The tray, Quit, `app://quit-requested` | absent. `app_quit` is in the desktop's settings screen |
@@ -391,7 +393,7 @@ Three things the spec says cannot be built, or are not safe, as written:
 | #342 | the endpoint (n0 preset + mDNS + the relay setting), the two ALPNs, refusal before read, `remote_status` |
 | #343 | the control stream, calls and events, the allowed list and its test, id ranges, attribution, the live-run buffer |
 | #344 | `remote_set`, `remote.json`, autostart, keep awake, the connected-phone chip |
-| #345 | `app/mobile/` and `app/remote/` crates, `VITE_TARGET=mobile` and the swapped modules, the phone's key storage |
+| #345 | `app/mobile/` and `app/remote/` crates, `--mode mobile` and the swapped modules, the phone's key storage |
 | #346 | the phone's pairing, reconnecting, failure sentences, app lock, local notifications, and the device measurements |
 | #347 | the phone's screens |
 | #348 | mobile builds in CI and release |

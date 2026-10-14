@@ -24,6 +24,7 @@ import { backToCommand, convert, gatesPatch, pastedEscapes, readGates, ready, to
 import type { Gate, GateRow } from './gateform';
 import type { Listing } from './models';
 import { RemoteAccess } from '../remote/RemoteAccess';
+import { SURFACE } from '../surface';
 
 /**
  * The settings screen's recurring styles, named once (the UI rework). Every
@@ -1360,6 +1361,10 @@ export function Settings({
             </p>
           </section>
 
+          {/* The phone has no tray, so this is where the desktop app is quit
+              from there (#345). Never drawn on the desktop, which has Quit. */}
+          {!SURFACE.tray && <QuitDesktop />}
+
           {/* Remote access (#341): drawn only while previewed, until the real
               switch lands. `RemoteAccess` decides that itself, error included. */}
           <RemoteAccess problem={remoteProblem} onProblemSeen={() => onRemoteProblemSeen?.()} />
@@ -2426,5 +2431,52 @@ export function Settings({
 
     </div>
     </Refusals.Provider>
+  );
+}
+
+/**
+ * Quitting the desktop app, from a phone (#345).
+ *
+ * It is the tray's Quit, behind the product spec's confirmation: once the app
+ * on the desktop has stopped, nothing answers this phone until somebody starts
+ * it there again. A run going on the desktop is stopped by it the way the tray's
+ * Quit stops one, and can be resumed.
+ */
+function QuitDesktop() {
+  const [asking, setAsking] = useState(false);
+  const [problem, setProblem] = useState<string | null>(null);
+  return (
+    <section className={S.block}>
+      <h3 className={S.h}>quit the desktop app</h3>
+      <p className={S.note}>
+        Stops Vibe on the desktop this phone is connected to. The phone cannot reconnect until somebody
+        starts it again on the desktop.
+      </p>
+      <div>
+        <Button variant="loss" onClick={() => setAsking(true)}>
+          quit the desktop app
+        </Button>
+      </div>
+      {asking && (
+        <Confirm
+          kicker="quit"
+          title="Quit Vibe on the desktop?"
+          lead="This phone cannot reconnect until somebody starts Vibe on the desktop again. A run going there stops where it is and can be resumed."
+          facts={[]}
+          confirm="quit the desktop app"
+          problem={problem}
+          onConfirm={() => {
+            host.appQuit().then(
+              () => setAsking(false),
+              (e: unknown) => setProblem(e instanceof Error ? e.message : String(e)),
+            );
+          }}
+          onCancel={() => {
+            setAsking(false);
+            setProblem(null);
+          }}
+        />
+      )}
+    </section>
   );
 }

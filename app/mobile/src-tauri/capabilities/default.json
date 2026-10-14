@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/mobile-schema.json",
+  "identifier": "default",
+  "description": "What the phone's window may do: its own three commands and Tauri's core events. Every desktop command goes through `remote_call`, and the desktop's allowed list decides it there (#343). No plugin permission is granted: the release page is opened from Rust, never by the window naming a URL.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

@@ -4,6 +4,7 @@ import type { ButtonHTMLAttributes, ReactNode } from 'react';
 import { VibeMark } from '../design/Icon';
 import { Tooltip, TooltipContent, TooltipTrigger } from '../ui/tooltip';
 import { cn } from '@/lib/utils';
+import { SURFACE } from '../surface';
 
 /**
  * The strip of icons down the left edge, VS Code's shape.
@@ -54,9 +55,12 @@ export function ActivityBar({
       <Tool label="New run" onClick={onNew}>
         <Plus className="size-5" aria-hidden />
       </Tool>
-      <Tool label={`Find a run or action (${paletteChord})`} onClick={onPalette}>
-        <Search className="size-5" aria-hidden />
-      </Tool>
+      {/* The phone has no palette, so no tool for it (#345). */}
+      {SURFACE.palette && (
+        <Tool label={`Find a run or action (${paletteChord})`} onClick={onPalette}>
+          <Search className="size-5" aria-hidden />
+        </Tool>
+      )}
       <div className="flex-1" />
       {update}
       <Tool label="Settings for all projects" onClick={onSettings}>

@@ -7,6 +7,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
+    "build:mobile": "tsc --noEmit && vite build --mode mobile --outDir mobile/dist --emptyOutDir",
+    "dev:mobile": "vite --mode mobile",
     "typecheck": "tsc --noEmit",
     "preview": "vite preview",
     "audit:contrast": "node scripts/contrast.mjs",
@@ -15,7 +17,7 @@
     "app:dev": "tauri dev",
     "app:build": "tauri build",
     "app:exe": "tauri build --no-bundle",
-    "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml",
+    "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml -p vibe-desktop -p vibe-remote",
     "test:web": "vitest run",
     "app:test": "npm run test:web && npm run test:rust"
   },

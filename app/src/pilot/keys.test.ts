@@ -20,6 +20,7 @@ import cockpit from '../cockpit/Cockpit.tsx?raw';
 import tools from './tools.ts?raw';
 import remoteMod from '../../src-tauri/src/remote/mod.rs?raw';
 import remoteIdentity from '../../src-tauri/src/remote/identity.rs?raw';
+import sharedIdentity from '../../remote/src/identity.rs?raw';
 import remoteWindow from '../remote/remote.ts?raw';
 import { PROVIDER_NAME, PROVIDERS, usable } from './keys';
 import type { KeyStatus } from './keys';
@@ -306,10 +307,17 @@ describe('the device key is a third keychain entry no command reaches (#341)', (
   });
 
   test('the identity has a crate-only reader and no way to delete it', () => {
+    // The reader is the shared crate's since #345, so the phone keeps its key
+    // by the same rules. The desktop takes it in `pub(crate)`, which is what
+    // keeps it crate-only here, and the shared crate has no Tauri at all, so
+    // nothing in it can be a command.
     const body = production(remoteIdentity);
-    expect(body).toContain('pub(crate) fn read(');
-    expect(body).not.toMatch(/\bpub fn\b/);
+    expect(body).toContain('pub(crate) use vibe_remote::identity::{read');
+    expect(body).not.toMatch(/\bpub fn\b|\bpub use\b/);
     expect(body).not.toContain('delete_credential');
+    const shared = production(sharedIdentity);
+    expect(shared).toContain('pub fn read(');
+    expect(shared).not.toMatch(/tauri|delete_credential/);
   });
 
   test('the key_* commands still accept only the two vendors', () => {

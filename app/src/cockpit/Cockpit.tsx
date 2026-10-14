@@ -11,6 +11,7 @@ import type { UpdateState } from '../shell/UpdatePopover';
 import { CHECK_EVERY_MS, CHECK_KEY, SKIP_KEY, checkEnabled, shown } from '../shell/update';
 import type { UpdateInfo } from '../shell/update';
 import { Palette } from '../shell/Palette';
+import { SURFACE } from '../surface';
 import { statusBarControls } from '../shell/controls';
 import { StatusBar } from '../shell/StatusBar';
 import { ACTIONS, available, chordLabel, shortcutFor } from '../shell/actions';
@@ -1025,6 +1026,7 @@ export function Cockpit() {
   // letter. Escape always leaves, from the window rather than from whichever
   // control happens to have focus.
   useEffect(() => {
+    if (!SURFACE.keyboard) return;
     const onKey = (event: KeyboardEvent): void => {
       if (event.key === 'Escape') {
         setDiagnostics(false);
@@ -1961,7 +1963,7 @@ export function Cockpit() {
           runs. **A pick OPENS a run** - points the window at it, a read - where
           the switcher this replaces resumed one, which was a second place able
           to start a run. Starting stays in `1b` and the pilot. */}
-      <Palette
+      {SURFACE.palette && <Palette
         open={switching}
         onOpenChange={setSwitching}
         actions={available({
@@ -1979,7 +1981,7 @@ export function Cockpit() {
           setViewing({ dir: repoDir, runId, task });
           setOpenAt(null);
         }}
-      />
+      />}
 
       {/* `7c`, above everything and below the titlebar. It is a statement about
           the whole window - everything under it is as old as the strip says -

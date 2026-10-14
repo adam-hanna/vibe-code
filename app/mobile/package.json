@@ -1,0 +1,18 @@
+{
+  "name": "vibe-mobile",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "The vibe phone app (#345). Built from the same `app/src` as the desktop, with `vite build --mode mobile`; never in the npm package.",
+  "scripts": {
+    "tauri": "tauri",
+    "android:init": "tauri android init --ci",
+    "android:build": "tauri android build --apk --target aarch64",
+    "ios:init": "tauri ios init --ci",
+    "ios:build": "tauri ios build",
+    "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.11.4"
+  }
+}

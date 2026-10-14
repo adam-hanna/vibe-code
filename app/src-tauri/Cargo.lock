@@ -6189,13 +6189,11 @@ dependencies = [
  "getrandom 0.3.4",
  "iroh",
  "iroh-base",
- "iroh-mdns-address-lookup",
  "keyring",
  "libc",
  "qrcode",
  "serde",
  "serde_json",
- "sha2 0.10.9",
  "subtle",
  "tauri",
  "tauri-build",
@@ -6204,7 +6202,20 @@ dependencies = [
  "tauri-plugin-updater",
  "tokio",
  "ureq",
+ "vibe-remote",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "vibe-remote"
+version = "0.1.0"
+dependencies = [
+ "iroh",
+ "iroh-base",
+ "iroh-mdns-address-lookup",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
 ]
 
 [[package]]

@@ -2188,7 +2188,7 @@ are the rules the code is held to:
 - **The phone's webview is `app/src`, and its `invoke` and `listen` go over the
   connection** to the same Tauri command functions the desktop window calls. The cockpit
   never knows which side it is on, so there is one cockpit, not two. Only the modules a
-  phone cannot run are swapped, under `VITE_TARGET=mobile`.
+  phone cannot run are swapped, under `vite build --mode mobile` (#345).
 - **Full parity, and the list is still closed.** A phone may call every command the
   window may, and the allowed list in `app/remote/` is pinned against `generate_handler!`,
   so a new command is a decision about remote access made on purpose.
@@ -2204,6 +2204,47 @@ are the rules the code is held to:
   published record, no listening socket. Its settings are a Rust-owned file, not vibe's
   config, because Rust reads them before any window exists and no project file may reach
   them.
+
+**The phone app is `app/mobile/`, and it is a client only** (#345). Its own Tauri crate
+and `package.json`, built from the same `app/src`; no Node host, no agent CLI, nothing
+that runs a turn. Four things carry it:
+
+- **One seam, `app/src/transport.ts`.** Every module that reaches Rust imports `invoke`
+  and `listen` from it. The phone build swaps in `transport.mobile.ts`, which wraps each
+  desktop command as a `remote_call` naming it; events are re-emitted by the phone's Rust
+  under the desktop's own names, so `listen` is unchanged. The phone checks nothing
+  against an allowed list: the desktop's is the one that decides. `local` reaches the
+  phone's own commands (`phone_identity`, `phone_open_release_page`).
+- **The swaps are a list, `app/mobile-swaps.ts`**: the transport, the folder chooser
+  (`pick.mobile.tsx` browses the desktop over the `fs` frame, inside the pilot's roots)
+  and `surface.ts` (no keyboard chords, no palette). `mobile.test.ts` fails on a
+  `*.mobile.ts` the list does not name, and on a swap missing an export of what it
+  replaces.
+- **The phone's key follows the desktop's rules**, which moved into
+  `vibe_remote::identity`: made only when the store says there is none, never written
+  over one it could not read. Android keeps it encrypted by a Keystore AES key; iOS in
+  the Keychain, `AfterFirstUnlockThisDeviceOnly`, so it is in no backup.
+- **A mock desktop is how the cockpit is seen on a simulator.** `--features
+  mock-desktop` answers from `src-tauri/fixtures/desktop.json`, which
+  `scripts/record-mock-desktop.mjs` records from the real host over a run the loop
+  harness makes with fake agents. Re-record after a protocol change. No release build
+  turns it on.
+
+```bash
+cd app/mobile && npm install
+npm run test:rust                                          # the phone crate's tests
+npx tauri android init --ci                                # gen/android - generated, not committed
+npx tauri android build --apk --target aarch64 --debug --features mock-desktop
+node scripts/record-mock-desktop.mjs                       # after `npm run build` at the root
+```
+
+Gradle 8.14 does not run on JDK 25, so point `JAVA_HOME` at a 21. On iOS, iroh's network
+watcher and DNS resolver need Apple's SystemConfiguration framework, which Tauri's generated
+Xcode project does not link unless `bundle.iOS.frameworks` names it: without it the link
+fails on fifty `_SC*` symbols. `gen/` is generated
+by `tauri <platform> init` on each machine and in CI, because iOS's needs macOS to make.
+`.github/workflows/mobile.yml` launches both mock builds - an Android emulator and an iOS
+simulator - and fails unless the cockpit read the recorded run.
 
 ## Repo map
 
@@ -2317,7 +2358,11 @@ app/src-tauri/src/reaper.rs  making a killed app take the host with it
 app/src-tauri/src/keys.rs    the OS keychain, and the read the window cannot reach
 app/src-tauri/src/pilot/     one of the app's two network clients - two adapters, one vocabulary
 app/src-tauri/src/update.rs  the other: checking for a newer app, and installing it when asked
-app/src-tauri/src/remote/    a phone dialling this desktop: the device key, pairing, the paired list, the iroh endpoint and its two ALPNs - wire.rs is what the phone shares
+app/src-tauri/src/remote/    a phone dialling this desktop: the device key, pairing, the paired list, the iroh endpoint
+app/remote/          what the phone and the desktop share: the pairing wire, the framing, the ALPNs, the key rules, how to reach n0 - a path dependency of both, tested with `-p vibe-remote`
+app/mobile/          the phone app: its Tauri crate, the mock desktop and its recorder, the launch checks
+app/src/transport.ts where the window's commands go - Tauri on the desktop, the paired desktop on a phone
+app/mobile-swaps.ts  the modules the phone build replaces, and nothing else
 app/src-tauri/src/pilot/sse.rs      the wire format both vendors share, and nothing else
 app/src-tauri/src/pilot/event.rs    PilotEvent and Usage - every count an Option, on purpose
 app/scripts/         contrast.mjs, stage-sidecar.mjs, make-icon.mjs, prune-appimage.mjs - all dependency-free

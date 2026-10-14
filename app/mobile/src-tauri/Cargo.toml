@@ -1,0 +1,60 @@
+[package]
+name = "vibe-mobile"
+version = "0.1.0"
+description = "The vibe phone app: the cockpit, talking to a paired desktop"
+authors = ["Adam Hanna"]
+edition = "2021"
+# iroh 1.3 and iroh-base 1.3 declare 1.91, as in the desktop crate.
+rust-version = "1.91"
+publish = false
+
+[lib]
+# Tauri's mobile targets load the app as a library: a cdylib on Android and a
+# staticlib on iOS. `rlib` for the tests and for `main.rs`'s desktop run.
+name = "vibe_mobile_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+# The release page in the phone's own browser, from the Rust side only: the
+# webview is granted no opener permission (`capabilities/default.json`).
+tauri-plugin-opener = "2"
+# Lines a person debugging a phone can read: logcat on Android, the unified log
+# on iOS, stdout on a desktop run. The launch checks read them too.
+tauri-plugin-log = "2"
+log = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# What the phone shares with the desktop: the wire, the framing, the ALPNs, the
+# key rules and how to reach n0 (#345). Building it here is what proves iroh
+# builds for each phone target.
+vibe-remote = { path = "../../remote" }
+iroh-base = { version = "1.3", default-features = false, features = ["key"] }
+# The phone's key store, behind one API on both platforms. The store itself is
+# chosen per target below.
+keyring-core = "1"
+
+# The Android Keystore holds an AES key that never leaves it; the device key is
+# encrypted with it and kept in the app's SharedPreferences. That is the
+# design's "wrapped", since the Keystore hands out no raw ed25519 bytes.
+# Tauri initialises the JNI context this reads.
+[target.'cfg(target_os = "android")'.dependencies]
+android-native-keyring-store = "1"
+
+# The iOS Keychain's data-protection store: an iOS app may use no other.
+[target.'cfg(target_os = "ios")'.dependencies]
+apple-native-keyring-store = { version = "1", features = ["protected"] }
+# Held below 0.2.190, which made `mach_task_self` macOS-only: `num_threads`
+# 0.1.7, the newest, still calls it on iOS, and it arrives through `time`, which
+# both Tauri and iroh use. The desktop's lockfile is on 0.2.189. Lift this once
+# `num_threads` stops calling it there.
+libc = ">=0.2.150, <0.2.190"
+
+[features]
+# A desktop that is not there (#345): answers from a recorded session, so the
+# cockpit can be launched on a simulator and seen drawing frames. Never in a
+# release build - nothing in `npm run` turns it on.
+mock-desktop = []

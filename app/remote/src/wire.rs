@@ -1,7 +1,7 @@
 //! What the desktop and a phone agree on about pairing (#341).
 //!
-//! **No Tauri and nothing desktop-only, on purpose.** The shared `app/remote/`
-//! crate (#345) takes this file as it is, so the phone parses a QR payload and
+//! **No Tauri and nothing desktop-only, on purpose.** Both apps take this file
+//! through the shared crate (#345), so the phone parses a QR payload and
 //! computes a matching code with the very same lines the desktop does. Two
 //! copies of either would be two answers to "do these six digits match", which
 //! is the one question pairing exists to answer.
@@ -11,9 +11,9 @@
 //! not worth its weight.
 //!
 //! The payload parser has no desktop caller: the phone reads a payload, and
-//! the tests here are its caller until #345 builds one. The messages are read
-//! and written by the `vibe/pair/1` handler, `handshake.rs`.
-#![allow(dead_code)]
+//! the tests here are its caller until the phone's pairing screen (#346). The
+//! messages are read and written with [`crate::framing`], by the desktop's
+//! `vibe/pair/1` handler.
 
 use std::fmt;
 
