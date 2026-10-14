@@ -42,7 +42,7 @@ These are AGENTS.md's, restated for this surface:
 
 | Path | What |
 |---|---|
-| `app/remote/` | A Rust crate shared by both apps: the wire types, pairing, the allowed-command list, and the iroh endpoint setup. A workspace member, so neither app copies it |
+| `app/remote/` | A Rust crate shared by both apps: the wire types, pairing, the allowed-command list, and the iroh endpoint setup. A path dependency of both apps, so neither copies it. Not a workspace member, as first written here: a workspace at `app/` would move the desktop's `target/` to `app/target`, and `release.yml` names the old path (#345) |
 | `app/src-tauri/src/remote/` | The desktop's side: the accepting endpoint, the bridge into the existing commands, the paired-phones store, and the remote-access settings |
 | `app/mobile/` | The mobile app: its own Tauri 2 crate (`app/mobile/src-tauri`) and `package.json`, built from the same `app/src` with `VITE_TARGET=mobile` |
 

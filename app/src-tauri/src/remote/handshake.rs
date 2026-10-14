@@ -43,6 +43,7 @@ use iroh::protocol::{AcceptError, ProtocolHandler};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use tokio::sync::oneshot;
+use vibe_remote::framing;
 
 use super::identity::Vault;
 use super::pairing::{Pairing, CODE_TTL_MS};
@@ -123,29 +124,14 @@ fn ttl() -> Duration {
     Duration::from_millis(CODE_TTL_MS)
 }
 
-/// Why a message could not be read, as a sentence for the phone.
+/// One pairing message from the phone, bounded by [`PAIR_MESSAGE_MAX`]. The
+/// error is a sentence for the phone.
 async fn read_message<T: DeserializeOwned>(recv: &mut RecvStream) -> Result<T, String> {
-    let mut len = [0u8; 4];
-    recv.read_exact(&mut len)
-        .await
-        .map_err(|e| format!("the message could not be read: {e}"))?;
-    let len = u32::from_be_bytes(len) as usize;
-    if len > PAIR_MESSAGE_MAX {
-        return Err(format!("a pairing message may be at most {PAIR_MESSAGE_MAX} bytes, and this one is {len}"));
-    }
-    let mut body = vec![0u8; len];
-    recv.read_exact(&mut body)
-        .await
-        .map_err(|e| format!("the message could not be read: {e}"))?;
-    serde_json::from_slice(&body).map_err(|e| format!("the message is not a pairing message: {e}"))
+    framing::read_message(recv, PAIR_MESSAGE_MAX, "pairing message").await
 }
 
 async fn write_message<T: Serialize>(send: &mut SendStream, message: &T) -> Result<(), AcceptError> {
-    let body = serde_json::to_vec(message).map_err(AcceptError::from_err)?;
-    let len = u32::try_from(body.len()).map_err(AcceptError::from_err)?;
-    send.write_all(&len.to_be_bytes()).await.map_err(AcceptError::from_err)?;
-    send.write_all(&body).await.map_err(AcceptError::from_err)?;
-    Ok(())
+    framing::write_message(send, message).await.map_err(AcceptError::from_err)
 }
 
 /// Send the last message, and wait until the phone has it or has gone. The

@@ -13,8 +13,9 @@
 //!   QR code, burnt by any attempt, and a six-digit matching code both screens
 //!   show, so a yes is a yes to the device in the owner's hand.
 //! - **the paired list** (`store.rs`), a file Rust owns.
-//! - **the wire** (`wire.rs`), everything the phone also needs, kept free of
-//!   Tauri so the shared crate (#345) takes it as a plain file move.
+//! - **the wire**, everything the phone also needs, in the shared crate
+//!   `app/remote/` (#345) along with the framing, the two ALPNs and how an
+//!   endpoint reaches n0.
 //! - **the endpoint** (`endpoint.rs`), what a phone dials, and **the pairing
 //!   handler** (`handshake.rs`), which carries `attempt` and `answer` over it.
 //!
@@ -32,7 +33,9 @@
 
 pub mod pairing;
 pub mod qr;
-pub mod wire;
+/// Everything the phone also needs, in the shared crate (#345). Re-exported
+/// so the desktop's side names it as it always has.
+pub use vibe_remote::wire;
 pub mod endpoint;
 pub mod handshake;
 pub(crate) mod identity;

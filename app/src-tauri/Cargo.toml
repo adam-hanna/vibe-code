@@ -59,9 +59,6 @@ ureq = { version = "3.2.1", default-features = false, features = ["rustls", "jso
 # ed25519 types; the default is only the relay URL type. Its cost is
 # ed25519-dalek 3, curve25519-dalek 5 and rand 0.10 in the build.
 iroh-base = { version = "1.3", default-features = false, features = ["key"] }
-# The pairing matching code: six digits from a SHA-256 both ends compute
-# (#341). Already in the tree via Tauri, so this adds nothing to the build.
-sha2 = "0.10"
 # The constant-time compare of a pairing secret (#341). Already in the tree.
 subtle = "2"
 # The pairing QR code as a matrix of modules, which the window draws itself
@@ -87,9 +84,11 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 # measured on #339. `tls-ring` is iroh's default provider, kept so no C toolchain
 # for aws-lc is needed on Windows.
 iroh = { version = "1.3", default-features = false, features = ["tls-ring", "fast-apple-datapath"] }
-# A phone on the same network finds the desktop with no internet at all: 0.175s
-# with no relay on #339.
-iroh-mdns-address-lookup = "0.6"
+# What the phone and the desktop share: the pairing wire, the framing, the two
+# ALPNs and the close code, and how an endpoint reaches n0 (#345). A path
+# dependency, not a workspace member - `app/remote/Cargo.toml` says why. mDNS
+# and the matching code's SHA-256 come in through it.
+vibe-remote = { path = "../remote" }
 # iroh's runtime, already in the tree through Tauri with all three features on,
 # so naming them adds nothing to the build: `time` for the pairing handler's
 # waits, `sync` for the oneshot that carries the person's answer to it, and

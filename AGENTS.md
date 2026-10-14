@@ -2317,7 +2317,8 @@ app/src-tauri/src/reaper.rs  making a killed app take the host with it
 app/src-tauri/src/keys.rs    the OS keychain, and the read the window cannot reach
 app/src-tauri/src/pilot/     one of the app's two network clients - two adapters, one vocabulary
 app/src-tauri/src/update.rs  the other: checking for a newer app, and installing it when asked
-app/src-tauri/src/remote/    a phone dialling this desktop: the device key, pairing, the paired list, the iroh endpoint and its two ALPNs - wire.rs is what the phone shares
+app/src-tauri/src/remote/    a phone dialling this desktop: the device key, pairing, the paired list, the iroh endpoint
+app/remote/          what the phone and the desktop share: the pairing wire, the framing, the ALPNs, how to reach n0 - a path dependency of both, tested with `-p vibe-remote`
 app/src-tauri/src/pilot/sse.rs      the wire format both vendors share, and nothing else
 app/src-tauri/src/pilot/event.rs    PilotEvent and Usage - every count an Option, on purpose
 app/scripts/         contrast.mjs, stage-sidecar.mjs, make-icon.mjs, prune-appimage.mjs - all dependency-free
