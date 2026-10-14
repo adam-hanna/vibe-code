@@ -25,6 +25,10 @@
  *   it. So the phone draws neither. The Explorer and run-status toggles sit at
  *   the two ends of the tab row, and New run and Settings head the Explorer
  *   sheet, which is the phone's home.
+ * - `ownPlace`: whether this device keeps where it was pointed under a key of
+ *   its own. The window's memory is the desktop's files, which a phone reaches
+ *   too, so a phone saving under the desktop's key moved the desktop window's
+ *   place (`placeKeyOf` in `cockpit/where.ts`).
  */
 export const SURFACE = {
   keyboard: true,
@@ -32,4 +36,5 @@ export const SURFACE = {
   tray: true,
   overlayPanels: false,
   compactChrome: false,
+  ownPlace: false,
 } as const;

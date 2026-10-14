@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'vitest';
 import cockpit from './Cockpit.tsx?raw';
-import { NOWHERE, OPEN_PANELS, readWhere, startPanels, writableWhere } from './where';
+import main from '../main.tsx?raw';
+import { NOWHERE, OPEN_PANELS, placeKeyOf, readWhere, startPanels, WHERE_KEY, writableWhere } from './where';
 
 /**
  * Where the window was pointed, kept between launches (#223). Every relaunch
@@ -95,5 +96,30 @@ describe('the panels a window starts with', () => {
 
   test('a phone starts with both side sheets shut, and keeps the rest', () => {
     expect(startPanels(kept, true)).toEqual({ ...kept, sidebar: false, loop: false });
+  });
+});
+
+describe("a device's own place (#347)", () => {
+  test('the desktop keeps the key it always had', () => {
+    expect(placeKeyOf(undefined)).toBe(WHERE_KEY);
+  });
+
+  test('a phone keeps its place under a key named by its endpoint id, so two phones never share one', () => {
+    expect(placeKeyOf('abc123')).toBe(`${WHERE_KEY}.phone.abc123`);
+    expect(placeKeyOf('abc123')).not.toBe(placeKeyOf('def456'));
+    expect(placeKeyOf('abc123')).not.toBe(WHERE_KEY);
+  });
+
+  test('a phone that cannot say who it is keeps no place, rather than the desktop’s', () => {
+    expect(placeKeyOf(null)).toBeNull();
+    expect(placeKeyOf('  ')).toBeNull();
+  });
+
+  test('the cockpit reads and writes only the key it was given, and a phone asks before it mounts', () => {
+    expect(cockpit).toMatch(/if \(placeKey === null\) return NOWHERE;/);
+    expect(cockpit).toMatch(/readWhere\(memory\.getItem\(placeKey\)\)/);
+    expect(cockpit).toMatch(/if \(placeKey === null\) return;\s*memory\.setItem\(\s*placeKey,/);
+    expect(main).toMatch(/if \(SURFACE\.ownPlace\) \{[\s\S]*keepPlaceUnder\(placeKeyOf\(device\)\);[\s\S]*\}/);
+    expect(main.indexOf('keepPlaceUnder(')).toBeLessThan(main.indexOf('createRoot('));
   });
 });

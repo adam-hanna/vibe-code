@@ -177,10 +177,22 @@ const TICK_MS = 1000;
 /** Where the last repository is remembered. See `repoDir` below. */
 const REPO_KEY = 'vibe.repo';
 
+/**
+ * The key this device keeps its place under (`placeKeyOf` in `where.ts`), or
+ * null for a phone that keeps none. Set once, before the cockpit mounts, by
+ * `main.tsx` - the phone has to ask its own Rust who it is, and every read of
+ * the place is a synchronous `useState` initialiser.
+ */
+let placeKey: string | null = WHERE_KEY;
+export function keepPlaceUnder(key: string | null): void {
+  placeKey = key;
+}
+
 /** Where the window was pointed when it last closed. See `where.ts`. */
 function storedWhere(): Where {
+  if (placeKey === null) return NOWHERE;
   try {
-    return readWhere(memory.getItem(WHERE_KEY));
+    return readWhere(memory.getItem(placeKey));
   } catch {
     return NOWHERE;
   }
@@ -848,8 +860,9 @@ export function Cockpit() {
   const drafting = drafts.find((d) => d.id === draftId) ?? null;
   useEffect(() => {
     try {
+      if (placeKey === null) return;
       memory.setItem(
-        WHERE_KEY,
+        placeKey,
         writableWhere({ tab: tab === 'commands' ? cameFrom.current : tab, viewing, draftId, bottom, panels }),
       );
     } catch {

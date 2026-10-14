@@ -27,6 +27,26 @@
 export const WHERE_KEY = 'vibe.where';
 
 /**
+ * The key a device keeps its place under (#347).
+ *
+ * The window's memory is files the desktop's host writes, and a phone reaches
+ * the same files over its connection - so a phone that kept its place under
+ * `WHERE_KEY` moved the desktop window's: opening a run or shutting a sheet on
+ * the phone decided where the desktop landed on its next launch, and two
+ * phones moved each other's. A phone keeps its own, named by its endpoint id,
+ * which is public and is what the desktop already knows it by.
+ *
+ * `undefined` is the desktop, which keeps the key it always had. `null` is a
+ * phone that could not say who it is: it keeps **no** place rather than borrow
+ * the desktop's, because borrowing it is the defect this exists to stop.
+ */
+export function placeKeyOf(device: string | null | undefined): string | null {
+  if (device === undefined) return WHERE_KEY;
+  if (device === null || device.trim() === '') return null;
+  return `${WHERE_KEY}.phone.${device}`;
+}
+
+/**
  * The tabs of the main pane. A tab missing here comes back as the pilot.
  *
  * `output` is back among them, right of the pilot (#284). The UI rework moved it

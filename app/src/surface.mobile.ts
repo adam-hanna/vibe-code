@@ -8,4 +8,5 @@ export const SURFACE = {
   tray: false,
   overlayPanels: true,
   compactChrome: true,
+  ownPlace: true,
 } as const;

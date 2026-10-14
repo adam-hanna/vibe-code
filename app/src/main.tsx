@@ -1,11 +1,14 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { Boundary } from './Boundary';
-import { Cockpit } from './cockpit/Cockpit';
+import { Cockpit, keepPlaceUnder } from './cockpit/Cockpit';
+import { placeKeyOf } from './cockpit/where';
 import * as host from './host';
 import { flushMemory, loadMemory, memory, memoryChanged } from './memory';
 import { chatChanged } from './pilot/chatstore';
 import { keepLedgerIn } from './pilot/ledger';
+import { SURFACE } from './surface';
+import { local } from './transport';
 // The whole stylesheet: `tokens.css` (through `./design`) and Tailwind over it.
 // Every rule the app draws with is a utility in the component that uses it, or
 // one of the few global rules in `theme.css` (#237).
@@ -36,6 +39,15 @@ async function render(into: HTMLElement): Promise<void> {
   // would draw defaults and then save them over what was stored.
   await loadMemory();
   keepLedgerIn(memory);
+  // A phone keeps its place under its own key (#347), so it must know who it
+  // is before the cockpit reads that place. One that cannot say keeps none.
+  if (SURFACE.ownPlace) {
+    const device = await local<{ endpointId: string }>('phone_identity').then(
+      (r) => r.endpointId,
+      () => null,
+    );
+    keepPlaceUnder(placeKeyOf(device));
+  }
   window.addEventListener('pagehide', flushMemory);
   createRoot(into).render(
     <StrictMode>
