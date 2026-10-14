@@ -28,8 +28,32 @@ function mobileSwaps(): Plugin {
   };
 }
 
+/**
+ * The phone build in a browser tab (`--mode mobile-browser`): the phone's swaps,
+ * plus `mobile/browser-mock.ts` loaded ahead of the cockpit so a tab with no
+ * Tauri is answered from the recorded desktop. A dev server only.
+ */
+function browserMock(): Plugin {
+  return {
+    name: 'vibe-mobile-browser-mock',
+    apply: 'serve',
+    // A pattern, not the literal tag: Vite appends a `?t=` to it after an
+    // update, and a missed match would load the cockpit with nothing answering.
+    transformIndexHtml: (html) =>
+      html.replace(
+        /<script type="module" src="\/src\/main\.tsx[^"]*">/,
+        '<script type="module" src="/mobile/browser-mock.ts"></script>\n    $&',
+      ),
+  };
+}
+
 export default defineConfig(({ mode }) => ({
-  plugins: [react(), tailwindcss(), ...(mode === 'mobile' ? [mobileSwaps()] : [])],
+  plugins: [
+    react(),
+    tailwindcss(),
+    ...(mode === 'mobile' || mode === 'mobile-browser' ? [mobileSwaps()] : []),
+    ...(mode === 'mobile-browser' ? [browserMock()] : []),
+  ],
   resolve: {
     // `@/` is the shadcn convention and what its copied-in components import
     // through. Mirrored in `tsconfig.json`; the two have to agree.

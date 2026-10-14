@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest';
 import cockpit from './Cockpit.tsx?raw';
-import { NOWHERE, OPEN_PANELS, readWhere, writableWhere } from './where';
+import { NOWHERE, OPEN_PANELS, readWhere, startPanels, writableWhere } from './where';
 
 /**
  * Where the window was pointed, kept between launches (#223). Every relaunch
@@ -74,8 +74,20 @@ describe('where the window was', () => {
   test('the cockpit starts from it and writes it back as it moves', () => {
     expect(cockpit).toMatch(/useState<Viewing \| null>\(\(\) => storedWhere\(\)\.viewing\)/);
     expect(cockpit).toMatch(/\(\(\) => storedWhere\(\)\.tab\)/);
-    expect(cockpit).toMatch(/\(\(\) => storedWhere\(\)\.panels\)/);
+    expect(cockpit).toMatch(/\(\(\) => startPanels\(storedWhere\(\)\.panels, SURFACE\.overlayPanels\)\)/);
     expect(cockpit).toMatch(/\(\(\) => storedWhere\(\)\.bottom\)/);
     expect(cockpit).toMatch(/writableWhere\(\{ tab, viewing, draftId, bottom, panels \}\)/);
+  });
+});
+
+describe('the panels a window starts with', () => {
+  const kept = { sidebar: true, loop: false, bottom: true, sizes: { shell: { sidebar: 20, center: 60, loop: 20 } } };
+
+  test('a desktop starts exactly as it was kept', () => {
+    expect(startPanels(kept, false)).toBe(kept);
+  });
+
+  test('a phone starts with both side sheets shut, and keeps the rest', () => {
+    expect(startPanels(kept, true)).toEqual({ ...kept, sidebar: false, loop: false });
   });
 });
