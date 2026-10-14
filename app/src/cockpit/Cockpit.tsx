@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Activity, PanelLeft, PanelRightClose, PanelRightOpen, Plus, Settings as SettingsIcon, Terminal, X } from 'lucide-react';
+import { Activity, ChevronLeft, PanelLeft, PanelRightClose, PanelRightOpen, Plus, Settings as SettingsIcon, Terminal, X } from 'lucide-react';
 import { usePanelRef } from 'react-resizable-panels';
 import type { Layout, LayoutChangedMeta, PanelImperativeHandle } from 'react-resizable-panels';
 import { Badge } from '@/ui/badge';
@@ -697,6 +697,16 @@ export function Cockpit() {
    * project dropdown row… where project level settings live."*
    */
   const [settingsScope, setSettingsScope] = useState<'global' | 'project'>('global');
+  /**
+   * The tab a view with no tab of its own was opened from (#347). `settings`
+   * and `runs` have no button in the bar, and on a phone the bar is not drawn
+   * under them, so their way back is a press that returns here. The pilot when
+   * nothing else is known, since that is where the window lands.
+   */
+  const cameFrom = useRef<typeof tab>('pilot');
+  useEffect(() => {
+    if (tab !== 'settings' && tab !== 'runs') cameFrom.current = tab;
+  }, [tab]);
   const openSettings = useCallback((scope: 'global' | 'project') => {
     setSettingsScope(scope);
     setTab('settings');
@@ -2224,7 +2234,7 @@ export function Cockpit() {
           {/* A phone draws no heading: its title repeats the selected tab, and
               the tab row carries the run-status toggle instead (#347). An
               opened run's label survives as one quiet line. */}
-          {SURFACE.compactChrome && viewing !== null && (
+          {SURFACE.compactChrome && viewing !== null && tab !== 'settings' && tab !== 'runs' && (
             <p className="m-0 flex-none bg-page px-4 pt-1.5 text-label text-tertiary">Run archive</p>
           )}
           {!SURFACE.compactChrome && (
@@ -2264,6 +2274,15 @@ export function Cockpit() {
             they go, and putting them after the frames it does name is the least
             it can be wrong by.
           */}
+          {/* A view with no tab of its own is not one of the run's panes, so on
+              a phone the run's tabs give way to the way back (#347). */}
+          {SURFACE.compactChrome && (tab === 'settings' || tab === 'runs') ? (
+            <div className="flex flex-none items-center gap-1 border-b border-rule-structure bg-page px-1 py-1">
+              <Button variant="quiet" size="sm" onClick={() => setTab(cameFrom.current)}>
+                <ChevronLeft className="size-4" aria-hidden /> Back
+              </Button>
+            </div>
+          ) : (
           <PaneTabs
             selected={tab}
             lead={
@@ -2387,6 +2406,7 @@ export function Cockpit() {
                 A phone has no heading; its way to the pane is the status bar's
                 usage readout, which opens the same pane. */}
           </PaneTabs>
+          )}
           {/* There is no "reading a saved run" strip here any more. The panes
               and the column both follow an opened run (#223), the sidebar
               highlights which run that is, and the footer carries the real
