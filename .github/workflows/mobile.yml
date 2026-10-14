@@ -1,0 +1,124 @@
+# The phone app (#345): its Rust tests, and a launch on an Android emulator and
+# an iOS simulator with the mock desktop, on every pull request that touches it.
+#
+# The launches are the issue's done-when: the app builds for each platform,
+# starts, and draws the cockpit from frames - measured from the app's own log
+# (`scripts/launch-*.sh`), with a screenshot of each kept as an artifact. The
+# builds here are debug builds with `mock-desktop` on, which no release ever
+# is; making and signing release builds is #348.
+name: Mobile
+
+on:
+  pull_request:
+    branches: [develop, main]
+    paths:
+      - app/mobile/**
+      - app/remote/**
+      - app/src/**
+      - app/vite.config.ts
+      - app/mobile-swaps.ts
+      - .github/workflows/mobile.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mobile-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/linux-deps
+      - run: cargo test --manifest-path app/mobile/src-tauri/Cargo.toml
+      - run: cargo test --manifest-path app/mobile/src-tauri/Cargo.toml --features mock-desktop
+
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            app/package-lock.json
+            app/mobile/package-lock.json
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-linux-android
+      # The emulator needs /dev/kvm, which a hosted runner has but does not open.
+      - name: Open KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - run: npm ci
+        working-directory: app
+      - run: npm ci
+        working-directory: app/mobile
+      - name: Build the APK
+        working-directory: app/mobile
+        env:
+          NDK_HOME: ${{ env.ANDROID_NDK_LATEST_HOME }}
+        run: |
+          npx tauri android init --ci
+          npx tauri android build --apk --target x86_64 --debug --features mock-desktop --ci
+      - name: Launch on an emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          disable-animations: true
+          script: app/mobile/scripts/launch-android.sh app/mobile/src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk launch
+      - if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: android-launch
+          path: launch/
+          if-no-files-found: ignore
+
+  ios:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            app/package-lock.json
+            app/mobile/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim
+      - run: npm ci
+        working-directory: app
+      - run: npm ci
+        working-directory: app/mobile
+      # The device target, with the real key store and no mock: what a phone
+      # would run, and the proof iroh builds for `aarch64-apple-ios`.
+      - run: cargo build --manifest-path app/mobile/src-tauri/Cargo.toml --lib --target aarch64-apple-ios
+      - name: Build for the simulator
+        working-directory: app/mobile
+        run: |
+          npx tauri ios init --ci
+          npx tauri ios build --target aarch64-sim --debug --features mock-desktop --ci
+          find src-tauri/gen/apple/build -name '*.app' -maxdepth 6 | tee /tmp/apps.txt
+      - name: Launch on a simulator
+        run: app/mobile/scripts/launch-ios.sh "$(grep -i sim /tmp/apps.txt | head -1 || head -1 /tmp/apps.txt)" launch
+      - if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ios-launch
+          path: launch/
+          if-no-files-found: ignore

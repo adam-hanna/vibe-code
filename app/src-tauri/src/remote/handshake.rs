@@ -258,6 +258,9 @@ mod tests {
         fn set(&self, _: &[u8; 32]) -> Result<(), String> {
             Err("the test vault holds one key and takes no other".into())
         }
+        fn called(&self) -> &'static str {
+            "the test vault"
+        }
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]

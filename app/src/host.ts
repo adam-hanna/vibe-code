@@ -1,5 +1,4 @@
-import { invoke } from '@tauri-apps/api/core';
-import { listen } from '@tauri-apps/api/event';
+import { invoke, listen, local } from './transport';
 import type { PilotAccess } from './pilot/access';
 import type { Outcome, UpdateInfo, UpdateProgress } from './shell/update';
 import { isOwn } from './changed';
@@ -1098,16 +1097,34 @@ export function updateCheck(): Promise<UpdateInfo | null> {
  * by the same conservative reading the tray's Quit uses - and the window calls
  * again with `confirmed` once a person has said yes.
  */
-export function updateInstall(confirmed: boolean): Promise<Outcome> {
-  return invoke<Outcome>('update_install', { page: false, confirmed });
+export async function updateInstall(confirmed: boolean): Promise<Outcome> {
+  return here(await invoke<Answered>('update_install', { page: false, confirmed }));
 }
 
 /**
  * Open the release page in the system's browser (#299): the `.deb`'s Download
  * and the notes link. The URL is a constant in Rust; the window never names one.
  */
-export function openReleasePage(): Promise<Outcome> {
-  return invoke<Outcome>('update_install', { page: true, confirmed: false });
+export async function openReleasePage(): Promise<Outcome> {
+  return here(await invoke<Answered>('update_install', { page: true, confirmed: false }));
+}
+
+/**
+ * What `update_install` answers. A phone is told `openOnPhone` where the desktop
+ * would have opened its own browser (#343), because a page opened on the
+ * desktop is no use to somebody holding the phone.
+ */
+type Answered = Outcome | 'openOnPhone';
+
+/**
+ * Open the release page on this device when that is what was asked, and answer
+ * as the desktop would have. The URL is the phone's own constant - the same
+ * one, from the shared crate - so no page a connection named is ever opened.
+ */
+async function here(answer: Answered): Promise<Outcome> {
+  if (answer !== 'openOnPhone') return answer;
+  await local('phone_open_release_page');
+  return 'opened';
 }
 
 /** Download and install progress, as Rust measures it (#299). */

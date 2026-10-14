@@ -1,5 +1,4 @@
-import { invoke } from '@tauri-apps/api/core';
-import { listen } from '@tauri-apps/api/event';
+import { invoke, listen } from '../transport';
 
 /**
  * The window's end of remote access (#341): the four commands and the two

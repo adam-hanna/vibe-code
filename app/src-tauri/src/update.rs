@@ -54,8 +54,9 @@ use crate::applog;
 use crate::host::{self, HostProcess};
 
 /// Where Download and Release notes send a browser. A constant, so the window
-/// can ask for the page and never say which page.
-pub const RELEASE_PAGE: &str = "https://github.com/adam-hanna/vibe-code/releases/latest";
+/// can ask for the page and never say which page. The phone opens the same one,
+/// so it lives in the shared crate (#345).
+pub use vibe_remote::RELEASE_PAGE;
 
 /// How long one request may take - the manifest check, and the bundle download.
 ///

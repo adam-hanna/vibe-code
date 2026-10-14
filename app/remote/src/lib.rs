@@ -10,10 +10,13 @@
 //! - [`wire`]: the pairing payload, its messages, the matching code and the
 //!   names, as #341 built them.
 //! - [`framing`]: how one message is carried on a QUIC stream.
+//! - [`identity`]: when a device key is made, and when a store is refused.
 //! - [`reach`]: how an endpoint reaches the internet, the same on both ends.
+//! - [`RELEASE_PAGE`]: the one page either app opens in a browser.
 //! - The two ALPNs and the one close code, below.
 
 pub mod framing;
+pub mod identity;
 pub mod reach;
 pub mod wire;
 
@@ -29,6 +32,11 @@ pub const REMOTE_ALPN: &[u8] = b"vibe/remote/1";
 /// A stable number on the wire: the phone draws *`<desktop>` removed this phone*
 /// from it, and an older phone has to read a newer desktop's code. Never renumber.
 pub const NOT_PAIRED: u32 = 1;
+
+/// Where Download and Release notes send a browser, on the desktop and on the
+/// phone. A constant, so neither window ever names a page and no connection can
+/// make either app open one.
+pub const RELEASE_PAGE: &str = "https://github.com/adam-hanna/vibe-code/releases/latest";
 
 #[cfg(test)]
 mod tests {
