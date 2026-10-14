@@ -1812,7 +1812,7 @@ export function Cockpit() {
    * On a phone (#347) a press inside a sheet that changes what the MAIN pane
    * shows puts the sheet away, so the press lands on what it opened rather than
    * under the sheet that covers it - a run or a draft from the sidebar, a round
-   * card, *back to the live run*, a resume or an implement from the footer.
+   * card, the way back from an opened run, a resume or an implement from the footer.
    * Presses that act in the sheet itself (expanding a project, answering a
    * gate) leave it open. A desktop's side columns sit beside the main pane and
    * never need this.
