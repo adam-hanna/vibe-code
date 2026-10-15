@@ -62,8 +62,8 @@ pub trait Desktop: Send + Sync {
         Box::pin(async { Err(UNCONNECTED.to_string()) })
     }
 
-    /// `phone_pair_cancel`: Back, during a pairing.
-    fn pair_cancel(&self) {}
+    /// `phone_pair_cancel`: Back, during the pairing for `attempt`.
+    fn pair_cancel(&self, _attempt: u64) {}
 
     /// `phone_unpair`.
     fn unpair(&self, _id: String) -> Answer<'_> {

@@ -47,7 +47,7 @@ use vibe_remote::paired::PairedList;
 use vibe_remote::wire::PairPayload;
 
 use crate::desktop::{Answer, Desktop, Later, UNCONNECTED};
-use crate::pairing::{pair_flow, PairCode, Real};
+use crate::pairing::{pair_flow, PairCode, PairSlot, Real};
 
 /// Held events for one connection, until the webview is ready for them.
 #[derive(Debug, Default)]
@@ -259,7 +259,7 @@ struct Inner {
     net: Arc<NetState>,
     generation: AtomicU64,
     state: Mutex<LinkState>,
-    pairing: Mutex<Option<oneshot::Sender<()>>>,
+    pairing: Mutex<PairSlot>,
 }
 
 /// The phone's link to its desktops.
@@ -296,7 +296,7 @@ impl Link {
             net: Arc::new(NetState::default()),
             generation: AtomicU64::new(0),
             state: Mutex::new(LinkState::default()),
-            pairing: Mutex::new(None),
+            pairing: Mutex::new(PairSlot::default()),
         }))
     }
 }
@@ -426,7 +426,8 @@ impl Inner {
             log::warn!("vibe-mobile: {why}");
         }
         log::info!("vibe-mobile: connected to {id} in {ms} ms");
-        log::info!("vibe-mobile: path to {id} is {} at connect", path_word(session.path()));
+        // The first path measurement, in the same form as every change after it.
+        log::info!("vibe-mobile: path to {id} is now {} after {ms} ms", path_word(session.path()));
         self.emit("phone://connected", json!({ "generation": generation }));
         self.changed();
         tell(Ok(generation));
@@ -632,9 +633,12 @@ impl Desktop for Link {
                 Ok(p) => p,
                 Err(e) => return Ok(json!({ "reason": Reason::PairRefused { reason: e.to_string() } })),
             };
-            let (tx, cancel) = oneshot::channel();
-            // A second pairing replaces the first, whose sender drops: Back.
-            *inner.pairing.lock().unwrap_or_else(|p| p.into_inner()) = Some(tx);
+            // A Back that reached Rust before this future ran is kept by the
+            // slot, and nothing is dialled. A second pairing replaces the
+            // first, whose sender drops: Back.
+            let Some(cancel) = inner.pairing.lock().unwrap_or_else(|p| p.into_inner()).start(attempt) else {
+                return Ok(json!({ "reason": Reason::PairCancelled }));
+            };
             let client = inner.client().await?;
             let list = &*inner.list;
             let emitter = inner.clone();
@@ -652,10 +656,8 @@ impl Desktop for Link {
         })
     }
 
-    fn pair_cancel(&self) {
-        if let Some(tx) = self.0.pairing.lock().unwrap_or_else(|p| p.into_inner()).take() {
-            let _ = tx.send(());
-        }
+    fn pair_cancel(&self, attempt: u64) {
+        self.0.pairing.lock().unwrap_or_else(|p| p.into_inner()).cancel(attempt);
     }
 
     fn unpair(&self, id: String) -> Answer<'_> {

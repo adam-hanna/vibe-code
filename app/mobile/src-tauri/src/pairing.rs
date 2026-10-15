@@ -60,6 +60,49 @@ impl Challenge for Real<'_> {
     }
 }
 
+/// Which pairing Back is for, by the screen's attempt number.
+///
+/// `phone_pair` and `phone_pair_cancel` are two commands, and the second can
+/// reach Rust before the first's future has run far enough to say it is
+/// waiting - a Back pressed the moment the scan came back, or the lock taking
+/// the screen down. So a cancel for an attempt nothing is waiting on is
+/// **kept**, and the pairing for that attempt finds it and dials nothing. It
+/// is keyed by the attempt rather than a flag, so a stray cancel cannot end a
+/// later pairing, and only the latest is kept: the screen runs one at a time.
+#[derive(Default)]
+pub struct PairSlot {
+    waiting: Option<(u64, oneshot::Sender<()>)>,
+    cancelled: Option<u64>,
+}
+
+impl PairSlot {
+    /// A pairing for `attempt` begins: its Back, or `None` if Back already came.
+    /// A pairing still waiting from an earlier attempt loses its sender, which
+    /// is a Back for it.
+    pub fn start(&mut self, attempt: u64) -> Option<oneshot::Receiver<()>> {
+        if self.cancelled == Some(attempt) {
+            self.cancelled = None;
+            return None;
+        }
+        let (tx, rx) = oneshot::channel();
+        self.waiting = Some((attempt, tx));
+        Some(rx)
+    }
+
+    /// Back for `attempt`: fires it if it is waiting, else keeps it for `start`.
+    pub fn cancel(&mut self, attempt: u64) {
+        match self.waiting.take() {
+            Some((waiting, tx)) if waiting == attempt => {
+                let _ = tx.send(());
+            }
+            other => {
+                self.waiting = other;
+                self.cancelled = Some(attempt);
+            }
+        }
+    }
+}
+
 /// Pair: race the dial against Back, emit the code, then race the answer
 /// against Back - with an answer already read winning.
 ///
@@ -150,6 +193,35 @@ mod tests {
 
     fn run<F: Future>(f: F) -> F::Output {
         tauri::async_runtime::block_on(f)
+    }
+
+    #[test]
+    fn a_cancel_that_arrives_before_its_pairing_starts_is_kept_and_stops_it() {
+        let mut slot = PairSlot::default();
+        slot.cancel(7);
+        assert!(slot.start(7).is_none(), "Back came first: nothing is dialled");
+        // Used once: the same number again is a new pairing.
+        assert!(slot.start(7).is_some());
+    }
+
+    #[test]
+    fn a_cancel_for_the_waiting_attempt_fires_it_and_a_stray_one_does_not() {
+        let mut slot = PairSlot::default();
+        let mut back = slot.start(1).expect("started");
+        slot.cancel(99);
+        assert!(back.try_recv().is_err(), "a cancel for another attempt leaves this one alone");
+        assert!(slot.start(99).is_none(), "and is kept for its own");
+        let mut back = slot.start(2).expect("started");
+        slot.cancel(2);
+        assert_eq!(back.try_recv(), Ok(()));
+    }
+
+    #[test]
+    fn a_new_pairing_is_a_back_for_the_one_before() {
+        let mut slot = PairSlot::default();
+        let mut first = slot.start(1).expect("started");
+        let _second = slot.start(2).expect("started");
+        assert!(matches!(first.try_recv(), Err(oneshot::error::TryRecvError::Closed)));
     }
 
     #[test]

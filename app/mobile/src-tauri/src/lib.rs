@@ -44,6 +44,7 @@ use serde::Serialize;
 use serde_json::Value;
 #[cfg(mobile)]
 use tauri::Emitter;
+use tauri::plugin::PermissionState;
 use tauri::{Manager, State};
 use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_opener::OpenerExt;
@@ -226,8 +227,8 @@ async fn phone_pair(phone: State<'_, Phone>, payload: String, phone_name: String
 }
 
 #[tauri::command]
-fn phone_pair_cancel(phone: State<'_, Phone>) {
-    phone.desktop.pair_cancel();
+fn phone_pair_cancel(phone: State<'_, Phone>, attempt: u64) {
+    phone.desktop.pair_cancel(attempt);
 }
 
 #[tauri::command]
@@ -248,9 +249,48 @@ async fn phone_network_change(phone: State<'_, Phone>, online: bool) -> Result<(
     Ok(())
 }
 
+/// Whether to ask the OS for permission to notify: the setting is on, and the
+/// OS has not been answered yet. A refusal is the OS's answer and is not asked
+/// again.
+fn ask_to_notify(notify: bool, state: PermissionState) -> bool {
+    notify && matches!(state, PermissionState::Prompt | PermissionState::PromptWithRationale)
+}
+
+/// Whether a notification may be shown: the setting is on and the OS allows it.
+fn may_notify(notify: bool, state: PermissionState) -> bool {
+    notify && state == PermissionState::Granted
+}
+
+/// Notifications are on by default, so a fresh install has never pressed the
+/// switch and the OS has never been asked. Asked once per launch, from the
+/// first `phone_settings` (the boot read) and whenever the switch is turned
+/// on - never from `phone_notify`, which fires while the app is hidden.
+static ASKED_TO_NOTIFY: AtomicBool = AtomicBool::new(false);
+
+fn ensure_notify_permission(app: &tauri::AppHandle, notify: bool) {
+    let state = match app.notification().permission_state() {
+        Ok(state) => state,
+        Err(e) => {
+            log::warn!("vibe-mobile: notification permission: {e}");
+            return;
+        }
+    };
+    if ask_to_notify(notify, state) {
+        if let Err(e) = app.notification().request_permission() {
+            log::warn!("vibe-mobile: notification permission: {e}");
+        }
+    }
+}
+
 #[tauri::command]
-async fn phone_settings(phone: State<'_, Phone>) -> Result<SettingsReport, String> {
-    Ok(phone.report().await)
+async fn phone_settings(app: tauri::AppHandle, phone: State<'_, Phone>) -> Result<SettingsReport, String> {
+    let report = phone.report().await;
+    // Not in the mock build, which CI launches with nobody to answer a prompt,
+    // for the reason it starts unlocked.
+    if !cfg!(feature = "mock-desktop") && !ASKED_TO_NOTIFY.swap(true, Ordering::SeqCst) {
+        ensure_notify_permission(&app, report.settings.notify);
+    }
+    Ok(report)
 }
 
 #[tauri::command]
@@ -258,10 +298,7 @@ async fn phone_settings_set(app: tauri::AppHandle, phone: State<'_, Phone>, patc
     let file = phone.settings.as_ref().map_err(Clone::clone)?;
     file.apply(&patch)?;
     if patch.notify == Some(true) {
-        // The OS asks once; a refusal is the OS's answer, and nothing fires.
-        if let Err(e) = app.notification().request_permission() {
-            log::warn!("vibe-mobile: notification permission: {e}");
-        }
+        ensure_notify_permission(&app, true);
     }
     Ok(phone.report().await)
 }
@@ -281,7 +318,10 @@ async fn phone_unlock(phone: State<'_, Phone>) -> Result<bool, String> {
 /// setting again, so a stale webview cannot notify past a switch turned off.
 #[tauri::command]
 fn phone_notify(app: tauri::AppHandle, phone: State<'_, Phone>, title: String, body: String) -> Result<(), String> {
-    if !phone.loaded().settings.notify {
+    // Shown only once the OS allows it: a fresh install's first notification
+    // would otherwise go to `show()` unasked and vanish.
+    let state = app.notification().permission_state().map_err(|e| e.to_string())?;
+    if !may_notify(phone.loaded().settings.notify, state) {
         return Ok(());
     }
     app.notification().builder().title(title).body(body).show().map_err(|e| e.to_string())
@@ -415,6 +455,26 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    use tauri::plugin::PermissionState as P;
+
+    #[test]
+    fn a_default_on_switch_asks_the_os_once_it_is_undecided_and_never_after_a_refusal() {
+        assert!(super::ask_to_notify(true, P::Prompt), "a fresh install");
+        assert!(super::ask_to_notify(true, P::PromptWithRationale));
+        assert!(!super::ask_to_notify(true, P::Granted));
+        assert!(!super::ask_to_notify(true, P::Denied), "a refusal is the OS's answer");
+        assert!(!super::ask_to_notify(false, P::Prompt), "the switch is off");
+    }
+
+    #[test]
+    fn a_notification_is_shown_only_when_the_switch_is_on_and_the_os_allows_it() {
+        assert!(super::may_notify(true, P::Granted));
+        for state in [P::Prompt, P::PromptWithRationale, P::Denied] {
+            assert!(!super::may_notify(true, state), "{state:?}");
+        }
+        assert!(!super::may_notify(false, P::Granted));
+    }
+
     use super::*;
     use desktop::{Answer, UNCONNECTED};
 

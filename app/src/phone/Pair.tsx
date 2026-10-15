@@ -48,8 +48,8 @@ export function Pair({
   const begun = useRef(false);
   /** False once the person has left this attempt: Back, or the screen unmounting. */
   const live = useRef(true);
-  /** True while `phone_pair` is waiting, so leaving can cancel it. */
-  const dialling = useRef(false);
+  /** The attempt `phone_pair` was asked for and has not answered, so leaving can cancel it. */
+  const dialling = useRef<number | null>(null);
 
   useEffect(() => {
     // Set on mount as well, because StrictMode mounts twice with the same refs.
@@ -57,7 +57,7 @@ export function Pair({
     return () => {
       live.current = false;
       void cancelScan().catch(() => undefined);
-      if (dialling.current) void local('phone_pair_cancel').catch(() => undefined);
+      if (dialling.current !== null) void local('phone_pair_cancel', { attempt: dialling.current }).catch(() => undefined);
     };
   }, []);
 
@@ -91,14 +91,14 @@ export function Pair({
         );
         if (!live.current) return;
         dispatch({ type: 'scanned', attempt });
-        dialling.current = true;
+        dialling.current = attempt;
         const outcome = await local<Outcome>('phone_pair', { payload: scanned.content, phoneName: name, attempt });
-        dialling.current = false;
+        dialling.current = null;
         // Dispatched after Back too: `pairStep` keeps an `ok` the phone had
         // already committed, and drops the rest.
         dispatch({ type: 'outcome', attempt, outcome });
       } catch (err) {
-        dialling.current = false;
+        dialling.current = null;
         if (!live.current) return;
         setProblem(err instanceof Error ? err.message : String(err));
         onBack();
@@ -110,7 +110,9 @@ export function Pair({
 
   const back = () => {
     if (state.step === 'dialling' || state.step === 'code') {
-      void local('phone_pair_cancel');
+      // By attempt: a Back that reaches Rust before `phone_pair` has started
+      // waiting is kept for it, so the dial never happens.
+      void local('phone_pair_cancel', { attempt: state.attempt });
       dispatch({ type: 'back' });
     } else {
       live.current = false;

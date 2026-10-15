@@ -2380,7 +2380,8 @@ travel with it:
   kept by the link and held at its gate; the webview's `lockGate` makes both reads wait for the
   unlock, and the cockpit stays mounted under the cover so the runs it folded are not lost.
   Leaving the pairing screen, by Back or by the lock, ends the attempt: a scan that resolves
-  late pairs nothing. Only the plugin's explicit `passcodeNotSet` is *no lock*: biometrics being
+  late pairs nothing, and `phone_pair_cancel` names its attempt, so a Back that reaches Rust
+  before `phone_pair` is waiting is kept (`PairSlot`) and the dial never happens. Only the plugin's explicit `passcodeNotSet` is *no lock*: biometrics being
   unavailable is not, because a PIN is still a lock. The mock build opens unlocked, since no CI
   emulator can answer a prompt. `confirmOnDevice` is the transport seam's fourth function: the
   cockpit asks before storing a key, turning YOLO on, deleting a run and pairing or unpairing, and
@@ -2388,6 +2389,9 @@ travel with it:
 - **Plugins are driven from Rust** - biometric, notification - **except the barcode scanner**,
   which has no Rust API. `capabilities/scan.json` grants its four permissions on phones only, and
   `Pair.tsx` is the one module that imports it; `mobile.test.ts` pins both.
+- **Notifications are on by default, so the OS is asked at the first `phone_settings` of a
+  launch** (and when the switch is turned on), never from `phone_notify`, which shows a
+  notification only once the OS has granted it. The mock build does not ask.
 - **Notifications are offered off frames the cockpit already folds** (`cockpit/notices.ts`), by
   type and id after `invokeOutcome`, once per key, and fired by the phone's Rust only while the app
   is hidden with notifications on - and only while it is alive. An ask held and released during a

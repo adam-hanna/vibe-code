@@ -262,7 +262,7 @@ describe('the phone app', () => {
     expect(between(listens, asks)).toContain('if (!live.current) return;');
     // Back from the scan cancels the camera, and unmounting cancels both.
     expect(pairScreen).toMatch(/live\.current = false;\s*if \(state\.step === 'scanning'\) void cancelScan\(\)/);
-    expect(pairScreen).toMatch(/return \(\) => \{\s*live\.current = false;\s*void cancelScan\(\)[^;]*;\s*if \(dialling\.current\) void local\('phone_pair_cancel'\)/);
+    expect(pairScreen).toMatch(/return \(\) => \{\s*live\.current = false;\s*void cancelScan\(\)[^;]*;\s*if \(dialling\.current !== null\) void local\('phone_pair_cancel', \{ attempt: dialling\.current \}\)/);
   });
 });
 
