@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Activity, ChevronLeft, PanelLeft, PanelRightClose, PanelRightOpen, Plus, Settings as SettingsIcon, Smartphone, Terminal, X } from 'lucide-react';
+import { Activity, ChevronLeft, PanelLeft, PanelRightClose, PanelRightOpen, Monitor, Plus, Settings as SettingsIcon, Smartphone, Terminal, X } from 'lucide-react';
 import { usePanelRef } from 'react-resizable-panels';
 import type { Layout, LayoutChangedMeta, PanelImperativeHandle } from 'react-resizable-panels';
 import { Badge } from '@/ui/badge';
@@ -243,7 +243,16 @@ interface Wire {
   unknown: readonly string[];
 }
 
-export function Cockpit() {
+export function Cockpit({
+  onDesktops,
+}: {
+  /**
+   * The phone's way back to its list of paired desktops (#346), drawn in the
+   * sidebar's head beside This phone. Absent on the desktop. It was a fixed
+   * button over the whole cockpit, and it covered the gate sheet's continue.
+   */
+  onDesktops?: (() => void) | undefined;
+} = {}) {
   /**
    * Every run this window has started and not yet let go of (#246).
    *
@@ -2332,6 +2341,11 @@ export function Cockpit() {
               something head it. */}
           {SURFACE.compactChrome && panels.sidebar && (
             <div className="flex flex-none items-center justify-end gap-1 border-b border-rule-structure px-2 py-1">
+              {onDesktops !== undefined && (
+                <Tool label="Desktops" className="mr-auto" onClick={onDesktops}>
+                  <Monitor className="size-5" aria-hidden />
+                </Tool>
+              )}
               <Tool label="New run" onClick={act.newRun}>
                 <Plus className="size-5" aria-hidden />
               </Tool>

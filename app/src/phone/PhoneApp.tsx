@@ -166,10 +166,7 @@ export function PhoneApp() {
     // connection. A reconnect while locked waits for the unlock (`lockGate`).
     return (
       <>
-        <Cockpit />
-        <Button className="fixed bottom-3 left-3 z-40" size="sm" onClick={() => void leave()}>
-          Desktops
-        </Button>
+        <Cockpit onDesktops={() => void leave()} />
         {locked && cover}
       </>
     );
