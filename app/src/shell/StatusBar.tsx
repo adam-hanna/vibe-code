@@ -28,7 +28,7 @@ import { SURFACE } from '../surface';
  * - **Spend**, absent rather than `0 tok` before anything is charged - a run
  *   that has spent nothing has not spent zero, it has not been measured.
  * - **The build stamp**, because two builds of one version are otherwise
- *   identical (#201).
+ *   identical (#201). Not on a phone, whose Diagnostics screen has it (#347).
  * - **The connected phones**, one chip each by the paired list's name, only
  *   while one is connected (#344).
  *
@@ -234,16 +234,23 @@ export function StatusBar({
         </span>
       ) : null}
 
+      {/* Never wrapped (#347): on a phone holding a gate the bar is full, and a
+          two-line readout pushed the bar taller than its one row. */}
       <button
         type="button"
-        className="cursor-pointer rounded-sm border border-transparent bg-transparent px-1 text-secondary hover:text-emphasis"
+        className="shrink-0 cursor-pointer whitespace-nowrap rounded-sm border border-transparent bg-transparent px-1 text-secondary hover:text-emphasis"
         onClick={onSpend}
         title="Usage for the live run"
       >
         {run.spend.tokens === null ? 'no usage reported' : `${fmtTokens(run.spend.tokens)} tok`}
       </button>
 
-      {build !== null && <span className="font-mono text-mono-sm text-tertiary">{buildStamp(build)}</span>}
+      {/* Not on a phone (#347): the stamp tells two desktop builds apart, and
+          the phone's Diagnostics screen carries it with the sentence that makes
+          it usable. The bar's room goes to the gate's control and the spend. */}
+      {build !== null && !SURFACE.compactChrome && (
+        <span className="font-mono text-mono-sm text-tertiary">{buildStamp(build)}</span>
+      )}
 
       {!outside && SURFACE.compactChrome && (
         // A phone opens a screen instead (#347): the popover is wider than it.

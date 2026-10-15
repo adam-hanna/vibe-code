@@ -4,6 +4,7 @@ import settings from '../cockpit/Settings.tsx?raw';
 import phone from './PhoneSettings.tsx?raw';
 import diagnostics from './PhoneDiagnostics.tsx?raw';
 import statusBar from '../shell/StatusBar.tsx?raw';
+import paneTabs from '../shell/PaneTabs.tsx?raw';
 
 /**
  * The phone's own settings (#347). Source-read, because the claims are about
@@ -50,5 +51,17 @@ describe("the phone's diagnostics", () => {
 
   test("leave out the desktop's connected-phone chip, which on a phone names itself", () => {
     expect(cockpit).toMatch(/phones=\{SURFACE\.compactChrome \? \[\] : connectedNames\(remoteStatus\)\}/);
+  });
+});
+
+describe("the phone's chrome fits its one row", () => {
+  test('the spend readout never wraps, and the build stamp is left to Diagnostics', () => {
+    expect(statusBar).toMatch(/shrink-0 cursor-pointer whitespace-nowrap[^"]*"\s+onClick=\{onSpend\}/);
+    expect(statusBar).toMatch(/\{build !== null && !SURFACE\.compactChrome && \(/);
+  });
+
+  test("the run-status toggle is the Explorer button's size, behind a rule", () => {
+    expect(cockpit).toMatch(/trail=\{[\s\S]*?<Tool label="Show run status" on=\{panels\.loop\} onClick=\{act\.toggleLoop\}>/);
+    expect(paneTabs).toMatch(/border-l border-rule-inner[^"]*">\{trail\}/);
   });
 });

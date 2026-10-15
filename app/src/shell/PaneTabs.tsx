@@ -114,7 +114,8 @@ function ScrollingTabs({
           )}
         />
       </div>
-      {trail !== undefined && <div className="flex flex-none items-center pr-1">{trail}</div>}
+      {/* A rule before the trail, so the last tab visible never runs into it. */}
+      {trail !== undefined && <div className="flex flex-none items-center border-l border-rule-inner pr-1 pl-0.5">{trail}</div>}
     </div>
   );
 }

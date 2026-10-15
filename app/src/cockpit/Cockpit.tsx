@@ -2457,7 +2457,20 @@ export function Cockpit() {
                 <PanelLeft className="size-5" aria-hidden />
               </Tool>
             }
-            trail={statusToggle}
+            trail={
+              // The lead's size and shape (#347): the desktop header's small
+              // icon button sat flush against the last tab and its dot covered
+              // half the glyph. The dot moves to the corner, where the
+              // desktop's strip carries it.
+              <Tool label="Show run status" on={panels.loop} onClick={act.toggleLoop}>
+                <PanelRightOpen className="size-5" aria-hidden />
+                {!past && shownLive !== null && !settled(run) && (
+                  <span className="absolute top-2 right-2 flex">
+                    <LivenessDot state={run.running === null ? 'waiting' : 'live'} />
+                  </span>
+                )}
+              </Tool>
+            }
           >
             {/* The pilot (#143, #144), and hi-fi 5's first tab. The count is
                 proposals waiting on a person, and it is here because a proposal
