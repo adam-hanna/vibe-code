@@ -346,6 +346,94 @@
   --wave-duration: 1.2s;
 }
 
+/* ================================================================ light (#347)
+ * The second palette: VS Code's Light Modern, the half of the pair the dark
+ * values above came from (2026-10-06). Chosen per device - light, dark, or the
+ * system's - by `appearance.ts`, and applied as `data-theme` on the root.
+ *
+ * Only colour moves. Every token NAME and every rule above holds here too, and
+ * `audit:contrast` runs each check on this block as well as on the dark one,
+ * so nothing below is a looser palette. Two of the dark comments read
+ * differently on a light ground and the audit says them the way that survives:
+ * the severity ramp ascends in CONTRAST against the panel (P0 darkest here,
+ * brightest there), and the diff rows stand further from the panel than any
+ * card does, darker here where they are brighter there.
+ *
+ * Measured (by the audit): the floor spans 5.16-6.69 across the ten surfaces,
+ * worst on the active header - above the dark palette's 5.05. The rows sit at
+ * 1.24 and 1.30 against the panel, above the selected row's 1.23. Pastel rows
+ * carry more HSL saturation than the dark ones (34% and 56%) because at this
+ * lightness that is what a visible hue costs.
+ */
+:root[data-theme='light'] {
+  --surface-page: #ffffff;
+  --surface-chrome: #f8f8f8;
+  --surface-column: #f8f8f8;
+  --surface-panel: #ffffff;
+  --surface-card: #f3f3f3;
+  --surface-active: #e8e8e8;
+  --surface-active-hdr: #e2e2e2;
+  --surface-accent-tint: #dbe9f8;
+  --surface-alarm: #f8e3e3;
+  --surface-tray: #f8f8f8;
+
+  --text-display: #000000;
+  --text-emphasis: #1f1f1f;
+  --text-primary: #3b3b3b;
+  --text-secondary: #474747;
+  --text-tertiary: #5c5c5c;        /* THE FLOOR */
+
+  /* Retired on this ground too, and the audit holds them to the same claim:
+   * each must fail somewhere a real surface exists. The AA-limit grey passes
+   * on white and fails on eight of the ten. */
+  --retired-aa-limit: #767676;
+  --retired-1: #8a8a8a;
+  --retired-2: #9a9a9a;
+  --retired-3: #aaaaaa;
+  --retired-4: #b8b8b8;
+
+  --rule-strong: #c4c4c4;
+  --rule-control: #cecece;
+  --rule-control-dim: #e0e0e0;
+  --rule-structure: #e5e5e5;
+  --rule-card: #e0e0e0;
+  --rule-inner: #ebebeb;
+  --rule-hatch: #efefef;
+
+  /* Two blues again, and the other way round from dark: the link blue is the
+   * darker one, because it is text on white, and the border blue is the
+   * lighter, which keeps P2 below P1 in the ramp. */
+  --accent-solid: #005fb8;
+  --accent-on-tint: #000000;
+  --accent-border: #0078d4;
+  --accent-border-dim: #a8c7e8;
+  --accent-base: #0078d4;
+  --accent-muted: #3a6893;
+  --accent-fill: #005fb8;
+  --accent-fill-hover: #0258a8;
+  --accent-on-fill: #ffffff;
+  --shadow-overlay: 0 24px 80px rgba(0, 0, 0, 0.18);
+
+  --quantity-1: #3d6a94;
+  --quantity-2: #7d9dbd;
+  --quantity-3: #b7c9db;
+  --quantity-track: #e6ebf0;
+
+  --diff-added-row: #d8ecd8;
+  --diff-added-gutter: #c8e4c8;
+  --diff-added-glyph: #1a7f37;
+  --diff-added-number: #3b5b3b;
+  --diff-added-code: #1f2f1f;
+  --diff-removed-row: #f5dcdc;
+  --diff-removed-gutter: #f0c9c9;
+  --diff-removed-glyph: #cf222e;
+  --diff-removed-number: #6b3b3b;
+  --diff-removed-code: #2f1f1f;
+
+  --semantic-live: #1a7f37;
+  --semantic-loss: #cf222e;
+}
+
 @media (prefers-reduced-motion: reduce) {
   :root {
     /* The pulse becomes a static filled dot, which loses nothing - the label

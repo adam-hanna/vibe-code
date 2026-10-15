@@ -32,7 +32,9 @@ describe('status reads', () => {
   test('re-read on every exit, when a run host starts and when diagnostics open — and not on a result', () => {
     const exit = cockpit.slice(cockpit.indexOf('exit: (from, code) =>'), cockpit.indexOf('if (cancelled) {'));
     expect(exit).toMatch(/refreshStatus\(\);/);
-    expect(cockpit).toMatch(/if \(diagnostics\) refreshStatus\(\);/);
+    // Case 2 (#347): the phone's diagnostics are a screen rather than the
+    // popover, and opening it is the same re-read.
+    expect(cockpit).toMatch(/if \(diagnostics \|\| tab === 'diagnostics'\) refreshStatus\(\);/);
     const start = cockpit.slice(cockpit.indexOf('.startRunHost('), cockpit.indexOf('.finally(() => setBusy(false));'));
     // Case 2 (#246): the pid lands on that run's entry, not on a single field.
     const then = start.slice(start.indexOf('.then((pid) => {'), start.indexOf('.catch('));
@@ -40,8 +42,15 @@ describe('status reads', () => {
     expect(then).toMatch(/refreshStatus\(\);/);
     // The frame handler issues none: Rust still lists the host when its result
     // arrives, so a read then could only report something about to be false.
+    //
+    // Case 2 (#347): one read, and only in the branch that starts watching a
+    // run host this window did not launch - to learn the invoke id Rust read
+    // off it, which never changes, so the reason above does not reach it. The
+    // rest of the handler, results included, still issues none.
     const frame = cockpit.slice(cockpit.indexOf('frame: (from, frame) =>'), cockpit.indexOf('unknown: (from, raw)'));
-    expect(frame).not.toMatch(/refreshStatus/);
+    const watching = frame.slice(frame.indexOf("if (route === 'watch') {"), frame.indexOf("route = 'run';"));
+    expect(watching).toMatch(/refreshStatus\(\);/);
+    expect(frame.replace(watching, '')).not.toMatch(/refreshStatus/);
   });
 });
 

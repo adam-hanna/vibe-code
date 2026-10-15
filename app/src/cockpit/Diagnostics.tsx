@@ -5,6 +5,7 @@ import type { Build, Status } from '../host';
 import { endpointNote } from '../remote/remote';
 import { linkRows } from '../remote/pairing';
 import { useRemoteStatus } from '../remote/useRemoteStatus';
+import { SURFACE } from '../surface';
 
 /**
  * Hi-fi 15 — the four facts, out of the chrome (#201, #204, #207).
@@ -38,7 +39,7 @@ import { useRemoteStatus } from '../remote/useRemoteStatus';
  */
 
 /** One fact: what it is, the value to copy, and why it is worth having. */
-function Fact({ label, value, note }: { label: string; value: string | null; note: string }) {
+export function Fact({ label, value, note }: { label: string; value: string | null; note: string }) {
   const [copied, setCopied] = useState<'yes' | 'no' | null>(null);
 
   const copy = (): void => {
@@ -82,6 +83,8 @@ export interface DiagnosticsProps {
   expected: number;
   /** The run's identity, or null before the loop has said which run it is. */
   identity: { runId: string; dir: string } | null;
+  /** The heading over the facts: the popover's own, or the phone's name for whose they are. */
+  title?: string;
 }
 
 /**
@@ -104,20 +107,25 @@ function RemoteFact() {
   );
 }
 
-export function Diagnostics({ status, expected, identity }: DiagnosticsProps) {
+/** What the reader is looking through: the window, or the phone reaching it. */
+const SELF = SURFACE.compactChrome ? 'this phone' : 'this window';
+
+export function Diagnostics({ status, expected, identity, title = 'Diagnostics' }: DiagnosticsProps) {
   const build: Build | null = status?.build ?? null;
   const protocol = status?.ready?.protocol ?? null;
 
   return (
     <div aria-label="diagnostics">
-      <div className="mb-1 text-chip font-bold uppercase tracking-wide text-tertiary">Diagnostics</div>
+      <div className="mb-1 text-chip font-bold uppercase tracking-wide text-tertiary">{title}</div>
 
       <Fact
         label="run"
         value={identity?.runId ?? null}
         note={
           identity === null
-            ? 'no run has started in this window yet'
+            ? SURFACE.compactChrome
+              ? 'no run is open on this phone'
+              : 'no run has started in this window yet'
             : `artifacts in ${identity.dir}`
         }
       />
@@ -161,8 +169,8 @@ export function Diagnostics({ status, expected, identity }: DiagnosticsProps) {
           protocol === null
             ? 'the host has not said which protocol it speaks'
             : protocol === expected
-              ? `this window expects ${String(expected)}`
-              : `this window expects ${String(expected)} — they disagree`
+              ? `${SELF} expects ${String(expected)}`
+              : `${SELF} expects ${String(expected)} — they disagree`
         }
       />
       <RemoteFact />

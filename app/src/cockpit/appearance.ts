@@ -1,5 +1,6 @@
 /**
- * How big the product is drawn, and nothing else about how it looks (#223).
+ * How big the product is drawn (#223), and in which of its two palettes (#347).
+ * Nothing else about the look is a setting.
  *
  * Reported in one line — *"add a section to change the look (e.g. font size,
  * etc.) the font is a little too small for me"* — and the honest read of it is
@@ -76,3 +77,37 @@ export function readScale(raw: string | null): number {
 export function writable(scale: number): string {
   return String(readScale(String(scale)));
 }
+
+/**
+ * Light or dark (#347), and *system* - which follows the OS and is the
+ * default, so a device nobody has told anything draws what its OS asks for.
+ *
+ * Per device, like the scale and for its reason: a phone in daylight and a
+ * desktop at night want different answers, and the window's memory is shared
+ * between them (`deviceKey`). Both palettes are `tokens.css`'s and both are
+ * measured by `audit:contrast`, so the choice is between two checked palettes
+ * and never a third invented one.
+ */
+export const THEME_KEY = 'vibe.theme';
+
+export type Theme = 'system' | 'light' | 'dark';
+
+export const THEMES: readonly { theme: Theme; label: string }[] = [
+  { theme: 'system', label: 'as the system' },
+  { theme: 'light', label: 'light' },
+  { theme: 'dark', label: 'dark' },
+];
+
+/** A stored choice, or `system`. Anything unrecognised is `system`, for `readScale`'s reason. */
+export function readTheme(raw: string | null): Theme {
+  return raw === 'light' || raw === 'dark' ? raw : 'system';
+}
+
+/** The palette drawn: the choice, or the OS's answer when the choice is `system`. */
+export function resolveTheme(theme: Theme, systemPrefersLight: boolean): 'light' | 'dark' {
+  if (theme !== 'system') return theme;
+  return systemPrefersLight ? 'light' : 'dark';
+}
+
+/** The query the OS answers. One spelling, for `main.tsx` and the cockpit. */
+export const LIGHT_QUERY = '(prefers-color-scheme: light)';

@@ -139,6 +139,10 @@ npm run stage:sidecar  # copy `dist/src` + a node runtime into the bundle
 npm run app:build      # the whole thing: vite, staging, cargo, installer
 ```
 
+**`dev:mobile:browser` does not reload `app/mobile/`.** Vite's watcher ignores that directory,
+so an edit to `mobile/browser-mock.ts` takes effect only after the server is restarted. Its
+`?live` query plays a desktop run held at a gate, for working on the run screens.
+
 **The app has its own `package.json` and its own gate.** `npm run typecheck && npm test` at
 the root still covers the core and does not see `app/`; run the app's commands as well when
 you touch it. `app/` is *not* in `files`, so it never ships to npm — the published package
@@ -203,6 +207,18 @@ floor across every surface, and the ramps — plus that no hex literal exists ou
 `tokens.css`. It takes no dependencies and it should stay that way. The hex check **walks
 `src/` rather than naming files**; the named list missed `cockpit.css` the day it appeared,
 which is the failure mode of any allow-list somebody has to remember to extend.
+
+**There are two palettes, and every colour check runs on both** (#347). The dark one is
+`:root`; the light one is `:root[data-theme='light']` and sets colour tokens only, VS Code's
+Light Modern beside the Dark Modern the dark values came from. `appearance.ts` resolves the
+choice - light, dark or the system's, per device like the type scale - and the cockpit sets
+`data-theme` on the root (`main.tsx` sets the system's before the first paint). Check 0
+fails when the light block leaves a dark colour unset, and the severity ramp and the diff
+rows are measured as contrast against the panel, which holds on either ground where
+luminance does not. **`cn` has to be told the app's font sizes** (`FONT_SIZES` in
+`lib/utils.ts`, §11): tailwind-merge read `text-label` as a colour and silently dropped the
+`text-on-accent` before it, which was invisible on the dark palette and dark-on-blue on the
+light one.
 
 **Its last two sections are a different kind of check and are there for a reason vitest
 cannot cover.** §9 and §10 are both about a rule broken by the **absence** of a declaration —

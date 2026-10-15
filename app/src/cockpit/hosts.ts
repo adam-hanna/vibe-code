@@ -2,7 +2,7 @@ import type { Frame } from '../host';
 import { CONFIG_WRITE_DURING_RUN, SERVICE_HOST } from '../host';
 import { chatKey, chatMove, cleanupWrites, readChat, writable } from '../pilot/saved';
 import type { Launched } from './argv';
-import { settled } from './model';
+import { emptyRun, settled } from './model';
 import type { Run } from './model';
 import { dirKey, nameOf, preview } from './projects';
 import type { RunName } from './projects';
@@ -33,8 +33,26 @@ import type { Viewing } from './where';
  */
 export interface LiveRun {
   handle: string;
-  /** The id the `invoke` was sent with, from `nextRequestId`. */
-  invokeId: number;
+  /**
+   * The id the `invoke` was sent with, from `nextRequestId` - or null for a run
+   * this window is watching and has not learned it for yet (`watched`).
+   */
+  invokeId: number | null;
+  /**
+   * A run this window did not start (#347): a phone's run on the desktop, the
+   * desktop's or another phone's on a phone. Every client sees every run host's
+   * frames, and the window used to drop the ones it had not launched - so a
+   * phone never saw the desktop's runs, and the desktop window never saw one a
+   * phone started, gate and all. See `watchRun`.
+   */
+  watched: boolean;
+  /**
+   * `result` and `error` frames a watched run's host sent before the window
+   * learned its invoke id. One of them may be the run's own ending, and which
+   * one cannot be told yet - a pause, an unpause and a cancel are answered with
+   * `result` frames too - so they wait here and `learnInvokes` claims it.
+   */
+  unclaimed: readonly Frame[];
   /** Gate ids already answered on this host. See `mayAnswer`. */
   answered: ReadonlySet<number>;
   /** Whether frames from this handle still reach this run. False once it has ended. */
@@ -103,10 +121,85 @@ export function launchMeta(argv: readonly string[]): { dir: string | null; asked
   return { dir: at, asked: command === 'resume' && first !== undefined && first !== '' ? first : null };
 }
 
-/** Where a frame from `host` goes: the service host's listeners, a run, or nowhere. */
-export function routeFrame(lives: LiveRuns, host: string): 'service' | 'run' | 'stale' {
+/**
+ * Where a frame from `host` goes: the service host's listeners, a run, a run to
+ * start watching, or nowhere.
+ *
+ * `watch` is a run host this window has never had an entry for (#347). A handle
+ * it has had one for and let go of - ended, dropped or pruned - is `stale`, which
+ * `retired` remembers: a late frame from a run this window already finished must
+ * not come back as a new run.
+ */
+export function routeFrame(
+  lives: LiveRuns,
+  host: string,
+  retired: ReadonlySet<string> = new Set(),
+): 'service' | 'run' | 'watch' | 'stale' {
   if (host === SERVICE_HOST) return 'service';
-  return lives.some((e) => e.live && e.handle === host) ? 'run' : 'stale';
+  if (lives.some((e) => e.live && e.handle === host)) return 'run';
+  if (lives.some((e) => e.handle === host) || retired.has(host)) return 'stale';
+  return 'watch';
+}
+
+/**
+ * Start watching a run this window did not start (#347), on its first frame.
+ *
+ * Appends an entry that routes like any other and is drawn the moment it is
+ * added, since a frame is the proof its host exists. It is never pointed at -
+ * a run somebody started on another device must not move this window - and it
+ * has no proposing conversation here, so adoption skips it. Its repository and
+ * id come from `run_started`, which the desktop's live-run buffer replays first.
+ */
+export function watchRun(lives: LiveRuns, handle: string, protocol: number | null): LiveRuns {
+  return addRun(lives, {
+    handle,
+    invokeId: null,
+    watched: true,
+    unclaimed: [],
+    answered: new Set(),
+    live: true,
+    dir: '',
+    asked: null,
+    task: null,
+    sent: null,
+    draft: null,
+    held: null,
+    adopted: 'skipped',
+    pid: null,
+    heard: true,
+    pausing: false,
+    stopping: false,
+    run: { ...emptyRun(), protocol },
+  });
+}
+
+/** Hold a watched run's `result` or `error` until its invoke id is known. */
+export function holdUnclaimed(lives: LiveRuns, handle: string, frame: Frame): LiveRuns {
+  return lives.map((e) =>
+    e.handle === handle && e.live && e.invokeId === null ? { ...e, unclaimed: [...e.unclaimed, frame] } : e,
+  );
+}
+
+/**
+ * Learn watched runs' invoke ids from `host_status`, which lists each run host
+ * with the id Rust read off its invoke (#347). Returns the frames that turn out
+ * to be a run's own ending, for the caller to apply as it would have on arrival:
+ * a `result` ends the run, an `error` fails it.
+ */
+export function learnInvokes(
+  lives: LiveRuns,
+  runs: readonly { handle: string; invokeId: number | null }[],
+): { lives: LiveRuns; endings: readonly { handle: string; frame: Frame }[] } {
+  const endings: { handle: string; frame: Frame }[] = [];
+  const next = lives.map((e) => {
+    if (!e.watched || e.invokeId !== null) return e;
+    const id = runs.find((r) => r.handle === e.handle)?.invokeId ?? null;
+    if (id === null) return e;
+    const ending = e.unclaimed.find((f) => (f.type === 'result' || f.type === 'error') && f.id === id);
+    if (ending !== undefined) endings.push({ handle: e.handle, frame: ending });
+    return { ...e, invokeId: id, unclaimed: [] };
+  });
+  return { lives: next, endings };
 }
 
 function liveAt(lives: LiveRuns, host: string): LiveRun | undefined {
@@ -130,7 +223,7 @@ function liveAt(lives: LiveRuns, host: string): LiveRun | undefined {
  */
 export function invokeOutcome(lives: LiveRuns, host: string, frame: Frame): 'completed' | 'failed' | null {
   const e = liveAt(lives, host);
-  if (e === undefined) return null;
+  if (e === undefined || e.invokeId === null) return null;
   if (frame.type === 'result' && frame.id === e.invokeId) return 'completed';
   if (frame.type === 'error' && frame.id === e.invokeId) return 'failed';
   return null;

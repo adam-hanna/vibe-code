@@ -1,11 +1,14 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { Boundary } from './Boundary';
-import { Cockpit } from './cockpit/Cockpit';
+import { LIGHT_QUERY } from './cockpit/appearance';
+import { Cockpit, keepDeviceKeys } from './cockpit/Cockpit';
 import * as host from './host';
 import { flushMemory, loadMemory, memory, memoryChanged } from './memory';
 import { chatChanged } from './pilot/chatstore';
 import { keepLedgerIn } from './pilot/ledger';
+import { SURFACE } from './surface';
+import { local } from './transport';
 // The whole stylesheet: `tokens.css` (through `./design`) and Tailwind over it.
 // Every rule the app draws with is a utility in the component that uses it, or
 // one of the few global rules in `theme.css` (#237).
@@ -22,6 +25,12 @@ if (root === null) throw new Error('#root is missing from index.html');
 // narrow across the await below, and asserting past it would be exactly the
 // thing the check exists to stop.
 async function render(into: HTMLElement): Promise<void> {
+  // The OS's palette until the stored choice is read (#347): the memory load
+  // is a round trip to the host, and a light device drawing the dark default
+  // for its length is a flash nobody chose. The cockpit applies the choice.
+  const drawn = window.matchMedia(LIGHT_QUERY).matches ? 'light' : 'dark';
+  document.documentElement.dataset['theme'] = drawn;
+  document.documentElement.style.colorScheme = drawn;
   // Another client's writes (#354), listened for BEFORE the memory is read, so
   // one landing while it loads is remembered and read again rather than
   // missed. Awaited: the listener is live before the snapshot is asked for.
@@ -36,6 +45,16 @@ async function render(into: HTMLElement): Promise<void> {
   // would draw defaults and then save them over what was stored.
   await loadMemory();
   keepLedgerIn(memory);
+  // A phone keeps its place, its text size and its repository under its own
+  // keys (#347), so it must know who it is before the cockpit reads them. One
+  // that cannot say keeps none.
+  if (SURFACE.ownPlace) {
+    const device = await local<{ endpointId: string }>('phone_identity').then(
+      (r) => r.endpointId,
+      () => null,
+    );
+    keepDeviceKeys(device);
+  }
   window.addEventListener('pagehide', flushMemory);
   createRoot(into).render(
     <StrictMode>
