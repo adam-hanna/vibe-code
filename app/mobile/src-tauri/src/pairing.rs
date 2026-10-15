@@ -78,8 +78,10 @@ pub struct PairSlot {
 impl PairSlot {
     /// A pairing for `attempt` begins: its Back, or `None` if Back already came.
     /// A pairing still waiting from an earlier attempt loses its sender, which
-    /// is a Back for it.
+    /// is a Back for it - whether or not this one goes ahead, since the screen
+    /// has moved on from it either way.
     pub fn start(&mut self, attempt: u64) -> Option<oneshot::Receiver<()>> {
+        drop(self.waiting.take());
         if self.cancelled == Some(attempt) {
             self.cancelled = None;
             return None;
@@ -214,6 +216,16 @@ mod tests {
         let mut back = slot.start(2).expect("started");
         slot.cancel(2);
         assert_eq!(back.try_recv(), Ok(()));
+    }
+
+    #[test]
+    fn a_pairing_whose_back_came_first_still_ends_the_one_before() {
+        let mut slot = PairSlot::default();
+        let mut older = slot.start(1).expect("started");
+        slot.cancel(2);
+        assert!(older.try_recv().is_err(), "a cancel for another attempt leaves it waiting");
+        assert!(slot.start(2).is_none(), "2 was cancelled before it began");
+        assert!(matches!(older.try_recv(), Err(oneshot::error::TryRecvError::Closed)), "and 1 is over too");
     }
 
     #[test]

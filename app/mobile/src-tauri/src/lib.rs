@@ -293,8 +293,11 @@ async fn phone_settings(app: tauri::AppHandle, phone: State<'_, Phone>) -> Resul
     Ok(report)
 }
 
+/// Behind the lock: a webview under the cover must not be able to write
+/// `lock: false` for the next launch.
 #[tauri::command]
 async fn phone_settings_set(app: tauri::AppHandle, phone: State<'_, Phone>, patch: Patch) -> Result<SettingsReport, String> {
+    phone.unlocked()?;
     let file = phone.settings.as_ref().map_err(Clone::clone)?;
     file.apply(&patch)?;
     if patch.notify == Some(true) {

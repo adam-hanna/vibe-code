@@ -176,6 +176,7 @@ describe("the phone's own boundary", () => {
       'phone_release',
       'phone_rename',
       'phone_session',
+      'phone_settings_set',
       'phone_unpair',
     ]);
     // `remote_call` is guarded inside `Phone::remote_call`.

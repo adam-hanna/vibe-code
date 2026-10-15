@@ -639,7 +639,15 @@ impl Desktop for Link {
             let Some(cancel) = inner.pairing.lock().unwrap_or_else(|p| p.into_inner()).start(attempt) else {
                 return Ok(json!({ "reason": Reason::PairCancelled }));
             };
-            let client = inner.client().await?;
+            // An endpoint that could not start is a pairing that could not
+            // reach anything, said as such rather than as a raw error.
+            let client = match inner.client().await {
+                Ok(c) => c,
+                Err(why) => {
+                    log::error!("vibe-mobile: {why}");
+                    return Ok(json!({ "reason": Reason::Unreachable }));
+                }
+            };
             let list = &*inner.list;
             let emitter = inner.clone();
             let got = pair_flow(
@@ -673,8 +681,16 @@ impl Desktop for Link {
                 None
             };
             let entry = inner.list.get(&id)?.ok_or("that desktop is not paired with this phone")?;
-            let client = inner.client().await?;
-            let told = client::unpair(client, &inner.list, &entry, session.as_deref(), inner.hello()).await?;
+            let told = match inner.client().await {
+                Ok(client) => client::unpair(client, &inner.list, &entry, session.as_deref(), inner.hello()).await?,
+                // With no endpoint the desktop cannot be told, and the entry
+                // goes all the same, as it does for a desktop that is off.
+                Err(why) => {
+                    log::error!("vibe-mobile: {why}");
+                    inner.list.remove(&id)?;
+                    client::Unpaired::Unreachable
+                }
+            };
             drop(session);
             inner.state().probes.remove(&id);
             inner.changed();
