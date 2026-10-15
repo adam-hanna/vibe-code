@@ -128,7 +128,7 @@ import type { CapRead, LiveRun, LiveRuns } from './hosts';
 import { useStats } from './useStats';
 import { rounds } from './rounds';
 import { implementArgv, readLaunchArgv, resumeArgv } from './argv';
-import { SCALE_KEY, SCALE_VAR, readScale, writable } from './appearance';
+import { LIGHT_QUERY, SCALE_KEY, SCALE_VAR, THEME_KEY, readScale, readTheme, resolveTheme, writable, type Theme } from './appearance';
 import { readLimits, writeLimits } from '../pilot/ledger';
 import type { PilotLimits } from '../pilot/ledger';
 import type { Raise } from './argv';
@@ -201,10 +201,12 @@ const REPO_KEY = 'vibe.repo';
  */
 let placeKey: string | null = WHERE_KEY;
 let scaleKey: string | null = SCALE_KEY;
+let themeKey: string | null = THEME_KEY;
 let repoKey: string | null = REPO_KEY;
 export function keepDeviceKeys(device: string | null): void {
   placeKey = deviceKey(WHERE_KEY, device);
   scaleKey = deviceKey(SCALE_KEY, device);
+  themeKey = deviceKey(THEME_KEY, device);
   repoKey = deviceKey(REPO_KEY, device);
 }
 
@@ -317,6 +319,40 @@ export function Cockpit() {
   useEffect(() => {
     document.documentElement.style.setProperty(SCALE_VAR, String(scale));
   }, [scale]);
+  /**
+   * Light, dark or the system's (#347). Held here for the scale's reason, and
+   * applied as `data-theme` on the root, which is what `tokens.css` keys the
+   * light palette on. While the choice is `system` the OS is followed live, so
+   * a phone that switches at sunset switches the cockpit with it.
+   */
+  const [theme, setTheme] = useState<Theme>(() => {
+    try {
+      return themeKey === null ? 'system' : readTheme(memory.getItem(themeKey));
+    } catch {
+      return 'system';
+    }
+  });
+  useEffect(() => {
+    const query = window.matchMedia(LIGHT_QUERY);
+    const apply = (): void => {
+      const drawn = resolveTheme(theme, query.matches);
+      document.documentElement.dataset['theme'] = drawn;
+      document.documentElement.style.colorScheme = drawn;
+    };
+    apply();
+    if (theme !== 'system') return;
+    query.addEventListener('change', apply);
+    return () => query.removeEventListener('change', apply);
+  }, [theme]);
+  const retheme = useCallback((next: Theme) => {
+    setTheme(next);
+    if (themeKey === null) return;
+    try {
+      memory.setItem(themeKey, next);
+    } catch {
+      // It still applies for this session, as a scale does.
+    }
+  }, []);
   const rescale = useCallback((next: number) => {
     setScale(readScale(String(next)));
     if (scaleKey === null) return;
@@ -2607,6 +2643,8 @@ export function Cockpit() {
             <PhoneSettings
               scale={scale}
               onScale={rescale}
+              theme={theme}
+              onTheme={retheme}
               connected={wire.connected}
               failure={wire.failure}
               build={wire.status?.build ?? null}
@@ -2623,6 +2661,8 @@ export function Cockpit() {
               dir={repoDir}
               scale={scale}
               onScale={rescale}
+              theme={theme}
+              onTheme={retheme}
               checkUpdates={checkUpdates}
               onCheckUpdates={toggleUpdateChecks}
               statuses={keyStatuses}

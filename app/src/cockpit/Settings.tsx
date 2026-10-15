@@ -9,7 +9,7 @@ import { KeychainFailure, Vendor } from '../pilot/Credentials';
 import type { PilotLimits } from '../pilot/ledger';
 import { Confirm } from './Confirm';
 import { Section } from './Disclosure';
-import { STEPS } from './appearance';
+import { STEPS, THEMES, type Theme } from './appearance';
 import { pickDirectory } from './pick';
 import { projectName } from './projects';
 import { capOf } from './hosts';
@@ -977,6 +977,8 @@ export function Settings({
   dir,
   scale,
   onScale,
+  theme,
+  onTheme,
   checkUpdates,
   onCheckUpdates,
   statuses,
@@ -1003,6 +1005,9 @@ export function Settings({
   /** How big the product is drawn. Window state — see `appearance.ts`. */
   scale: number;
   onScale: (next: number) => void;
+  /** Light, dark or the system's (#347). Window state, like the scale. */
+  theme: Theme;
+  onTheme: (next: Theme) => void;
   /**
    * Whether the app checks for a newer version of itself (#299). Window state,
    * owned by `Cockpit` like the scale: the check runs there, and this screen
@@ -1356,8 +1361,18 @@ export function Settings({
                 were and break the relationships that make a page readable. */}
             <p className={S.note}>
               Every size moves together, so the proportions the design chose survive being scaled.
-              Nothing else about the look is configurable: there is one palette, and it is the one the
-              contrast gate is measured against.
+            </p>
+            <div className={S.scale}>
+              {THEMES.map((t) => (
+                <label key={t.theme} className={S.radio}>
+                  <input type="radio" name="theme" checked={theme === t.theme} onChange={() => onTheme(t.theme)} />
+                  <span>{t.label}</span>
+                </label>
+              ))}
+            </div>
+            <p className={S.note}>
+              Light or dark, or whichever the system is set to. Both palettes are the ones the contrast
+              gate is measured against; nothing else about the look is configurable.
             </p>
           </section>
           )}

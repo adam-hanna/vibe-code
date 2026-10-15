@@ -149,10 +149,15 @@
 
 /* ================================================================ the page
  * `:root` is dark to the platform as well as to the eye, so a native control the
- * app does not style (a select, a radio) draws its dark variant.
+ * app does not style (a select, a radio) draws its dark variant - and light
+ * under the light palette (#347). The cockpit also sets it inline beside
+ * `data-theme`; these are the same answer for a page that has not run yet.
  */
 :root {
   color-scheme: dark;
+}
+:root[data-theme='light'] {
+  color-scheme: light;
 }
 
 @layer base {

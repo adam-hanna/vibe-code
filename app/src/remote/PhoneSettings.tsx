@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Badge } from '@/ui/badge';
-import { STEPS } from '../cockpit/appearance';
+import { STEPS, THEMES, type Theme } from '../cockpit/appearance';
 import { PANE } from '../cockpit/pane';
 import { CopyText } from '../pilot/CopyText';
 import type { Build } from '../host';
@@ -12,10 +12,10 @@ import { local } from '../transport';
  * files, and a change there is a change on the desktop; everything here stays
  * on the phone.
  *
- * Three things, because three are real today:
+ * Four things, because four are real today:
  *
- * - **The text size**, which a phone keeps under its own key (`deviceKey`), so
- *   it is set here and not among the desktop's settings.
+ * - **The text size and the palette**, which a phone keeps under its own keys
+ *   (`deviceKey`), so they are set here and not among the desktop's settings.
  * - **This phone's id**: the public half of its device key, which is what a
  *   desktop knows it by, with a copy control because it is a string for a
  *   bug report or a comparison rather than for reading.
@@ -48,12 +48,16 @@ export function usePhoneIdentity(): { id: string } | { why: string } | null {
 export function PhoneSettings({
   scale,
   onScale,
+  theme,
+  onTheme,
   connected,
   failure,
   build,
 }: {
   scale: number;
   onScale: (next: number) => void;
+  theme: Theme;
+  onTheme: (next: Theme) => void;
   connected: boolean;
   /** Why the desktop cannot be reached, in the host's words, or null. */
   failure: string | null;
@@ -74,6 +78,19 @@ export function PhoneSettings({
             <label key={step.scale} className="flex cursor-pointer items-baseline gap-2 text-secondary">
               <input type="radio" name="phone-type-scale" checked={scale === step.scale} onChange={() => onScale(step.scale)} />
               <span style={{ fontSize: `calc(var(--size-body) * ${String(step.scale)})` }}>{step.label}</span>
+            </label>
+          ))}
+        </div>
+      </section>
+
+      <section className="flex flex-col gap-2">
+        <h3 className={H}>light or dark</h3>
+        <p className={NOTE}>This phone only, like the text size.</p>
+        <div className="flex flex-wrap items-baseline gap-x-5 gap-y-3 py-2">
+          {THEMES.map((t) => (
+            <label key={t.theme} className="flex cursor-pointer items-baseline gap-2 text-secondary">
+              <input type="radio" name="phone-theme" checked={theme === t.theme} onChange={() => onTheme(t.theme)} />
+              <span>{t.label}</span>
             </label>
           ))}
         </div>
