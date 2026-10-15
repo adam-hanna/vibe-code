@@ -1,16 +1,19 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Activity, PanelRightClose, PanelRightOpen, Terminal, X } from 'lucide-react';
+import { Activity, ChevronLeft, PanelLeft, PanelRightClose, PanelRightOpen, Plus, Settings as SettingsIcon, Smartphone, Terminal, X } from 'lucide-react';
 import { usePanelRef } from 'react-resizable-panels';
 import type { Layout, LayoutChangedMeta, PanelImperativeHandle } from 'react-resizable-panels';
 import { Badge } from '@/ui/badge';
 import { Button } from '@/ui/button';
 import { LivenessDot } from '../design';
-import { ActivityBar } from '../shell/ActivityBar';
+import { ActivityBar, Tool } from '../shell/ActivityBar';
+import { PaneTabs } from '../shell/PaneTabs';
 import { UpdatePopover } from '../shell/UpdatePopover';
 import type { UpdateState } from '../shell/UpdatePopover';
 import { CHECK_EVERY_MS, CHECK_KEY, SKIP_KEY, checkEnabled, shown } from '../shell/update';
 import type { UpdateInfo } from '../shell/update';
 import { Palette } from '../shell/Palette';
+import { PhoneSettings } from '../remote/PhoneSettings';
+import { PhoneDiagnostics } from '../remote/PhoneDiagnostics';
 import { SURFACE } from '../surface';
 import { statusBarControls } from '../shell/controls';
 import { StatusBar } from '../shell/StatusBar';
@@ -29,7 +32,7 @@ import type { KeyStatus } from '../pilot/keys';
 import { PilotPane } from '../pilot/PilotPane';
 import { chatRun } from '../pilot/log';
 import { noCommands, reduceCommands, restore, running } from './commands';
-import { NOWHERE, readWhere, WHERE_KEY, startPanels, writableWhere } from './where';
+import { deviceKey, NOWHERE, readWhere, WHERE_KEY, startPanels, writableWhere } from './where';
 import type { BottomTab, Panels, Tab, Viewing, Where } from './where';
 import { CommandsPane } from './CommandsPane';
 import { CodePane } from './CodePane';
@@ -92,6 +95,9 @@ import { emptyRun, foldReplay, forResume, hostLost, latestQuestions, reduce, set
 import {
   adoptionPlan,
   addRun,
+  holdUnclaimed,
+  learnInvokes,
+  watchRun,
   capOf,
   capRefusal,
   dropRun,
@@ -126,7 +132,7 @@ import type { CapRead, LiveRun, LiveRuns } from './hosts';
 import { useStats } from './useStats';
 import { rounds } from './rounds';
 import { implementArgv, readLaunchArgv, resumeArgv } from './argv';
-import { SCALE_KEY, SCALE_VAR, readScale, writable } from './appearance';
+import { LIGHT_QUERY, SCALE_KEY, SCALE_VAR, THEME_KEY, readScale, readTheme, resolveTheme, writable, type Theme } from './appearance';
 import { readLimits, writeLimits } from '../pilot/ledger';
 import type { PilotLimits } from '../pilot/ledger';
 import type { Raise } from './argv';
@@ -177,13 +183,42 @@ const TAB_ON = 'border-accent text-accent';
 /** How often the elapsed clock re-renders between heartbeats. */
 const TICK_MS = 1000;
 
+/**
+ * The phone's views of its own (#347): Commands, This phone and Diagnostics.
+ * None is ever written to `where` - the record is the desktop's too, where
+ * these tabs do not exist - so the tab they were opened from is written instead.
+ */
+type PhoneView = 'commands' | 'phone' | 'diagnostics';
+function isPhoneView(tab: string): tab is PhoneView {
+  return tab === 'commands' || tab === 'phone' || tab === 'diagnostics';
+}
+
 /** Where the last repository is remembered. See `repoDir` below. */
 const REPO_KEY = 'vibe.repo';
 
+/**
+ * The keys this device keeps its own state under (`deviceKey` in `where.ts`):
+ * where the window was pointed, how big the text is, and the repository it
+ * last named. A key is null for a phone that keeps none. Set once, before the
+ * cockpit mounts, by `main.tsx` - the phone has to ask its own Rust who it is,
+ * and every read below is a synchronous `useState` initialiser.
+ */
+let placeKey: string | null = WHERE_KEY;
+let scaleKey: string | null = SCALE_KEY;
+let themeKey: string | null = THEME_KEY;
+let repoKey: string | null = REPO_KEY;
+export function keepDeviceKeys(device: string | null): void {
+  placeKey = deviceKey(WHERE_KEY, device);
+  scaleKey = deviceKey(SCALE_KEY, device);
+  themeKey = deviceKey(THEME_KEY, device);
+  repoKey = deviceKey(REPO_KEY, device);
+}
+
 /** Where the window was pointed when it last closed. See `where.ts`. */
 function storedWhere(): Where {
+  if (placeKey === null) return NOWHERE;
   try {
-    return readWhere(memory.getItem(WHERE_KEY));
+    return readWhere(memory.getItem(placeKey));
   } catch {
     return NOWHERE;
   }
@@ -278,7 +313,7 @@ export function Cockpit() {
    */
   const [scale, setScale] = useState(() => {
     try {
-      return readScale(memory.getItem(SCALE_KEY));
+      return scaleKey === null ? 1 : readScale(memory.getItem(scaleKey));
     } catch {
       // Storage can be unavailable. Text at the size it was designed is a
       // smaller failure than a window that will not render.
@@ -288,10 +323,45 @@ export function Cockpit() {
   useEffect(() => {
     document.documentElement.style.setProperty(SCALE_VAR, String(scale));
   }, [scale]);
+  /**
+   * Light, dark or the system's (#347). Held here for the scale's reason, and
+   * applied as `data-theme` on the root, which is what `tokens.css` keys the
+   * light palette on. While the choice is `system` the OS is followed live, so
+   * a phone that switches at sunset switches the cockpit with it.
+   */
+  const [theme, setTheme] = useState<Theme>(() => {
+    try {
+      return themeKey === null ? 'system' : readTheme(memory.getItem(themeKey));
+    } catch {
+      return 'system';
+    }
+  });
+  useEffect(() => {
+    const query = window.matchMedia(LIGHT_QUERY);
+    const apply = (): void => {
+      const drawn = resolveTheme(theme, query.matches);
+      document.documentElement.dataset['theme'] = drawn;
+      document.documentElement.style.colorScheme = drawn;
+    };
+    apply();
+    if (theme !== 'system') return;
+    query.addEventListener('change', apply);
+    return () => query.removeEventListener('change', apply);
+  }, [theme]);
+  const retheme = useCallback((next: Theme) => {
+    setTheme(next);
+    if (themeKey === null) return;
+    try {
+      memory.setItem(themeKey, next);
+    } catch {
+      // It still applies for this session, as a scale does.
+    }
+  }, []);
   const rescale = useCallback((next: number) => {
     setScale(readScale(String(next)));
+    if (scaleKey === null) return;
     try {
-      memory.setItem(SCALE_KEY, writable(next));
+      memory.setItem(scaleKey, writable(next));
     } catch {
       // It still applies for this session. See above.
     }
@@ -538,7 +608,11 @@ export function Cockpit() {
    */
   const [repoDir, setRepoDir] = useState(() => {
     try {
-      return memory.getItem(REPO_KEY) ?? '';
+      // A phone that has named no repository of its own starts where the
+      // desktop is, which is read and never written: the desktop's is the only
+      // pointer a new phone has, and borrowing it moves nothing.
+      if (repoKey === null) return memory.getItem(REPO_KEY) ?? '';
+      return memory.getItem(repoKey) ?? memory.getItem(REPO_KEY) ?? '';
     } catch {
       // Storage can be unavailable or full. A repository field that starts empty
       // is a smaller failure than a window that will not render.
@@ -547,8 +621,9 @@ export function Cockpit() {
   });
   const rememberRepo = useCallback((dir: string) => {
     setRepoDir(dir);
+    if (repoKey === null) return;
     try {
-      memory.setItem(REPO_KEY, dir);
+      memory.setItem(repoKey, dir);
     } catch {
       // See above. Nothing here is worth failing a render over.
     }
@@ -686,6 +761,20 @@ export function Cockpit() {
     // they are apart is that two places able to force is one too many.
     | 'runs'
     | 'settings'
+    // A phone's own tab for the commands pane (#347). The desktop docks it in
+    // the bottom panel, opened by a chord or the palette, and the phone has
+    // neither - nor the height for a split. So on a phone `open('commands')`
+    // lands here, and nothing else ever does. Never written to `where`: the
+    // record is the desktop's too, and there it means the bottom panel.
+    | 'commands'
+    // The phone's own settings (#347): what is true of the device rather than
+    // the desktop it reaches. Phone-only, reached from the sidebar's head, and
+    // never written to `where` for the reason `commands` is not.
+    | 'phone'
+    // The phone's diagnostics (#347): the desktop popover's facts as a screen,
+    // since a popover is wider than the phone. Opened from the status bar's
+    // •••, and never written to `where` either.
+    | 'diagnostics'
     // **The pilot, not the output pane** (#211). The complaint was exact: *"I
     // thought my initial prompt would be given to the pilot and the pilot would
     // take control"*, and the app answered it with a form and a tab beside the
@@ -700,12 +789,38 @@ export function Cockpit() {
    * project dropdown row… where project level settings live."*
    */
   const [settingsScope, setSettingsScope] = useState<'global' | 'project'>('global');
+  /**
+   * The phone's gate sheet (#347): the footer's gate block over the run, opened
+   * from the status bar's one control. Never opened by the gate itself - a
+   * sheet that appeared on its own would cover whatever was being read.
+   */
+  const [gateOpen, setGateOpen] = useState(false);
+  /**
+   * The tab a view with no tab of its own was opened from (#347). `settings`
+   * and `runs` have no button in the bar, and on a phone the bar is not drawn
+   * under them, so their way back is a press that returns here. The pilot when
+   * nothing else is known, since that is where the window lands.
+   */
+  const cameFrom = useRef<Exclude<typeof tab, PhoneView>>('pilot');
+  useEffect(() => {
+    if (tab !== 'settings' && tab !== 'runs' && !isPhoneView(tab)) cameFrom.current = tab;
+  }, [tab]);
   const openSettings = useCallback((scope: 'global' | 'project') => {
     setSettingsScope(scope);
     setTab('settings');
     // On a phone the settings open in the main pane, under whichever sheet the
     // door was pressed in (#347): left open, the press looked like it did nothing.
     if (SURFACE.overlayPanels) setPanels((p) => ({ ...p, sidebar: false, loop: false }));
+  }, []);
+  /** The phone's own settings, opened the way the desktop's are: the sheets shut over it. */
+  const openPhone = useCallback(() => {
+    setTab('phone');
+    setPanels((p) => ({ ...p, sidebar: false, loop: false }));
+  }, []);
+  /** The phone's diagnostics screen, opened over whatever the status bar was under. */
+  const openPhoneDiagnostics = useCallback(() => {
+    setTab('diagnostics');
+    setPanels((p) => ({ ...p, sidebar: false, loop: false }));
   }, []);
   /**
    * The round a navigation asked for, or null (#223).
@@ -727,6 +842,10 @@ export function Cockpit() {
     // The pilot's `read_command` names the commands pane by its old tab name;
     // it lives in the bottom panel, so opening it opens that panel on it rather
     // than a main tab that is gone. The output is a main tab again (#284).
+    if (next === 'commands' && SURFACE.compactChrome) {
+      setTab('commands');
+      return;
+    }
     if (next === 'commands') {
       setBottom(next);
       setPanels((p) => (p.bottom ? p : { ...p, bottom: true }));
@@ -831,7 +950,11 @@ export function Cockpit() {
   const drafting = drafts.find((d) => d.id === draftId) ?? null;
   useEffect(() => {
     try {
-      memory.setItem(WHERE_KEY, writableWhere({ tab, viewing, draftId, bottom, panels }));
+      if (placeKey === null) return;
+      memory.setItem(
+        placeKey,
+        writableWhere({ tab: isPhoneView(tab) ? cameFrom.current : tab, viewing, draftId, bottom, panels }),
+      );
     } catch {
       // Storage switched off: the next launch lands on the pilot, as it used to.
     }
@@ -937,12 +1060,41 @@ export function Cockpit() {
    * exit that would put a host that has gone back in the diagnostics popover.
    */
   const statusGen = useRef(0);
+  /**
+   * Every run host this window has had an entry for, started or watched (#347).
+   * A handle let go of - ended, refused, pruned - is not watched again when a
+   * late frame arrives from it: `routeFrame`'s `retired`.
+   */
+  const everSeen = useRef(new Set<string>());
+  /**
+   * Learn the invoke ids of runs this window is watching, from `host_status`,
+   * and apply any ending that was waiting on one (#347): a `result` ends the
+   * run as it would have on arrival, and an `error` fails it. The window that
+   * started it is the one that tells its host there will be no more requests.
+   */
+  const learnFrom = (status: host.Status) => {
+    const learned = learnInvokes(livesRef.current, status.runs);
+    if (learned.endings.length === 0 && learned.lives === livesRef.current) return;
+    updateLives(() => learned.lives);
+    const at = Date.now();
+    for (const { handle, frame } of learned.endings) {
+      updateLives((l) =>
+        updateRun(l, handle, (r) =>
+          frame.type === 'error' ? hostLost(r, at, frame.message) : reduce(r, frame, at),
+        ),
+      );
+      endLive(handle);
+    }
+  };
   const refreshStatus = useCallback(() => {
     if (!host.inShell()) return;
     const gen = (statusGen.current += 1);
     void host
       .status()
       .then((status) => {
+        // A watched run's invoke id, whatever the read's generation: an id never
+        // changes, so even an older answer states it correctly (#347).
+        learnFrom(status);
         if (gen === statusGen.current) setWire((w) => ({ ...w, status }));
       })
       // Left as it was. A refresh that failed is not a reason to blank facts the
@@ -1066,8 +1218,8 @@ export function Cockpit() {
   // a figure measured at connect would be however long ago that was - stated as
   // though it were now.
   useEffect(() => {
-    if (diagnostics) refreshStatus();
-  }, [diagnostics, refreshStatus]);
+    if (diagnostics || tab === 'diagnostics') refreshStatus();
+  }, [diagnostics, tab, refreshStatus]);
 
   useEffect(() => {
     if (!host.inShell()) return;
@@ -1077,8 +1229,16 @@ export function Cockpit() {
     void (async () => {
       stop = await host.connect({
         frame: (from, frame) => {
+          let route = routeFrame(livesRef.current, from, everSeen.current);
+          // A run host this window never started (#347): watched from its first
+          // frame, then routed like any other, and its invoke id asked for.
+          if (route === 'watch') {
+            everSeen.current.add(from);
+            updateLives((l) => watchRun(l, from, protocolRef.current));
+            refreshStatus();
+            route = 'run';
+          }
           const lives = livesRef.current;
-          const route = routeFrame(lives, from);
           if (route === 'service') {
             // Everything else the service host says is read by its own
             // listener - the pilot, the commands, the reads. Only the protocol
@@ -1098,6 +1258,11 @@ export function Cockpit() {
           // exactly as the fold below reads it; once per key.
           offerNotice(runNotice(from, frame, outcome, noticeLabel(from)));
           const at = Date.now();
+          // A watched run's ending cannot be told from a pause's answer until
+          // its invoke id is known, so it waits to be claimed.
+          if ((frame.type === 'result' || frame.type === 'error') && lives.some((e) => e.handle === from && e.invokeId === null)) {
+            updateLives((l) => holdUnclaimed(l, from, frame));
+          }
           // A run host answers its pause, unpause and cancel with `result`
           // frames too, and `reduce` reads any `result` as the command
           // returning - so only the invoke's own reaches it. Every frame still
@@ -1341,6 +1506,8 @@ export function Cockpit() {
       const entry: LiveRun = {
         handle,
         invokeId: id,
+        watched: false,
+        unclaimed: [],
         answered: new Set(),
         live: true,
         dir: meta.dir,
@@ -1361,6 +1528,7 @@ export function Cockpit() {
         base: seed ?? emptyRun(),
       };
       updateLives((l) => addRun(l, entry));
+      everSeen.current.add(handle);
       toPoint.current.add(handle);
       setBusy(true);
       void host
@@ -1884,7 +2052,7 @@ export function Cockpit() {
       setPanels((p) => ({ ...p, loop: !p.loop, ...(SURFACE.overlayPanels && !p.loop ? { sidebar: false } : {}) })),
     toggleBottom: () => setPanels((p) => ({ ...p, bottom: !p.bottom })),
     settings: () => openSettings('global'),
-    diagnostics: () => setDiagnostics((o) => !o),
+    diagnostics: SURFACE.compactChrome ? openPhoneDiagnostics : () => setDiagnostics((o) => !o),
     goPilot: () => setTab('pilot'),
     goPlans: () => open('plans'),
     goCritique: () => open('critique'),
@@ -1914,6 +2082,34 @@ export function Cockpit() {
   const paletteShortcut = ACTIONS.find((a) => a.id === 'palette')?.shortcut;
   const paletteChord =
     paletteShortcut === undefined ? '' : chordLabel(paletteShortcut, typeof navigator === 'undefined' ? '' : navigator.platform);
+  // A sheet over a gate that has gone would hold a decision nobody can make:
+  // answered here, elsewhere or by the run ending, it shuts.
+  const heldAsk = run.gate?.askId ?? null;
+  useEffect(() => {
+    if (heldAsk === null) setGateOpen(false);
+  }, [heldAsk]);
+  // The ⬆ tool, while a newer unskipped version exists (#299). The activity
+  // bar draws it above ⚙; the phone, which has no bar, at the head of the
+  // Explorer sheet beside ⚙ (#347).
+  const updateTool = shown(update, skipped) ? (
+    <UpdatePopover
+      info={update}
+      state={updateState}
+      onInstall={() => installUpdate(false)}
+      onPage={openReleasePage}
+      onSkip={() => skipUpdate(update.version)}
+    />
+  ) : undefined;
+  // The run-status toggle with the liveness dot the desktop's shut strip
+  // carries, so a run working behind a shut sheet is still said on screen.
+  const statusToggle = (
+    <Button variant="quiet" size="icon-sm" aria-label="Show run status" title="Show run status" onClick={act.toggleLoop}>
+      <PanelRightOpen className="size-4" aria-hidden />
+      {!past && shownLive !== null && !settled(run) && (
+        <LivenessDot state={run.running === null ? 'waiting' : 'live'} />
+      )}
+    </Button>
+  );
 
   return (
     <TooltipProvider>
@@ -2091,25 +2287,17 @@ export function Cockpit() {
             where `＋ ⌘K ⚙` live now, at every width - `design/AUDIT.md` §1.1's
             finding was that they had nowhere to live - and its first icon puts
             the sidebar away and brings it back. */}
-        <ActivityBar
-          sidebarOpen={panels.sidebar}
-          onSidebar={act.toggleSidebar}
-          onNew={act.newRun}
-          onPalette={act.palette}
-          onSettings={act.settings}
-          paletteChord={paletteChord}
-          update={
-            shown(update, skipped) ? (
-              <UpdatePopover
-                info={update}
-                state={updateState}
-                onInstall={() => installUpdate(false)}
-                onPage={openReleasePage}
-                onSkip={() => skipUpdate(update.version)}
-              />
-            ) : undefined
-          }
-        />
+        {!SURFACE.compactChrome && (
+          <ActivityBar
+            sidebarOpen={panels.sidebar}
+            onSidebar={act.toggleSidebar}
+            onNew={act.newRun}
+            onPalette={act.palette}
+            onSettings={act.settings}
+            paletteChord={paletteChord}
+            update={updateTool}
+          />
+        )}
         {/* The three columns, each a resizable region. Sizes are saved on a
             drag and come back next launch (`where.ts`); a shut region is not
             rendered, and the library gives its room to the others. */}
@@ -2139,6 +2327,23 @@ export function Cockpit() {
           maxSize="50%"
           className="flex min-h-0 min-w-0 flex-col bg-column"
         >
+          {/* The activity bar's ＋ and ⚙, on a phone that has no bar (#347).
+              The Explorer is where a phone starts, so the two acts that begin
+              something head it. */}
+          {SURFACE.compactChrome && panels.sidebar && (
+            <div className="flex flex-none items-center justify-end gap-1 border-b border-rule-structure px-2 py-1">
+              <Tool label="New run" onClick={act.newRun}>
+                <Plus className="size-5" aria-hidden />
+              </Tool>
+              {updateTool}
+              <Tool label="Settings for all projects" onClick={act.settings}>
+                <SettingsIcon className="size-5" aria-hidden />
+              </Tool>
+              <Tool label="This phone" onClick={openPhone}>
+                <Smartphone className="size-5" aria-hidden />
+              </Tool>
+            </div>
+          )}
           {panels.sidebar && (
           <Sidebar
             dir={repoDir}
@@ -2228,6 +2433,14 @@ export function Cockpit() {
         >
         <ResizablePanel id="main" minSize="20%" className="flex min-h-0 min-w-0 flex-col">
         <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-page" role="main">
+          {/* A phone draws no heading: its title repeats the selected tab, and
+              the tab row carries the run-status toggle instead (#347). A past
+              run's label survives as one quiet line - only a past one, since a
+              live run opened from the sidebar is not the archive. */}
+          {SURFACE.compactChrome && past && tab !== 'settings' && tab !== 'runs' && (
+            <p className="m-0 flex-none bg-page px-4 pt-1.5 text-label text-tertiary">Run archive</p>
+          )}
+          {!SURFACE.compactChrome && (
           <header className="flex flex-none items-center justify-between gap-4 px-7 pt-6 pb-4">
             {/*
               The line above the title is drawn only when it says something: an
@@ -2246,16 +2459,10 @@ export function Cockpit() {
                 from (#347), so its way back is here - with the liveness dot the
                 desktop's strip carries, so a run working behind a shut sheet is
                 still said on screen. */}
-            {SURFACE.overlayPanels && !panels.loop && (
-              <Button variant="quiet" size="icon-sm" aria-label="Show run status" title="Show run status" onClick={act.toggleLoop}>
-                <PanelRightOpen className="size-4" aria-hidden />
-                {!past && shownLive !== null && !settled(run) && (
-                  <LivenessDot state={run.running === null ? 'waiting' : 'live'} />
-                )}
-              </Button>
-            )}
+            {SURFACE.overlayPanels && !panels.loop && statusToggle}
             </span>
           </header>
+          )}
           {/*
             Hi-fi 1's bar, in the design's own order. It had twelve tabs against
             the design's seven, and `design/AUDIT.md` traced most of that to the
@@ -2270,7 +2477,37 @@ export function Cockpit() {
             they go, and putting them after the frames it does name is the least
             it can be wrong by.
           */}
-          <nav className="flex flex-none items-stretch gap-0.5 overflow-x-auto border-b border-rule-structure bg-page px-6" aria-label="panes">
+          {/* A view with no tab of its own is not one of the run's panes, so on
+              a phone the run's tabs give way to the way back (#347). */}
+          {SURFACE.compactChrome && (tab === 'settings' || tab === 'runs' || tab === 'phone' || tab === 'diagnostics') ? (
+            <div className="flex flex-none items-center gap-1 border-b border-rule-structure bg-page px-1 py-1">
+              <Button variant="quiet" size="sm" onClick={() => setTab(cameFrom.current)}>
+                <ChevronLeft className="size-4" aria-hidden /> Back
+              </Button>
+            </div>
+          ) : (
+          <PaneTabs
+            selected={tab}
+            lead={
+              <Tool label="Explorer: runs and projects" on={panels.sidebar} onClick={act.toggleSidebar}>
+                <PanelLeft className="size-5" aria-hidden />
+              </Tool>
+            }
+            trail={
+              // The lead's size and shape (#347): the desktop header's small
+              // icon button sat flush against the last tab and its dot covered
+              // half the glyph. The dot moves to the corner, where the
+              // desktop's strip carries it.
+              <Tool label="Show run status" on={panels.loop} onClick={act.toggleLoop}>
+                <PanelRightOpen className="size-5" aria-hidden />
+                {!past && shownLive !== null && !settled(run) && (
+                  <span className="absolute top-2 right-2 flex">
+                    <LivenessDot state={run.running === null ? 'waiting' : 'live'} />
+                  </span>
+                )}
+              </Tool>
+            }
+          >
             {/* The pilot (#143, #144), and hi-fi 5's first tab. The count is
                 proposals waiting on a person, and it is here because a proposal
                 nobody sees blocks the conversation silently. */}
@@ -2370,6 +2607,18 @@ export function Cockpit() {
             >
               Verify{verifyOf.passes.length > 0 ? ` · ${String(verifyOf.passes.length)}` : ''}
             </button>
+            {/* The phone's way to the commands pane, which the desktop docks
+                below (#347). Its count is what is still running, as the bottom
+                panel's is. */}
+            {SURFACE.compactChrome && (
+              <button
+                className={cn(TAB, tab === 'commands' && TAB_ON)}
+                aria-current={tab === 'commands' ? 'page' : undefined}
+                onClick={() => open('commands')}
+              >
+                Commands{running(commands).length > 0 ? ` · ${String(running(commands).length)}` : ''}
+              </button>
+            )}
             {/*
               `5e`, in the place hi-fi 1 puts it: right-aligned in this bar,
               always visible, rather than costing a tab. It is the **readout**
@@ -2381,8 +2630,11 @@ export function Cockpit() {
               has spent nothing yet has not spent zero; it has not been measured.
             */}
             {/* Usage now lives in the workspace heading, giving the artifact
-                navigation its full width. The same pane keeps both providers. */}
-          </nav>
+                navigation its full width. The same pane keeps both providers.
+                A phone has no heading; its way to the pane is the status bar's
+                usage readout, which opens the same pane. */}
+          </PaneTabs>
+          )}
           {/* There is no "reading a saved run" strip here any more. The panes
               and the column both follow an opened run (#223), the sidebar
               highlights which run that is, and the footer carries the real
@@ -2433,6 +2685,20 @@ export function Cockpit() {
               onResume={(runId, dir) => resume(runId, dir, undefined, false, viewing?.task ?? run.identity?.task ?? null)}
             />
           )}
+          {tab === 'diagnostics' && (
+            <PhoneDiagnostics status={wire.status} remote={remoteStatus} identity={run.identity} />
+          )}
+          {tab === 'phone' && (
+            <PhoneSettings
+              scale={scale}
+              onScale={rescale}
+              theme={theme}
+              onTheme={retheme}
+              connected={wire.connected}
+              failure={wire.failure}
+              build={wire.status?.build ?? null}
+            />
+          )}
           {tab === 'settings' && (
             <Settings
               // Remounted per file, so nothing typed into one form survives
@@ -2444,6 +2710,8 @@ export function Cockpit() {
               dir={repoDir}
               scale={scale}
               onScale={rescale}
+              theme={theme}
+              onTheme={retheme}
               checkUpdates={checkUpdates}
               onCheckUpdates={toggleUpdateChecks}
               statuses={keyStatuses}
@@ -2539,6 +2807,14 @@ export function Cockpit() {
               on a person would be destroyed by a glance at the output pane -
               which is the one thing this tab must not do. The other two panes
               hold nothing, so they stay conditional. */}
+          {tab === 'commands' && (
+            <CommandsPane
+              commands={commands}
+              dir={repoDir}
+              onRun={(program, args) => runCommand(repoDir, program, args)}
+              onStop={stopCommand}
+            />
+          )}
           <div className={cn('min-h-0 flex-1 flex-col', tab === 'pilot' ? 'flex' : 'hidden')} hidden={tab !== 'pilot'}>
             {/* One pane per conversation still doing something (#305), the
                 one on screen visible and the rest hidden but mounted, so a turn
@@ -2625,7 +2901,7 @@ export function Cockpit() {
             server's log can be read beside a plan. Toggled with the
             `toggleBottom` chord, and opened by `open('commands')`. The run's
             output was its other tab until it went back to the main bar (#284). */}
-        {panels.bottom && (
+        {panels.bottom && !SURFACE.compactChrome && (
           <>
           <ResizableSeparator orientation="vertical" />
           <ResizablePanel id="bottom" defaultSize={35} minSize="10%" className="flex min-h-0 min-w-0 flex-col">
@@ -2897,6 +3173,43 @@ export function Cockpit() {
           )}
         </SideRegion>
         </ResizableGroup>
+        {/* The gate sheet (#347): the same footer the loop column draws, for
+            the run the status bar is holding for, over the run. A press on the
+            scrim only shuts it - the decision is the sheet's buttons. */}
+        {SURFACE.compactChrome && gateOpen && run.gate !== null && (
+          <>
+            <div className="absolute inset-0 z-30 bg-page/60" aria-hidden="true" onClick={() => setGateOpen(false)} />
+            <div
+              role="dialog"
+              aria-label="The run is holding"
+              className="absolute inset-x-0 bottom-0 z-40 flex max-h-[85%] flex-col border-t border-rule-structure bg-column shadow-overlay"
+            >
+              <div className="flex flex-none items-center justify-between pr-1.5 pl-4 pt-1">
+                <span className="text-chip uppercase tracking-[0.12em] text-tertiary">Decide</span>
+                <Button variant="quiet" size="icon-sm" aria-label="Close" onClick={() => setGateOpen(false)}>
+                  <X className="size-4" aria-hidden />
+                </Button>
+              </div>
+              <div className="min-h-0 overflow-y-auto">
+                <Footer
+                  run={run}
+                  busy={busy}
+                  onDecide={answer}
+                  onPause={pause}
+                  onUnpause={unpause}
+                  onStop={() => setConfirmStop(true)}
+                  onResume={(runId, dir, raise) => resume(runId, dir, raise, false, run.identity?.task ?? null)}
+                  onImplement={(runId, dir) => implement(runId, dir, run.identity?.task ?? null)}
+                  caps={caps}
+                  gates={gates}
+                  order={order}
+                  pausing={pausing}
+                  stopping={stopping}
+                />
+              </div>
+            </div>
+          </>
+        )}
       </div>
 
       {/* The status bar (the UI rework): the window's standing facts in one
@@ -2920,13 +3233,24 @@ export function Cockpit() {
         stopping={stopping}
         // Only while the footer is not showing them for this run (#264).
         controls={statusBarControls(panels.loop, columnRun === run)}
+        onGate={
+          SURFACE.compactChrome
+            ? () => {
+                shutSheets();
+                setGateOpen(true);
+              }
+            : undefined
+        }
         staleness={quiet}
         onSpend={() => setTab('spend')}
         build={wire.status?.build ?? null}
         diagnosticsOpen={diagnostics}
-        onDiagnostics={setDiagnostics}
+        // On a phone the ••• opens a screen rather than a popover (#347).
+        onDiagnostics={SURFACE.compactChrome ? (open) => open && openPhoneDiagnostics() : setDiagnostics}
         diagnostics={<Diagnostics status={wire.status} expected={host.EXPECTED_PROTOCOL} identity={run.identity} />}
-        phones={connectedNames(remoteStatus)}
+        // The desktop's chip for a connected phone (#344). A phone reads the
+        // same status through the bridge, where the chip would name itself.
+        phones={SURFACE.compactChrome ? [] : connectedNames(remoteStatus)}
       />
     </div>
     </TooltipProvider>

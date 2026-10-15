@@ -6,6 +6,7 @@ import { Button } from '@/ui/button';
 import { cn } from '@/lib/utils';
 import { elapsed } from '../cockpit/format';
 import { logOf } from './log';
+import { PilotControls } from './PilotControls';
 import { RoundCard } from './RoundCard';
 import { Welcome } from './Welcome';
 import * as host from '../host';
@@ -1779,7 +1780,15 @@ ${frame.text}`, turn, origin.current))) {
   );
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col bg-panel">
+    <div className="relative flex min-h-0 flex-1 flex-col bg-panel">
+      {/* One line on a phone, opening these two rows in a sheet (#347). */}
+      <PilotControls
+        vendor={keys.PROVIDER_NAME[vendor]}
+        model={optionsFor(listing, model).find((c) => c.value === model)?.label ?? model}
+        context={contextLine.text}
+        alarm={contextLine.alarm}
+        proposals={proposals.length}
+      >
       <div className="flex flex-none flex-wrap items-center gap-2 border-b border-rule-structure px-4 py-2">
         <select
           className={cn(FIELD, 'max-w-45')}
@@ -1925,6 +1934,7 @@ ${frame.text}`, turn, origin.current))) {
           </Button>
         </span>
       </div>
+      </PilotControls>
       {!verdict.allowed && verdict.why !== null && (
         <div className={ALARM}>The pilot has stopped: {verdict.why}</div>
       )}

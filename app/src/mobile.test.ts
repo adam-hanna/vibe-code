@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from 'vitest';
 import { MOBILE_SWAPS } from '../mobile-swaps';
 import * as host from './host';
 import { invoke as mobileInvoke } from './transport.mobile';
-import { foldersOf } from './cockpit/pick.mobile';
+import { crumbs, foldersOf, isRepository, visibleFolders } from './cockpit/pick.mobile';
 import phoneLib from '../mobile/src-tauri/src/lib.rs?raw';
 import phoneIdentity from '../mobile/src-tauri/src/identity.rs?raw';
 import phoneCapability from '../mobile/src-tauri/capabilities/default.json?raw';
@@ -127,6 +127,31 @@ describe("the phone's folder chooser", () => {
         { name: 'app', kind: 'dir' },
       ]),
     ).toEqual(['src', 'app']);
+  });
+
+  test('leaves out dot-folders until asked, and says how many it left out', () => {
+    expect(visibleFolders(['.git', 'src', '.vibe', 'app'], false)).toEqual({ shown: ['src', 'app'], left: 2 });
+    expect(visibleFolders(['.git', 'src'], true)).toEqual({ shown: ['.git', 'src'], left: 0 });
+  });
+
+  test('calls a folder a repository only when its listing holds a .git, which a worktree has as a file', () => {
+    expect(isRepository([{ name: '.git', kind: 'dir' }])).toBe(true);
+    expect(isRepository([{ name: '.git', kind: 'file' }])).toBe(true);
+    expect(isRepository([{ name: '.git', kind: 'link' }, { name: 'src', kind: 'dir' }])).toBe(false);
+  });
+
+  test('turns a path into the places above it, each one absolute', () => {
+    expect(crumbs('/home/you/code')).toEqual([
+      { name: '/', path: '/' },
+      { name: 'home', path: '/home' },
+      { name: 'you', path: '/home/you' },
+      { name: 'code', path: '/home/you/code' },
+    ]);
+    expect(crumbs('C:\\Users\\you')).toEqual([
+      { name: 'C:', path: 'C:\\' },
+      { name: 'Users', path: 'C:\\Users' },
+      { name: 'you', path: 'C:\\Users\\you' },
+    ]);
   });
 });
 

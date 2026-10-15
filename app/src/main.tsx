@@ -1,4 +1,5 @@
 import { boot } from './boot';
+import { LIGHT_QUERY } from './cockpit/appearance';
 // The whole stylesheet: `tokens.css` (through `./design`) and Tailwind over it.
 // Every rule the app draws with is a utility in the component that uses it, or
 // one of the few global rules in `theme.css` (#237).
@@ -11,5 +12,13 @@ import '@fontsource-variable/jetbrains-mono';
 // live at `?gallery` went with the old primitives it drew (#237).
 const root = document.getElementById('root');
 if (root === null) throw new Error('#root is missing from index.html');
+
+// The OS's palette until the stored choice is read (#347): the memory load is a
+// round trip to the host - on a phone, one made only once a desktop is
+// connected - and a light device drawing the dark default for its length is a
+// flash nobody chose. The cockpit applies the choice.
+const drawn = window.matchMedia(LIGHT_QUERY).matches ? 'light' : 'dark';
+document.documentElement.dataset['theme'] = drawn;
+document.documentElement.style.colorScheme = drawn;
 
 void boot(root);

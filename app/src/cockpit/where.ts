@@ -27,6 +27,30 @@
 export const WHERE_KEY = 'vibe.where';
 
 /**
+ * `base` as one device keeps it (#347): the desktop's own key, a phone's beside
+ * it, or null for a phone that keeps none.
+ *
+ * The window's memory is files the desktop's host writes, and a phone reaches
+ * the same files over its connection - so a phone that kept its place under
+ * `WHERE_KEY` moved the desktop window's: opening a run or shutting a sheet on
+ * the phone decided where the desktop landed on its next launch, and two
+ * phones moved each other's. The same was true of the text size, and of the
+ * repository last named. A phone keeps its own, named by its endpoint id,
+ * which is public and is what the desktop already knows it by. Everything
+ * else in the memory - the projects, the pins, the names, the drafts - is
+ * about the work rather than the device, and is shared on purpose.
+ *
+ * `undefined` is the desktop, which keeps the key it always had. `null` is a
+ * phone that could not say who it is: it keeps **no** key rather than borrow
+ * the desktop's, because borrowing it is the defect this exists to stop.
+ */
+export function deviceKey(base: string, device: string | null | undefined): string | null {
+  if (device === undefined) return base;
+  if (device === null || device.trim() === '') return null;
+  return `${base}.phone.${device}`;
+}
+
+/**
  * The tabs of the main pane. A tab missing here comes back as the pilot.
  *
  * `output` is back among them, right of the pilot (#284). The UI rework moved it

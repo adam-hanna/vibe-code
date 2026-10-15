@@ -9,6 +9,8 @@ import {
   exitMeans,
   gatesWaiting,
   heldChat,
+  holdUnclaimed,
+  learnInvokes,
   hostExitWording,
   hostedMarks,
   invokeOutcome,
@@ -26,6 +28,7 @@ import {
   setPid,
   started,
   updateRun,
+  watchRun,
   writeRefusal,
 } from './hosts';
 import type { LiveRun, LiveRuns } from './hosts';
@@ -36,6 +39,7 @@ import type { Frame } from '../host';
 import { chatKey, readChat, writable } from '../pilot/saved';
 import { emptyConversation } from '../pilot/transcript';
 import serve from '../../../src/serve.ts?raw';
+import cockpit from './Cockpit.tsx?raw';
 import config from '../../../src/config.ts?raw';
 
 /**
@@ -63,6 +67,8 @@ function entry(over: Partial<LiveRun> = {}): LiveRun {
   return {
     handle: 'run-7',
     invokeId: 7,
+    watched: false,
+    unclaimed: [],
     answered: new Set(),
     live: true,
     dir: '/repo/a',
@@ -98,10 +104,14 @@ describe('a frame goes where its handle says', () => {
     expect(routeFrame(lives, SERVICE_HOST)).toBe('service');
     expect(routeFrame(lives, 'run-7')).toBe('run');
     expect(routeFrame(lives, 'run-9')).toBe('run');
-    expect(routeFrame(lives, 'run-2')).toBe('stale');
-    // With no run live, a run host's frame belongs to nobody.
-    expect(routeFrame([], 'run-7')).toBe('stale');
+    // Case 2 (#347): a run host this window has never had an entry for was
+    // `stale` - *"with no run live, a run host's frame belongs to nobody"* - and
+    // that is what hid a phone's runs from the desktop and the desktop's from a
+    // phone. It is watched now. One this window let go of is still nobody's.
+    expect(routeFrame(lives, 'run-2')).toBe('watch');
+    expect(routeFrame([], 'run-7')).toBe('watch');
     expect(routeFrame(endRun(lives, 'run-7'), 'run-7')).toBe('stale');
+    expect(routeFrame([], 'run-7', new Set(['run-7']))).toBe('stale');
   });
 
   test('an entry routes before it has started, so a frame that beats the pid lands', () => {
@@ -528,4 +538,81 @@ describe('who adopts which conversation', () => {
 
 test('setPid proves the host started', () => {
   expect(started(setPid([entry({ pid: null })], 'run-7', 9)[0] as LiveRun)).toBe(true);
+});
+
+
+describe('a run this window did not start is watched (#347)', () => {
+  // Every client sees every run host's frames: the desktop window sees a run a
+  // phone started, and a phone sees the desktop's. The window used to drop any
+  // frame from a host it had not launched, so neither saw the other's runs.
+  const watched = (over: Partial<LiveRun> = {}): LiveRun => ({ ...watchRun([], 'run-1099511627777', 2)[0]!, ...over });
+
+  test('a host never seen is watched; one let go of stays stale; a live one is a run', () => {
+    expect(routeFrame([], 'run-1099511627777')).toBe('watch');
+    expect(routeFrame([entry()], 'run-7')).toBe('run');
+    expect(routeFrame([entry({ live: false })], 'run-7')).toBe('stale');
+    // Pruned or dropped, and so gone from the list: a late frame is not a new run.
+    expect(routeFrame([], 'run-7', new Set(['run-7']))).toBe('stale');
+    expect(routeFrame([], SERVICE_HOST)).toBe('service');
+  });
+
+  test('a watched run is drawn at once, has no conversation to adopt, and is never this window’s invoke', () => {
+    const e = watched();
+    expect(e.watched).toBe(true);
+    expect(e.invokeId).toBeNull();
+    expect(started(e)).toBe(true);
+    expect(e.adopted).toBe('skipped');
+    expect(e.run.protocol).toBe(2);
+    // Its id and repository are what `run_started` said, as for any run.
+    const told = updateRun([e], e.handle, (r) => reduce(r, startedFrame('r1', '/repo/b'), 1))[0]!;
+    expect(runIdOf(told)).toBe('r1');
+    expect(repoOf(told)).toBe('/repo/b');
+    expect(onScreen([told], { dir: '/repo/b', runId: 'r1', task: '' }, null)?.handle).toBe(e.handle);
+  });
+
+  test('before its invoke id is known, no result ends it, and each waits to be claimed', () => {
+    const e = watched();
+    expect(invokeOutcome([e], e.handle, result(5))).toBeNull();
+    const held = holdUnclaimed(holdUnclaimed([e], e.handle, result(5)), e.handle, result(1099511627777));
+    expect(held[0]!.unclaimed).toHaveLength(2);
+    // A run this window started never holds one: its invoke id is its own.
+    expect(holdUnclaimed([entry()], 'run-7', result(3))[0]!.unclaimed).toEqual([]);
+  });
+
+  test('learning the id claims the run’s own ending and nothing else', () => {
+    const e = holdUnclaimed(holdUnclaimed([watched()], 'run-1099511627777', result(5)), 'run-1099511627777', result(1099511627777));
+    const learned = learnInvokes(e, [{ handle: 'run-1099511627777', invokeId: 1099511627777 }]);
+    expect(learned.lives[0]!.invokeId).toBe(1099511627777);
+    expect(learned.lives[0]!.unclaimed).toEqual([]);
+    // The pause's answer (id 5) is not the ending; the invoke's is.
+    expect(learned.endings).toEqual([{ handle: 'run-1099511627777', frame: result(1099511627777) }]);
+    // From here it ends like any run.
+    expect(invokeOutcome(learned.lives, 'run-1099511627777', result(1099511627777))).toBe('completed');
+    expect(invokeOutcome(learned.lives, 'run-1099511627777', result(5))).toBeNull();
+  });
+
+  test('an id not yet written leaves it unlearned, and a run this window started is left alone', () => {
+    const w = watched();
+    expect(learnInvokes([w], [{ handle: w.handle, invokeId: null }]).lives[0]!.invokeId).toBeNull();
+    expect(learnInvokes([w], []).lives[0]!.invokeId).toBeNull();
+    expect(learnInvokes([entry()], [{ handle: 'run-7', invokeId: 99 }]).lives[0]!.invokeId).toBe(7);
+    const failed = learnInvokes(holdUnclaimed([w], w.handle, error(1)), [{ handle: w.handle, invokeId: 1 }]);
+    expect(failed.endings).toEqual([{ handle: w.handle, frame: error(1) }]);
+  });
+
+  test('its gate can be answered here, and its host going is that run lost', () => {
+    const e = updateRun([watched()], 'run-1099511627777', (r) => reduce(r, ask(40), 1));
+    expect(mayAnswer(e, 'run-1099511627777', 40)).toBe(true);
+    expect(exitMeans(e, 'run-1099511627777')).toBe('run-lost');
+  });
+
+  test('the cockpit watches on the first frame, asks for the id, and never points the window at it', () => {
+    expect(cockpit).toMatch(/let route = routeFrame\(livesRef\.current, from, everSeen\.current\);/);
+    const branch = cockpit.slice(cockpit.indexOf("if (route === 'watch') {"), cockpit.indexOf("route = 'run';"));
+    expect(branch).toMatch(/updateLives\(\(l\) => watchRun\(l, from, protocolRef\.current\)\)/);
+    expect(branch).toMatch(/refreshStatus\(\)/);
+    expect(branch).not.toMatch(/toPoint/);
+    // Learned from every status read, whatever its generation: an id never changes.
+    expect(cockpit).toMatch(/learnFrom\(status\);\s*if \(gen === statusGen\.current\)/);
+  });
 });

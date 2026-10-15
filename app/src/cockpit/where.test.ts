@@ -1,6 +1,9 @@
 import { describe, expect, test } from 'vitest';
 import cockpit from './Cockpit.tsx?raw';
-import { NOWHERE, OPEN_PANELS, readWhere, startPanels, writableWhere } from './where';
+import boot from '../boot.tsx?raw';
+import phoneApp from '../phone/PhoneApp.tsx?raw';
+import prepare from '../prepare.ts?raw';
+import { deviceKey, NOWHERE, OPEN_PANELS, readWhere, startPanels, WHERE_KEY, writableWhere } from './where';
 
 /**
  * Where the window was pointed, kept between launches (#223). Every relaunch
@@ -76,7 +79,15 @@ describe('where the window was', () => {
     expect(cockpit).toMatch(/\(\(\) => storedWhere\(\)\.tab\)/);
     expect(cockpit).toMatch(/\(\(\) => startPanels\(storedWhere\(\)\.panels, SURFACE\.overlayPanels\)\)/);
     expect(cockpit).toMatch(/\(\(\) => storedWhere\(\)\.bottom\)/);
-    expect(cockpit).toMatch(/writableWhere\(\{ tab, viewing, draftId, bottom, panels \}\)/);
+    // Case 2 (#347): the phone's own views - Commands, This phone and
+    // Diagnostics - are never written: there `commands` means the bottom
+    // panel, and the desktop has no tab for the other two. Each writes the tab
+    // it was opened from; every other tab, and the other four fields, are
+    // written as the cockpit holds them.
+    expect(cockpit).toMatch(
+      /writableWhere\(\{ tab: isPhoneView\(tab\) \? cameFrom\.current : tab, viewing, draftId, bottom, panels \}\)/,
+    );
+    expect(cockpit).toMatch(/return tab === 'commands' \|\| tab === 'phone' \|\| tab === 'diagnostics';/);
   });
 });
 
@@ -89,5 +100,50 @@ describe('the panels a window starts with', () => {
 
   test('a phone starts with both side sheets shut, and keeps the rest', () => {
     expect(startPanels(kept, true)).toEqual({ ...kept, sidebar: false, loop: false });
+  });
+});
+
+describe("a device's own keys (#347)", () => {
+  test('the desktop keeps the key it always had', () => {
+    expect(deviceKey(WHERE_KEY, undefined)).toBe(WHERE_KEY);
+  });
+
+  test('a phone keeps its own key, named by its endpoint id, so two phones never share one', () => {
+    expect(deviceKey(WHERE_KEY, 'abc123')).toBe(`${WHERE_KEY}.phone.abc123`);
+    expect(deviceKey(WHERE_KEY, 'abc123')).not.toBe(deviceKey(WHERE_KEY, 'def456'));
+    expect(deviceKey(WHERE_KEY, 'abc123')).not.toBe(WHERE_KEY);
+  });
+
+  test('a phone that cannot say who it is keeps no key, rather than the desktop’s', () => {
+    expect(deviceKey(WHERE_KEY, null)).toBeNull();
+    expect(deviceKey(WHERE_KEY, '  ')).toBeNull();
+  });
+
+  test('the place, the text size and the repository are the three a device keeps, set before the cockpit mounts', () => {
+    expect(cockpit).toMatch(/placeKey = deviceKey\(WHERE_KEY, device\);/);
+    expect(cockpit).toMatch(/scaleKey = deviceKey\(SCALE_KEY, device\);/);
+    expect(cockpit).toMatch(/repoKey = deviceKey\(REPO_KEY, device\);/);
+    // Case 2 (#346 moved the start-up out of `main.tsx`): the keys are set in
+    // `prepareCockpit`, which both builds await before the cockpit mounts - the
+    // desktop's `boot` before `createRoot`, the phone's `PhoneApp` before it
+    // switches to the cockpit screen.
+    expect(prepare).toMatch(/if \(SURFACE\.ownPlace\) \{[\s\S]*keepDeviceKeys\(device\);[\s\S]*\}/);
+    expect(prepare.indexOf('keepDeviceKeys(')).toBeGreaterThan(prepare.indexOf('await loadMemory()'));
+    expect(boot.indexOf('await prepareCockpit()')).toBeGreaterThan(-1);
+    expect(boot.indexOf('await prepareCockpit()')).toBeLessThan(boot.indexOf('createRoot('));
+    expect(phoneApp).toMatch(/await prepareCockpit\(\);\s*setScreen\('cockpit'\);/);
+  });
+
+  test('each is read and written only under its device key, and a null key writes nothing', () => {
+    expect(cockpit).toMatch(/if \(placeKey === null\) return NOWHERE;/);
+    expect(cockpit).toMatch(/readWhere\(memory\.getItem\(placeKey\)\)/);
+    expect(cockpit).toMatch(/if \(placeKey === null\) return;\s*memory\.setItem\(\s*placeKey,/);
+    expect(cockpit).toMatch(/scaleKey === null \? 1 : readScale\(memory\.getItem\(scaleKey\)\)/);
+    expect(cockpit).toMatch(/if \(scaleKey === null\) return;\s*try \{\s*memory\.setItem\(scaleKey,/);
+    expect(cockpit).toMatch(/if \(repoKey === null\) return;\s*try \{\s*memory\.setItem\(repoKey, dir\)/);
+    // The desktop's repository seeds a phone that has named none, and is
+    // never written by one.
+    expect(cockpit).not.toMatch(/memory\.setItem\((WHERE_KEY|SCALE_KEY|REPO_KEY)/);
+    expect(cockpit).toMatch(/memory\.getItem\(repoKey\) \?\? memory\.getItem\(REPO_KEY\)/);
   });
 });

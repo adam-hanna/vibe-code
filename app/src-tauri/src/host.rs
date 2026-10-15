@@ -210,6 +210,12 @@ pub struct RunHost {
     pub pid: u32,
     pub uptime_secs: u64,
     pub uncontained: Option<String>,
+    /// The id of the invoke this host serves, as `send` read it off the invoke
+    /// line - the one field Rust learns from an inbound line - or null before
+    /// it was written. Every client sees every run host's frames, and a client
+    /// that did not start a run needs this to tell its ending from a pause's
+    /// answer, since both are `result` frames (#347). Relayed, not decided.
+    pub invoke_id: Option<serde_json::Value>,
 }
 
 /// The handle of the one long-lived host that is not a run (#246): reads,
@@ -1058,6 +1064,7 @@ impl HostProcess {
                         pid: r.pid,
                         uptime_secs: r.started.elapsed().as_secs(),
                         uncontained: r.uncontained.clone(),
+                        invoke_id: r.invoke_id.clone(),
                     })
                     .collect();
                 runs.sort_by(|a, b| a.handle.cmp(&b.handle));
@@ -1814,13 +1821,35 @@ mod tests {
 
     #[test]
     fn a_run_host_listed_in_status_serialises_the_window_s_spelling() {
-        let run = RunHost { handle: "run-1".into(), pid: 7, uptime_secs: 3, uncontained: None };
+        // `invokeId` joined the list in #347; every key this checked is kept.
+        let run = RunHost {
+            handle: "run-1".into(),
+            pid: 7,
+            uptime_secs: 3,
+            uncontained: None,
+            invoke_id: Some(serde_json::json!(1)),
+        };
         let json = serde_json::to_value(&run).unwrap();
         let object = json.as_object().unwrap();
-        for key in ["handle", "pid", "uptimeSecs", "uncontained"] {
+        for key in ["handle", "pid", "uptimeSecs", "uncontained", "invokeId"] {
             assert!(object.contains_key(key), "RunHost no longer sends {key}");
         }
         assert!(!object.contains_key("uptime_secs"));
+        assert!(!object.contains_key("invoke_id"));
+    }
+
+    #[test]
+    fn status_names_the_invoke_each_run_host_serves() {
+        // A window that did not start a run tells its ending from a pause's
+        // answer by this id (#347), so it must be the id on the invoke line.
+        let collect = Collect::new();
+        let hosts = hosts(&collect);
+        service(&hosts, &collect);
+        start(&hosts, &collect, "run-12", Some(&invoke(12)), ECHO).unwrap();
+        let status = hosts.status();
+        let run = status.runs.iter().find(|r| r.handle == "run-12").expect("the run host is listed");
+        assert_eq!(run.invoke_id, Some(serde_json::json!(12)));
+        hosts.stop();
     }
 
     /// Keep awake (#344), against real run hosts and a recording inhibitor.

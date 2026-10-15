@@ -2,6 +2,7 @@ import { describe, expect, test } from 'vitest';
 import {
   NO_PROMPT,
   connectedNames,
+  connectionOf,
   linkRows,
   loginSentence,
   offNeedsConfirm,
@@ -151,5 +152,34 @@ describe('the QR code', () => {
       { x: 4, y: 4 },
       { x: 5, y: 5 },
     ]);
+  });
+});
+
+describe("the phone's own connection (#347)", () => {
+  const up = (links: { id: string; path: 'direct' | 'relay' | 'none' }[]): RemoteStatus =>
+    status({ endpoint: { state: 'up', relays: [], links } });
+
+  test('is the path the desktop measured for this phone, matched by its id', () => {
+    const s = up([
+      { id: 'other', path: 'direct' },
+      { id: 'me', path: 'relay' },
+    ]);
+    expect(connectionOf(s, 'me')).toEqual({ value: 'through the relay', note: expect.stringMatching(/not an error/) });
+    expect(connectionOf(up([{ id: 'me', path: 'direct' }]), 'me').value).toBe('direct');
+    expect(connectionOf(up([{ id: 'me', path: 'none' }]), 'me').value).toBe('between paths');
+  });
+
+  test('each way of not knowing is said, and none of them reads as direct', () => {
+    const cases = [
+      connectionOf(up([{ id: 'me', path: 'direct' }]), null),
+      connectionOf(null, 'me'),
+      connectionOf(status({ endpoint: { state: 'starting' } }), 'me'),
+      connectionOf(up([{ id: 'other', path: 'direct' }]), 'me'),
+    ];
+    for (const c of cases) {
+      expect(c.value).toBeNull();
+      expect(c.note.length).toBeGreaterThan(0);
+    }
+    expect(new Set(cases.map((c) => c.note)).size).toBe(cases.length);
   });
 });

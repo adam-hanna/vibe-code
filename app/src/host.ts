@@ -733,6 +733,12 @@ export interface RunHost {
   pid: number;
   uptimeSecs: number;
   uncontained: string | null;
+  /**
+   * The id of the invoke this host serves, as Rust read it off the invoke line,
+   * or null before that line was written. A window that did not start the run
+   * learns from it which `result` is the run's ending (#347).
+   */
+  invokeId: number | null;
 }
 
 /**

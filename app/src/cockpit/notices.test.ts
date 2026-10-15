@@ -27,6 +27,8 @@ const live: LiveRun = {
   heard: true,
   pausing: false,
   stopping: false,
+  watched: false,
+  unclaimed: [],
   run: emptyRun(),
 };
 

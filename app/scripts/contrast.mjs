@@ -17,15 +17,33 @@ import { fileURLToPath } from 'node:url';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const css = readFileSync(path.join(here, '..', 'src', 'design', 'tokens.css'), 'utf8');
 
-/** Every `--name: #hex;` in tokens.css. Aliases (`var(...)`) are resolved after. */
-const tokens = new Map();
-for (const m of css.matchAll(/--([a-z0-9-]+):\s*(#[0-9a-fA-F]{3,8})\s*;/g)) {
-  tokens.set(m[1], m[2].toLowerCase());
+/**
+ * Two palettes since #347: the dark one in `:root`, and the light one in
+ * `:root[data-theme='light']`, which overrides colour tokens only. Each is
+ * parsed into its own map - the light map starts from the dark one, so a token
+ * the light block forgot would be measured at its dark value, and check 0
+ * refuses that before anything else runs. Aliases (`var(...)`) are resolved
+ * per palette, because `--severity-p1-rule` is a different hex in each.
+ */
+const LIGHT = ":root[data-theme='light']";
+const lightAt = css.indexOf(LIGHT);
+if (lightAt < 0) throw new Error(`tokens.css has no ${LIGHT} block`);
+const lightBody = css.slice(lightAt, css.indexOf('}', lightAt));
+const darkCss = css.slice(0, lightAt) + css.slice(lightAt + lightBody.length);
+
+const HEX = /--([a-z0-9-]+):\s*(#[0-9a-fA-F]{3,8})\s*;/g;
+const ALIAS = /--([a-z0-9-]+):\s*var\(--([a-z0-9-]+)\)\s*;/g;
+function palette(base, text) {
+  const map = new Map(base);
+  for (const m of text.matchAll(HEX)) map.set(m[1], m[2].toLowerCase());
+  for (const m of darkCss.matchAll(ALIAS)) {
+    const target = map.get(m[2]);
+    if (target !== undefined) map.set(m[1], target);
+  }
+  return map;
 }
-for (const m of css.matchAll(/--([a-z0-9-]+):\s*var\(--([a-z0-9-]+)\)\s*;/g)) {
-  const target = tokens.get(m[2]);
-  if (target !== undefined) tokens.set(m[1], target);
-}
+const dark = palette(new Map(), darkCss);
+const light = palette(dark, lightBody);
 
 const rgb = (h) => {
   let s = h.replace('#', '');
@@ -53,12 +71,6 @@ const sat = (h) => {
   return ((max - min) / (l > 0.5 ? 2 - max - min : max + min)) * 100;
 };
 
-const t = (n) => {
-  const v = tokens.get(n);
-  if (v === undefined) throw new Error(`token --${n} is not defined in tokens.css`);
-  return v;
-};
-
 let failures = 0;
 let checks = 0;
 const fail = (msg) => {
@@ -77,120 +89,152 @@ const SURFACES = [
 ];
 const TEXT = ['text-display', 'text-emphasis', 'text-primary', 'text-secondary', 'text-tertiary'];
 
-console.log(`\ntokens parsed: ${tokens.size}\n`);
+
+// ------------------------------------------------- 0 · the light block is whole
+// A colour the light block does not name is drawn at its dark value on a
+// white page - a near-white text, a black card - and every check below would
+// measure it as though it belonged there.
+console.log('\n0 · every dark colour has a light value');
+{
+  const named = new Set([...lightBody.matchAll(HEX)].map((m) => m[1]));
+  const missing = [...darkCss.matchAll(HEX)].map((m) => m[1]).filter((n) => !named.has(n));
+  if (missing.length > 0) fail(`the light block does not set ${missing.map((n) => `--${n}`).join(', ')}`);
+  else pass(`all ${named.size} colour tokens have a light value`);
+}
+
+/**
+ * Checks 1-6 are about the colours, so each runs on both palettes. Two are
+ * stated as contrast against the panel rather than as luminance: on a dark
+ * ground the two agree, and on a light one luminance runs the other way while
+ * the claim - P0 stands out most, a diff row stands out more than a card -
+ * does not.
+ */
+function auditPalette(name, tokens) {
+  const t = (n) => {
+    const v = tokens.get(n);
+    if (v === undefined) throw new Error(`token --${n} is not defined in tokens.css`);
+    return v;
+  };
+  const before = failures;
+  console.log(`\n=== the ${name} palette (${tokens.size} tokens)`);
 
 // ---------------------------------------------------------------- 1 · the floor
-// "#8f9498 is the last passing step on these grounds (5.47-6.09 depending on
-// ground)." Every text tier must clear 4.5 on every surface it can land on.
-console.log('1 · the text floor holds on every surface');
-{
-  let worst = Infinity;
-  let worstWhere = '';
-  for (const s of SURFACES) {
-    for (const x of TEXT) {
-      const r = ratio(t(x), t(s));
-      if (r < worst) {
-        worst = r;
-        worstWhere = `${x} on ${s}`;
-      }
-      if (r < 4.5) fail(`${x} on ${s} is ${r.toFixed(2)}, below 4.5`);
-    }
-  }
-  if (failures === 0) pass(`50 pairings, worst is ${worstWhere} at ${worst.toFixed(2)}`);
-  // The spec quotes 5.47-6.09 for the floor specifically.
-  const floors = SURFACES.map((s) => ratio(t('text-tertiary'), t(s)));
-  const lo = Math.min(...floors).toFixed(2);
-  const hi = Math.max(...floors).toFixed(2);
-  pass(`the floor spans ${lo}-${hi} across the ten surfaces`);
-}
-
-// ---------------------------------------------------------------- 2 · the retirement
-// The documented-only greys must fail SOMEWHERE a real surface exists, or
-// retiring them was a preference rather than a measurement.
-//
-// `--retired-aa-limit` is the interesting one and the reason this is not a
-// single-ground check. On the four darkest surfaces it passes - 4.78 on page,
-// 4.52 on panel - so a check against one ground would have called it text. It
-// fails on five of the ten, including every card (4.43 on card, 3.67 on the
-// accent tint). That is exactly why it is named for the limit rather than
-// numbered with the others, and exactly why the floor is a step above it: a
-// floor has to hold on every ground, not the average one.
-console.log('\n2 · the retired greys fail on grounds that exist');
-for (const g of ['retired-aa-limit', 'retired-1', 'retired-2', 'retired-3', 'retired-4']) {
-  const rs = SURFACES.map((s) => ({ s, r: ratio(t(g), t(s)) }));
-  const failing = rs.filter((x) => x.r < 4.5);
-  if (failing.length === 0) {
-    fail(`--${g} passes on all ten surfaces - it should not have been retired`);
-  } else {
-    const worst = rs.reduce((a, b) => (b.r < a.r ? b : a));
-    pass(
-      `--${g} fails on ${failing.length}/10 surfaces (worst ${worst.r.toFixed(2)} on ${worst.s})`,
-    );
-  }
-}
-
-// ---------------------------------------------------------------- 3 · severity ramp
-// Weight ascends with severity, so luminance must too: P0 highest.
-console.log('\n3 · the severity ramp is monotonic');
-{
-  const ramp = ['severity-p3-rule', 'severity-p2-rule', 'severity-p1-rule', 'severity-p0-rule'];
-  const ls = ramp.map((n) => lum(t(n)));
-  const ok = ls.every((v, i) => i === 0 || v > ls[i - 1]);
-  if (ok) pass(`P3 < P2 < P1 < P0 by luminance (${ls.map((v) => v.toFixed(3)).join(' < ')})`);
-  else fail(`ramp is not monotonic: ${ls.map((v) => v.toFixed(3)).join(', ')}`);
-}
-
-// ---------------------------------------------------------------- 4 · quantity vs accent
-// "--accent-solid must not appear as a bar fill: it means pressable."
-console.log('\n4 · the quantity ramp is separable from the accent');
-for (const q of ['quantity-1', 'quantity-2', 'quantity-3']) {
-  if (t(q) === t('accent-solid')) fail(`--${q} is the accent - a bar would read as pressable`);
-}
-pass('no quantity step collides with --accent-solid');
-
-// ---------------------------------------------------------------- 5 · diff
-// Luminance symmetric and both below every card; hue carries the pair at ~6.8%.
-console.log('\n5 · diff rows: luminance symmetric, hue carries the pair');
-{
-  const panel = t('surface-panel');
-  const add = ratio(t('diff-added-row'), panel);
-  const rem = ratio(t('diff-removed-row'), panel);
-  const skew = Math.abs(add - rem);
-  if (skew > 0.15) fail(`rows are asymmetric: added ${add.toFixed(2)} vs removed ${rem.toFixed(2)}`);
-  else pass(`rows symmetric against panel: ${add.toFixed(2)} / ${rem.toFixed(2)}`);
-
-  // Both must stay below every card, or a screenful of additions becomes the
-  // brightest large area in the product.
-  for (const card of ['surface-card', 'surface-active']) {
-    for (const row of ['diff-added-row', 'diff-removed-row']) {
-      if (lum(t(row)) <= lum(t(card))) {
-        fail(`--${row} is not above --${card}; the spec says rows sit below cards`);
+  // "#8f9498 is the last passing step on these grounds (5.47-6.09 depending on
+  // ground)." Every text tier must clear 4.5 on every surface it can land on.
+  console.log('1 · the text floor holds on every surface');
+  {
+    let worst = Infinity;
+    let worstWhere = '';
+    for (const s of SURFACES) {
+      for (const x of TEXT) {
+        const r = ratio(t(x), t(s));
+        if (r < worst) {
+          worst = r;
+          worstWhere = `${x} on ${s}`;
+        }
+        if (r < 4.5) fail(`${x} on ${s} is ${r.toFixed(2)}, below 4.5`);
       }
     }
+    if (failures === before) pass(`50 pairings, worst is ${worstWhere} at ${worst.toFixed(2)}`);
+    // The spec quotes 5.47-6.09 for the floor specifically.
+    const floors = SURFACES.map((s) => ratio(t('text-tertiary'), t(s)));
+    const lo = Math.min(...floors).toFixed(2);
+    const hi = Math.max(...floors).toFixed(2);
+    pass(`the floor spans ${lo}-${hi} across the ten surfaces`);
   }
-  pass('both rows sit above the cards in luminance, as drawn');
-
-  for (const [n, min] of [['diff-added-row', 3], ['diff-removed-row', 3], ['diff-added-gutter', 6], ['diff-removed-gutter', 6]]) {
-    const s = sat(t(n));
-    if (s < min) fail(`--${n} is ${s.toFixed(1)}% saturated, below the ${min}% hue floor`);
-    else pass(`--${n} carries ${s.toFixed(1)}% saturation`);
+  
+  // ---------------------------------------------------------------- 2 · the retirement
+  // The documented-only greys must fail SOMEWHERE a real surface exists, or
+  // retiring them was a preference rather than a measurement.
+  //
+  // `--retired-aa-limit` is the interesting one and the reason this is not a
+  // single-ground check. On the four darkest surfaces it passes - 4.78 on page,
+  // 4.52 on panel - so a check against one ground would have called it text. It
+  // fails on five of the ten, including every card (4.43 on card, 3.67 on the
+  // accent tint). That is exactly why it is named for the limit rather than
+  // numbered with the others, and exactly why the floor is a step above it: a
+  // floor has to hold on every ground, not the average one.
+  console.log('\n2 · the retired greys fail on grounds that exist');
+  for (const g of ['retired-aa-limit', 'retired-1', 'retired-2', 'retired-3', 'retired-4']) {
+    const rs = SURFACES.map((s) => ({ s, r: ratio(t(g), t(s)) }));
+    const failing = rs.filter((x) => x.r < 4.5);
+    if (failing.length === 0) {
+      fail(`--${g} passes on all ten surfaces - it should not have been retired`);
+    } else {
+      const worst = rs.reduce((a, b) => (b.r < a.r ? b : a));
+      pass(
+        `--${g} fails on ${failing.length}/10 surfaces (worst ${worst.r.toFixed(2)} on ${worst.s})`,
+      );
+    }
   }
-
-  // Code must be readable on its own row - the second of the diff's two rules.
-  for (const [code, row] of [['diff-added-code', 'diff-added-row'], ['diff-removed-code', 'diff-removed-row']]) {
-    const r = ratio(t(code), t(row));
-    if (r < 4.5) fail(`--${code} on --${row} is ${r.toFixed(2)}`);
-    else pass(`--${code} on its row is ${r.toFixed(2)}`);
+  
+  // ---------------------------------------------------------------- 3 · severity ramp
+  // Weight ascends with severity, so contrast against the panel must too: P0 most.
+  console.log('\n3 · the severity ramp is monotonic');
+  {
+    const ramp = ['severity-p3-rule', 'severity-p2-rule', 'severity-p1-rule', 'severity-p0-rule'];
+    const ls = ramp.map((n) => ratio(t(n), t('surface-panel')));
+    const ok = ls.every((v, i) => i === 0 || v > ls[i - 1]);
+    if (ok) pass(`P3 < P2 < P1 < P0 by contrast on the panel (${ls.map((v) => v.toFixed(2)).join(' < ')})`);
+    else fail(`ramp is not monotonic: ${ls.map((v) => v.toFixed(3)).join(', ')}`);
   }
+  
+  // ---------------------------------------------------------------- 4 · quantity vs accent
+  // "--accent-solid must not appear as a bar fill: it means pressable."
+  console.log('\n4 · the quantity ramp is separable from the accent');
+  for (const q of ['quantity-1', 'quantity-2', 'quantity-3']) {
+    if (t(q) === t('accent-solid')) fail(`--${q} is the accent - a bar would read as pressable`);
+  }
+  pass('no quantity step collides with --accent-solid');
+  
+  // ---------------------------------------------------------------- 5 · diff
+  // Luminance symmetric and both below every card; hue carries the pair at ~6.8%.
+  console.log('\n5 · diff rows: luminance symmetric, hue carries the pair');
+  {
+    const panel = t('surface-panel');
+    const add = ratio(t('diff-added-row'), panel);
+    const rem = ratio(t('diff-removed-row'), panel);
+    const skew = Math.abs(add - rem);
+    if (skew > 0.15) fail(`rows are asymmetric: added ${add.toFixed(2)} vs removed ${rem.toFixed(2)}`);
+    else pass(`rows symmetric against panel: ${add.toFixed(2)} / ${rem.toFixed(2)}`);
+  
+    // Both must stay below every card, or a screenful of additions becomes the
+    // brightest large area in the product.
+    for (const card of ['surface-card', 'surface-active']) {
+      for (const row of ['diff-added-row', 'diff-removed-row']) {
+        if (ratio(t(row), panel) <= ratio(t(card), panel)) {
+          fail(`--${row} stands out from the panel less than --${card} does`);
+        }
+      }
+    }
+    pass('both rows stand further from the panel than the cards do, as drawn');
+  
+    for (const [n, min] of [['diff-added-row', 3], ['diff-removed-row', 3], ['diff-added-gutter', 6], ['diff-removed-gutter', 6]]) {
+      const s = sat(t(n));
+      if (s < min) fail(`--${n} is ${s.toFixed(1)}% saturated, below the ${min}% hue floor`);
+      else pass(`--${n} carries ${s.toFixed(1)}% saturation`);
+    }
+  
+    // Code must be readable on its own row - the second of the diff's two rules.
+    for (const [code, row] of [['diff-added-code', 'diff-added-row'], ['diff-removed-code', 'diff-removed-row']]) {
+      const r = ratio(t(code), t(row));
+      if (r < 4.5) fail(`--${code} on --${row} is ${r.toFixed(2)}`);
+      else pass(`--${code} on its row is ${r.toFixed(2)}`);
+    }
+  }
+  
+  // ---------------------------------------------------------------- 6 · semantic
+  console.log('\n6 · the two semantic hues are legible where they are used');
+  for (const n of ['semantic-live', 'semantic-loss']) {
+    const r = ratio(t(n), t('surface-panel'));
+    if (r < 3.0) fail(`--${n} is ${r.toFixed(2)} on panel, below the 3.0 non-text threshold`);
+    else pass(`--${n} is ${r.toFixed(2)} on panel`);
+  }
+  
+  
 }
-
-// ---------------------------------------------------------------- 6 · semantic
-console.log('\n6 · the two semantic hues are legible where they are used');
-for (const n of ['semantic-live', 'semantic-loss']) {
-  const r = ratio(t(n), t('surface-panel'));
-  if (r < 3.0) fail(`--${n} is ${r.toFixed(2)} on panel, below the 3.0 non-text threshold`);
-  else pass(`--${n} is ${r.toFixed(2)} on panel`);
-}
+auditPalette('dark', dark);
+auditPalette('light', light);
 
 // ---------------------------------------------------------------- 7 · no stray hex
 // "No hex literal appears outside tokens.css."
@@ -388,6 +432,24 @@ console.log('\n10 · a dialog cannot outgrow the window it is covering');
   } else {
     pass('the Modal body scrolls inside the bound');
   }
+}
+// --------------------------------------- 11 · class merging knows the font sizes
+// `cn` merges classes with tailwind-merge, which knows Tailwind's own sizes and
+// none of `theme.css`'s. Told nothing, it read `text-label` as a colour and
+// dropped the `text-on-accent` before it, so every small primary button drew
+// its parent's grey on the accent fill (#347). `src/lib/utils.ts` names the
+// sizes; this fails when that list and `theme.css` disagree.
+console.log('\n11 · class merging knows every font size theme.css defines');
+{
+  const theme = readFileSync(path.join(here, '..', 'src', 'design', 'theme.css'), 'utf8');
+  const utils = readFileSync(path.join(here, '..', 'src', 'lib', 'utils.ts'), 'utf8');
+  const defined = [...theme.matchAll(/^\s*--text-([a-z0-9-]+):\s*calc/gm)].map((m) => m[1]).sort();
+  const block = /FONT_SIZES = \[([^\]]*)\]/.exec(utils)?.[1] ?? '';
+  const named = [...block.matchAll(/'([a-z0-9-]+)'/g)].map((m) => m[1]).sort();
+  if (defined.length === 0) fail('no --text-* sizes found in theme.css - the parser lost its subject');
+  else if (defined.join() !== named.join()) {
+    fail(`theme.css defines ${defined.join(', ')} and utils.ts names ${named.join(', ') || 'none'}`);
+  } else pass(`all ${defined.length} sizes are known to cn`);
 }
 console.log(`\n${checks} checks passed, ${failures} failed\n`);
 process.exit(failures > 0 ? 1 : 0);

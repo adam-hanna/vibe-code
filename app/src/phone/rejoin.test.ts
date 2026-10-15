@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { ENDED_WHILE_AWAY, rejoin, settleRejoin, updateRun } from '../cockpit/hosts';
+import { ENDED_WHILE_AWAY, rejoin, routeFrame, settleRejoin, updateRun, watchRun } from '../cockpit/hosts';
 import type { LiveRun, LiveRuns } from '../cockpit/hosts';
 import { emptyRun, hostLost, reduce } from '../cockpit/model';
 import type { Frame } from '../host';
@@ -38,6 +38,8 @@ function entry(over: Partial<LiveRun> = {}): LiveRun {
     heard: true,
     pausing: false,
     stopping: false,
+    watched: false,
+    unclaimed: [],
     run: emptyRun(),
     base: emptyRun(),
     ...over,
@@ -107,5 +109,26 @@ describe('a reconnect does not double a run', () => {
   test('a run that is no longer live is left alone', () => {
     const ended = [entry({ live: false, run: once })];
     expect(rejoin(ended)).toEqual(ended);
+  });
+
+  test('a watched run - every run a phone draws - is refolded once, never retired (#347)', () => {
+    // A phone starts no run hosts, so each run it draws is one it is watching,
+    // made by `watchRun` from the host's first frame. The cockpit remembers every
+    // handle it has had an entry for, and a replayed frame must still reach the
+    // entry rather than be routed `stale` as a run already finished.
+    const watched = fold(watchRun([], 'run-7', 1), FRAMES);
+    const seen = new Set(['run-7']);
+    const rejoined = rejoin(watched);
+    expect(routeFrame(rejoined, 'run-7', seen)).toBe('run');
+    const { lives, lost } = settleRejoin(fold(rejoined, FRAMES), new Set(['run-7']), 5_000, ENDED_WHILE_AWAY);
+    expect(lost).toEqual([]);
+    expect(lives).toHaveLength(1);
+    expect(lives[0]!.watched).toBe(true);
+    expect(lives[0]!.run).toEqual(fold(watchRun([], 'run-7', 1), FRAMES)[0]!.run);
+  });
+
+  test('a host first seen during the disconnect is watched from its replay (#347)', () => {
+    const rejoined = rejoin(fold([entry()], FRAMES));
+    expect(routeFrame(rejoined, 'run-9', new Set(['run-7']))).toBe('watch');
   });
 });
