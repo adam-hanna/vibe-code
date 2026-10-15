@@ -6,6 +6,15 @@ import { crumbs, foldersOf, isRepository, visibleFolders } from './cockpit/pick.
 import phoneLib from '../mobile/src-tauri/src/lib.rs?raw';
 import phoneIdentity from '../mobile/src-tauri/src/identity.rs?raw';
 import phoneCapability from '../mobile/src-tauri/capabilities/default.json?raw';
+import scanCapability from '../mobile/src-tauri/capabilities/scan.json?raw';
+import phoneCargo from '../mobile/src-tauri/Cargo.toml?raw';
+import phoneLink from '../mobile/src-tauri/src/link.rs?raw';
+import iosPlist from '../mobile/src-tauri/Info.ios.plist?raw';
+import appPackage from '../package.json?raw';
+import phoneApp from './phone/PhoneApp.tsx?raw';
+import pairScreen from './phone/Pair.tsx?raw';
+import { confirmOnDevice as desktopConfirm } from './transport';
+import { confirmOnDevice as phoneConfirm } from './transport.mobile';
 
 /**
  * The phone build (#345): one cockpit, and the few modules swapped under it.
@@ -146,17 +155,158 @@ describe("the phone's folder chooser", () => {
   });
 });
 
+/**
+ * The phone's commands (#346): the three from #345 plus the fifteen about its
+ * desktops and the device. Case 2 edit - the contract moved: pairing, the
+ * desktops list, connect, unpair and rename all need the phone's own commands.
+ */
+const COMMANDS = [
+  'phone_confirm',
+  'phone_desktops',
+  'phone_identity',
+  'phone_network_change',
+  'phone_notify',
+  'phone_open',
+  'phone_open_release_page',
+  'phone_pair',
+  'phone_pair_cancel',
+  'phone_probe',
+  'phone_release',
+  'phone_rename',
+  'phone_session',
+  'phone_settings',
+  'phone_settings_set',
+  'phone_unlock',
+  'phone_unpair',
+  'remote_call',
+];
+
 describe("the phone's own boundary", () => {
-  test('three commands, and none of them can hand back the key', () => {
+  test('eighteen commands, all registered, and none of them can hand back the key', () => {
     const commands = [...phoneLib.matchAll(/#\[tauri::command\]\s*(?:async )?fn (\w+)\(([\s\S]*?)\{/g)];
-    expect(commands.map((m) => m[1]).sort()).toEqual(['phone_identity', 'phone_open_release_page', 'remote_call']);
+    expect(commands.map((m) => m[1]).sort()).toEqual(COMMANDS);
     for (const [, name, signature] of commands) expect(signature, name).not.toMatch(/SecretKey|to_bytes/);
-    expect(phoneLib).toMatch(/generate_handler!\[remote_call, phone_identity, phone_open_release_page\]/);
+    const handler = /generate_handler!\[([\s\S]*?)\]/.exec(phoneLib)?.[1] ?? '';
+    expect(handler.split(',').map((c) => c.trim()).filter(Boolean).sort()).toEqual(COMMANDS);
   });
 
-  test('the window is granted no plugin permission', () => {
-    expect(JSON.parse(phoneCapability).permissions).toEqual(['core:default']);
+  test('every command that reads or reaches a desktop takes the lock guard, and only those', () => {
+    const commands = [...phoneLib.matchAll(/#\[tauri::command\]\s*(?:async )?fn (\w+)\([\s\S]*?\{([\s\S]*?)\n\}/g)];
+    const guarded = commands.filter(([, , body]) => /^\s*phone\.unlocked\(\)\?;/.test(body ?? '')).map((m) => m[1]);
+    expect(guarded.sort()).toEqual([
+      'phone_desktops',
+      'phone_open',
+      'phone_pair',
+      'phone_probe',
+      'phone_release',
+      'phone_rename',
+      'phone_session',
+      'phone_settings_set',
+      'phone_unpair',
+    ]);
+    // `remote_call` is guarded inside `Phone::remote_call`.
+    expect(phoneLib).toMatch(/async fn remote_call\(&self[\s\S]*?\{\s*self\.unlocked\(\)\?;/);
   });
+
+  test('the window is granted no plugin permission but the camera, on phones only', () => {
+    expect(JSON.parse(phoneCapability).permissions).toEqual(['core:default']);
+    const scan = JSON.parse(scanCapability) as { windows: string[]; platforms: string[]; permissions: string[] };
+    expect(scan.windows).toEqual(['main']);
+    expect(scan.platforms.sort()).toEqual(['android', 'iOS']);
+    expect(scan.permissions).toEqual([
+      'barcode-scanner:allow-scan',
+      'barcode-scanner:allow-cancel',
+      'barcode-scanner:allow-check-permissions',
+      'barcode-scanner:allow-request-permissions',
+    ]);
+  });
+
+  test('the plugins are driven from Rust: notification everywhere, biometric and the scanner on phones', () => {
+    expect(phoneLib).toContain('.plugin(tauri_plugin_notification::init())');
+    expect(phoneLib).toMatch(/#\[cfg\(mobile\)\]\s*let builder = builder\.plugin\(tauri_plugin_biometric::init\(\)\)\.plugin\(tauri_plugin_barcode_scanner::init\(\)\);/);
+  });
+
+  test("the Hello carries the app's version, not the crate's", () => {
+    expect(phoneLib).toContain('app.package_info().version.to_string()');
+    expect(phoneLib + phoneLink).not.toContain('CARGO_PKG_VERSION');
+  });
+
+  test('the phone dials with its own iroh, as the desktop reaches the internet, with mDNS', () => {
+    expect(phoneCargo).toMatch(/^iroh = \{ version = "1\.3", default-features = false, features = \["tls-ring", "fast-apple-datapath"\] \}/m);
+    expect(phoneLink).toContain('vibe_remote::reach::internet(None, true)');
+    for (const key of ['NSCameraUsageDescription', 'NSFaceIDUsageDescription', 'NSLocalNetworkUsageDescription', 'NSBonjourServices', '_irohv1._udp']) {
+      expect(iosPlist).toContain(key);
+    }
+  });
+
+  test('the scanner package is a dependency and Pair.tsx is its only importer', () => {
+    expect(JSON.parse(appPackage).dependencies).toHaveProperty('@tauri-apps/plugin-barcode-scanner');
+    const raw = import.meta.glob(['./**/*.ts', './**/*.tsx', '!./**/*.test.ts'], { query: '?raw', import: 'default', eager: true });
+    const importers = Object.entries(raw)
+      .filter(([, text]) => String(text).includes("from '@tauri-apps/plugin-barcode-scanner'"))
+      .map(([path]) => path);
+    expect(importers).toEqual(['./phone/Pair.tsx']);
+  });
+});
+
+describe('the phone app', () => {
+  test('reads its settings and gates on the lock before it opens any desktop', () => {
+    const settings = phoneApp.indexOf("local<PhoneSettings>('phone_settings')");
+    const gate = phoneApp.indexOf('bootStep(read)');
+    const open = phoneApp.indexOf("'phone_open'");
+    expect(settings).toBeGreaterThan(-1);
+    expect(gate).toBeGreaterThan(settings);
+    expect(open).toBeGreaterThan(-1);
+    // `phone_open` is only reached through `start`, which only an unlocked boot runs.
+    expect(phoneApp).toMatch(/if \(bootStep\(read\) === 'locked'\) lock\(true\);\s*else \{\s*lock\(false\);\s*await start\(\);/);
+    // The session and the release wait for the unlock: the Rust refuses both while locked.
+    expect(phoneApp).toContain('session: () => gate.current.when(api.session)');
+    expect(phoneApp).toContain('release: (generation) => gate.current.when(() => api.release(generation))');
+  });
+
+  test('sends the network signals', () => {
+    expect(phoneApp).toContain('networkSignals(');
+  });
+
+  test('pairing listens for the code before it asks, draws the digits, and warns a phone with no lock', () => {
+    const listens = pairScreen.indexOf("listen<{ attempt: number; code: string }>('phone://pair-code'");
+    const asks = pairScreen.indexOf("local<Outcome>('phone_pair'");
+    expect(listens).toBeGreaterThan(-1);
+    expect(asks).toBeGreaterThan(listens);
+    expect(pairScreen).toContain('Check that the desktop shows the same number, then press Allow there.');
+    expect(pairScreen).toContain('lockWarning(settings.deviceLock)');
+  });
+
+  test('leaving the pairing screen ends the attempt: nothing after a late scan listens, dispatches or pairs', () => {
+    // A scan that resolves after Back (or after the lock unmounted the screen)
+    // must not go on to pair a desktop nobody is looking at.
+    const scans = pairScreen.indexOf('await scan(');
+    const listens = pairScreen.indexOf("listen<{ attempt: number; code: string }>('phone://pair-code'");
+    const asks = pairScreen.indexOf("local<Outcome>('phone_pair'");
+    const between = (from: number, to: number) => pairScreen.slice(from, to);
+    expect(between(scans, listens)).toContain('if (!live.current) return;');
+    expect(between(listens, asks)).toContain('if (!live.current) return;');
+    // Back from the scan cancels the camera, and unmounting cancels both.
+    expect(pairScreen).toMatch(/live\.current = false;\s*if \(state\.step === 'scanning'\) void cancelScan\(\)/);
+    expect(pairScreen).toMatch(/return \(\) => \{\s*live\.current = false;\s*void cancelScan\(\)[^;]*;\s*if \(dialling\.current !== null\) void local\('phone_pair_cancel', \{ attempt: dialling\.current \}\)/);
+  });
+});
+
+describe('confirming on the device', () => {
+  test('the desktop build resolves at once and asks nothing', async () => {
+    const asked = shell(() => false);
+    await expect(desktopConfirm('Delete a run')).resolves.toBe(true);
+    expect(asked).toEqual([]);
+  });
+
+  test("the phone asks the phone's Rust, with the reason", async () => {
+    const asked = shell(() => true);
+    await expect(phoneConfirm('Delete a run')).resolves.toBe(true);
+    expect(asked).toEqual([{ command: 'phone_confirm', args: { reason: 'Delete a run' } }]);
+  });
+});
+
+describe("the phone's key", () => {
 
   test('nothing deletes the key, and the key is never logged', () => {
     expect(phoneIdentity).not.toContain('delete_credential');

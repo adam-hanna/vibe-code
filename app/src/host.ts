@@ -1,4 +1,5 @@
 import { invoke, listen, local } from './transport';
+import { confirmed } from './confirm';
 import type { PilotAccess } from './pilot/access';
 import type { Outcome, UpdateInfo, UpdateProgress } from './shell/update';
 import { requestIds } from './changed';
@@ -685,6 +686,30 @@ export interface Handlers {
   log(host: string, line: string): void;
   /** A host ended. `code` is null where it was signalled and has none. */
   exit(host: string, code: number | null): void;
+  /**
+   * A phone reconnected to its desktop (#346), and connection `generation`'s
+   * replay is about to be folded: start the live runs again. Never on the
+   * desktop, where there is no connection to lose.
+   */
+  rejoined?(generation: number): void;
+  /** Generation `generation`'s replay has been released and folded: settle. */
+  settle?(generation: number): void;
+}
+
+/**
+ * What a phone does when its connection comes back (#346), installed by the
+ * phone build before the cockpit connects. `connected` resolves true only when
+ * that generation was applied and is still the newest; `listening` runs once
+ * the cockpit's listeners are up, so held events have somewhere to go.
+ */
+export interface LinkHooks {
+  connected(generation: number): Promise<boolean>;
+  listening(): Promise<void>;
+}
+
+let linkHooks: LinkHooks | null = null;
+export function setLinkHooks(hooks: LinkHooks | null): void {
+  linkHooks = hooks;
 }
 
 /**
@@ -784,7 +809,26 @@ export async function connect(handlers: Handlers): Promise<() => void> {
       const code: unknown = got['code'];
       handlers.exit(got.host, typeof code === 'number' ? code : null);
     }),
+    // A phone's reconnect (#346). Nothing is sent from here until the new
+    // connection's request range is known: an id from the old range would be
+    // read by the desktop as somebody else's.
+    listen<unknown>('phone://connected', (event) => {
+      const got: unknown = event.payload;
+      const generation =
+        typeof got === 'object' && got !== null ? (got as { generation?: unknown }).generation : undefined;
+      if (typeof generation !== 'number') return handlers.unknown('phone', got);
+      pauseRequests();
+      handlers.rejoined?.(generation);
+      void (linkHooks?.connected(generation) ?? Promise.resolve(false))
+        .then((applied) => {
+          if (applied) handlers.settle?.(generation);
+        })
+        .catch((err: unknown) => handlers.log('phone', `could not resync after a reconnect: ${String(err)}`));
+    }),
   ]);
+  if (linkHooks !== null) {
+    await linkHooks.listening().catch((err: unknown) => handlers.log('phone', `could not resync: ${String(err)}`));
+  }
   return () => {
     for (const stop of stops) stop();
   };
@@ -810,6 +854,7 @@ export function start(): Promise<number> {
  * host behind whenever the second failed.
  */
 export function startRunHost(handle: string, request: object): Promise<number> {
+  if (paused) return Promise.reject(new Error(RECONNECTING));
   return invoke<number>('host_start', { handle, line: JSON.stringify(request) });
 }
 
@@ -825,6 +870,7 @@ export function status(): Promise<Status> {
  * understand.
  */
 export function send(request: object, handle: string = SERVICE_HOST): Promise<void> {
+  if (paused) return Promise.reject(new Error(RECONNECTING));
   return invoke('host_send', { handle, line: JSON.stringify(request) });
 }
 
@@ -1374,6 +1420,8 @@ export async function answerQuestions(
  * be answering neither.
  */
 export async function deleteRun(dir: string, runId: string): Promise<string> {
+  // Asked on the device first (#346): it cannot be undone.
+  await confirmed('Delete a run');
   const id = nextRequestId();
   const frame = await ask<RunDeleted>(
     { type: 'delete_run', id, dir, runId },
@@ -1500,7 +1548,22 @@ export function nextRequestId(): number {
  */
 export function startRequestIds(base: number): void {
   ids = requestIds(base);
+  paused = false;
 }
+
+/**
+ * Hold every request line until the next `startRequestIds` (#346): a phone has
+ * reconnected and its new range is not known yet. A request made meanwhile is
+ * refused with a rejected promise - never a throw, since `pause`, `cancel` and
+ * the rest are called from handlers that do not catch - and nothing is sent.
+ */
+let paused = false;
+export function pauseRequests(): void {
+  paused = true;
+}
+
+/** What a request made while paused is refused with. */
+export const RECONNECTING = 'this phone is reconnecting to the desktop; try again in a moment';
 
 /** Whether this client sent the request with this id (#354). */
 export function allocatedHere(id: number): boolean {

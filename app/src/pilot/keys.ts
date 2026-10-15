@@ -1,3 +1,4 @@
+import { confirmed } from '../confirm';
 import { invoke } from '../transport';
 
 /**
@@ -43,8 +44,10 @@ export function status(): Promise<KeyStatus[]> {
   return invoke<KeyStatus[]>('key_status');
 }
 
-export function set(provider: Provider, key: string): Promise<void> {
-  return invoke('key_set', { provider, key });
+/** Asked on the device first (#346): a key stored is money somebody else can spend. */
+export async function set(provider: Provider, key: string): Promise<void> {
+  await confirmed('Store an API key');
+  await invoke('key_set', { provider, key });
 }
 
 export function clear(provider: Provider): Promise<void> {

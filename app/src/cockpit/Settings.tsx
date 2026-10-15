@@ -25,6 +25,7 @@ import type { Gate, GateRow } from './gateform';
 import type { Listing } from './models';
 import { RemoteAccess } from '../remote/RemoteAccess';
 import { SURFACE } from '../surface';
+import { confirmed } from '../confirm';
 
 /**
  * A table as a phone draws it (#347): each row a block, its cells flowing and
@@ -1658,7 +1659,10 @@ export function Settings({
                 confirm="turn YOLO on"
                 onConfirm={() => {
                   setAskYolo(false);
-                  write({ pilot: { yolo: true } }, 'global');
+                  // Asked on the device too (#346); a refusal leaves it off.
+                  void confirmed('Turn YOLO on')
+                    .then(() => write({ pilot: { yolo: true } }, 'global'))
+                    .catch(() => undefined);
                 }}
                 onCancel={() => setAskYolo(false)}
               />

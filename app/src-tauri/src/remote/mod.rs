@@ -78,6 +78,7 @@ use pairing::{Answer, Pairing};
 use qr::QrMatrix;
 use settings::{Loaded, Patch, Settings, SettingsFile};
 use store::{Phone, Store};
+use vibe_remote::REMOTE_OFF;
 use wire::{PairPayload, PairResult};
 
 /// Live connections from paired phones. Empty until the endpoint exists (#342),
@@ -608,8 +609,19 @@ where
         }
     };
     if let Some(ep) = stopping {
+        let asker = after.as_ref().map(|w| w.asker);
         if let Some(after) = after {
             after.wait().await;
+        }
+        // Remote access is going off: every phone is told so with REMOTE_OFF
+        // (#346) before the endpoint stops, the one that asked first and by id,
+        // once its answer has arrived. A relay change closes with no code: the
+        // endpoint comes straight back under the same id.
+        if !desired.enabled {
+            if let Some(asker) = asker {
+                ep.connections().close_with(&asker, REMOTE_OFF, REMOTE_OFF_REASON);
+            }
+            ep.connections().close_all(REMOTE_OFF, REMOTE_OFF_REASON);
         }
         let id = ep.id();
         ep.stop().await;
@@ -652,6 +664,9 @@ where
         }
     }
 }
+
+/// The reason bytes beside [`REMOTE_OFF`]; the phone reads the code.
+const REMOTE_OFF_REASON: &[u8] = b"remote access is off";
 
 /// `reconcile_locked`, taking the lock.
 async fn reconcile_with<K, B, F>(remote: &Remote, read_key: K, build: B)
@@ -1518,6 +1533,14 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(10), conn.closed()).await.expect("the connection closes");
     }
 
+    /// The application code a connection was closed with, once it has closed.
+    async fn closed_code(conn: &iroh::endpoint::Connection) -> Option<u64> {
+        match tokio::time::timeout(Duration::from_secs(10), conn.closed()).await.expect("the connection closes") {
+            iroh::endpoint::ConnectionError::ApplicationClosed(c) => Some(c.error_code.into_inner()),
+            _ => None,
+        }
+    }
+
     /// Nothing answers at `addr` any more: a dial fails or never completes.
     async fn nothing_listening(addr: iroh::EndpointAddr) {
         let p = dialler(key()).await;
@@ -1539,7 +1562,8 @@ mod tests {
         // Off asks nothing of the keychain.
         reconcile_with(&rig.remote, || panic!("off reads no key"), rig.build()).await;
         assert_eq!(rig.report(), EndpointReport::Off);
-        closed(&conn).await;
+        // Case 2 (#346): the phone is told why, with REMOTE_OFF.
+        assert_eq!(closed_code(&conn).await, Some(REMOTE_OFF as u64));
         settle().await;
         assert_eq!(rig.announced.load(Ordering::SeqCst), 2, "one disconnect, from the connection's guard");
         nothing_listening(addr).await;
@@ -1592,6 +1616,55 @@ mod tests {
         }
         closed(&conn).await;
         nothing_listening(old).await;
+    }
+
+    /// A relay change restarts the endpoint under the same id: the phone is
+    /// dropped and reconnects, and is never told remote access is off (#346).
+    #[tokio::test]
+    async fn a_relay_change_does_not_close_with_remote_off() {
+        let rig = Rig::new();
+        want(&rig.remote, true, Some("https://a.example"));
+        rig.reconcile().await;
+        let (_p, conn) = rig.connect().await;
+        want(&rig.remote, true, Some("https://b.example"));
+        rig.reconcile().await;
+        assert_ne!(closed_code(&conn).await, Some(REMOTE_OFF as u64));
+        assert!(matches!(rig.report(), EndpointReport::Up { .. }));
+    }
+
+    /// A phone turning remote access off: nothing closes until its answer has
+    /// arrived; then it is closed by id with REMOTE_OFF, and so is every other
+    /// phone (#346).
+    #[tokio::test]
+    async fn a_phone_s_off_closes_the_asker_by_id_after_its_answer_then_everyone() {
+        let other = key();
+        let mut rig = Rig::new();
+        rig.gate = List::with(&[rig.phone_key.public(), other.public()]);
+        want(&rig.remote, true, None);
+        rig.reconcile().await;
+        let (_p, asker) = rig.connect().await;
+        let o = dialler(other.clone()).await;
+        let bystander = o.connect(rig.addr(), endpoint::REMOTE_ALPN).await.expect("the other phone connects");
+        settle().await;
+
+        want(&rig.remote, false, None);
+        let (reached, written) = tokio::sync::oneshot::channel();
+        let stop = {
+            let build = rig.build();
+            let remote = &rig.remote;
+            let written = Written::new(written, rig.phone_key.public());
+            async move { reconcile_locked(remote, || panic!("off reads no key"), build, Some(written)).await }
+        };
+        let answered = async {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            assert!(asker.close_reason().is_none(), "the asker was not closed before its answer arrived");
+            assert!(bystander.close_reason().is_none(), "nor was anybody else");
+            reached.send(()).unwrap();
+        };
+        tokio::join!(stop, answered);
+        assert_eq!(closed_code(&asker).await, Some(REMOTE_OFF as u64));
+        assert_eq!(closed_code(&bystander).await, Some(REMOTE_OFF as u64));
+        assert_eq!(rig.report(), EndpointReport::Off);
     }
 
     #[tokio::test]
@@ -1654,7 +1727,7 @@ mod tests {
         let phone_task = {
             let rig = rig.clone();
             tokio::spawn(async move {
-                reconcile_locked(&rig.remote, || panic!("off reads no key"), rig.build(), Some(Written(written))).await;
+                reconcile_locked(&rig.remote, || panic!("off reads no key"), rig.build(), Some(Written::new(written, rig.phone_key.public()))).await;
                 drop(guard);
             })
         };
@@ -1694,7 +1767,8 @@ mod tests {
         reached.send(()).unwrap();
         phone_task.await.unwrap();
         desktop_task.await.unwrap();
-        closed(&conn).await;
+        // Case 2 (#346): closed with REMOTE_OFF, once its answer had arrived.
+        assert_eq!(closed_code(&conn).await, Some(REMOTE_OFF as u64));
         assert_eq!(builds.load(Ordering::SeqCst), 1);
         assert!(matches!(rig.report(), EndpointReport::Up { .. }));
     }
@@ -1746,7 +1820,7 @@ mod tests {
         let stop = {
             let rig = rig.clone();
             tokio::spawn(async move {
-                reconcile_locked(&rig.remote, || panic!("off reads no key"), rig.build(), Some(Written(written))).await;
+                reconcile_locked(&rig.remote, || panic!("off reads no key"), rig.build(), Some(Written::new(written, rig.phone_key.public()))).await;
                 drop(guard);
             })
         };

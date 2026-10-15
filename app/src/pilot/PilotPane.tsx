@@ -77,6 +77,7 @@ import { copyOf } from './copy';
 import type { Command, Commands } from '../cockpit/commands';
 import type { Run } from '../cockpit/model';
 import type { OpenAt } from '../cockpit/LoopColumn';
+import { offerNotice, pilotNotice } from '../cockpit/notices';
 
 /**
  * The pilot pane: the conversation that drives the session (#143, #144).
@@ -1052,6 +1053,11 @@ export function PilotPane({
   /** The composer's field, so a starter can hand it focus without a selector. */
   const entryRef = useRef<HTMLTextAreaElement>(null);
   const [live, setLive] = useState<number | null>(null);
+  /** `live`, for handlers registered once (#346): whose turn a final event ends. */
+  const liveNow = useRef<number | null>(null);
+  useEffect(() => {
+    liveNow.current = live;
+  }, [live]);
   /** Turns asked for whose id has not come back yet (#305). */
   const [opening, setOpening] = useState(0);
   const turning = live !== null || opening > 0;
@@ -1112,6 +1118,9 @@ export function PilotPane({
           // Only for this pane's own turn (#305): every mounted pane hears every
           // event, and a reply ending in one conversation is not the end of a
           // turn another is waiting on.
+          // A phone's notification (#346), for this pane's own turn only.
+          const final = event.kind === 'ended' || event.kind === 'failed' || event.kind === 'cancelled';
+          if (final && liveNow.current === event.turn) offerNotice(pilotNotice('api', event));
           if (pilot.isFinal(event)) setLive((at) => (at === event.turn ? null : at));
         },
         () => dispatch({ type: 'unknown' }),
@@ -1247,6 +1256,7 @@ export function PilotPane({
         }
         if (frame.type === 'error') {
           dispatch({ type: 'event', event: { kind: 'failed', turn, message: frame.message } });
+          offerNotice(pilotNotice('host', { kind: 'failed', turn }));
           setLive(null);
           return;
         }
@@ -1312,6 +1322,7 @@ ${frame.text}`, turn, origin.current))) {
           },
         });
         dispatch({ type: 'event', event: { kind: 'ended', turn, stop: null } });
+        offerNotice(pilotNotice('host', { kind: 'ended', turn }));
         setLive(null);
       });
       if (cancelled) stop?.();

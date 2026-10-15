@@ -20,3 +20,13 @@ pub fn internet(relay: Option<RelayUrl>, mdns: bool) -> Builder {
     }
     b
 }
+
+/// The relays an [`internet`] endpoint built with `relay` uses: that one, or
+/// n0's. What the phone's network reading compares a desktop's relay against
+/// (#346), from the same choice the builder made.
+pub fn relays(relay: Option<&RelayUrl>) -> Vec<RelayUrl> {
+    match relay {
+        Some(url) => vec![url.clone()],
+        None => iroh::endpoint::default_relay_mode().relay_map().urls(),
+    }
+}

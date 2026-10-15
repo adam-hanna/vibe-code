@@ -575,6 +575,231 @@ mod tests {
         d.endpoint.stop().await;
     }
 
+    /// The phone's real client (`vibe_remote::client`) against this real
+    /// handler, in one process (#346). The phone finds the desktop by id
+    /// through an in-memory lookup, as it would through n0 or mDNS.
+    mod client {
+        use super::*;
+        use crate::remote::endpoint::tests::phone_finding;
+        use iroh::address_lookup::memory::MemoryLookup;
+        use vibe_remote::client::{self as phone_client, Client, Net, Probe, Reason, Timeouts};
+        use vibe_remote::paired::{PairedList as PhoneList, FILE as PHONE_FILE};
+        use vibe_remote::wire::PairPayload;
+
+        fn online() -> vibe_remote::client::NetReader {
+            Arc::new(|| Net { online: true, relays: vec![], phone_relays: vec![] })
+        }
+
+        fn quick() -> Timeouts {
+            Timeouts {
+                hint: Duration::from_millis(500),
+                dial: Duration::from_secs(5),
+                unpair_dial: Duration::from_secs(2),
+                unpair_wait: Duration::from_secs(1),
+            }
+        }
+
+        struct Phone {
+            client: Client,
+            list: PhoneList,
+            _lookup: MemoryLookup,
+            _dir: Scratch,
+        }
+
+        async fn phone_for(d: &Desktop, tag: &str, timeouts: Timeouts, net: vibe_remote::client::NetReader) -> Phone {
+            let (ep, lookup) = phone_finding(key()).await;
+            lookup.add_endpoint_info(d.addr());
+            let dir = Scratch::new(tag);
+            Phone { client: Client::new(ep, net, timeouts), list: PhoneList::in_dir(&dir.0), _lookup: lookup, _dir: dir }
+        }
+
+        fn payload(d: &Desktop, secret: [u8; 32], relay: Option<&str>) -> PairPayload {
+            PairPayload { id: d.endpoint.id(), relay: relay.map(str::to_string), secret, name: Some("desk".into()) }
+        }
+
+        #[tokio::test]
+        async fn the_phone_shows_the_desktop_s_code_while_the_prompt_is_up_and_a_yes_is_stored() {
+            let d = Desktop::new("cl-yes").await;
+            let p = phone_for(&d, "cl-yes-phone", quick(), online()).await;
+            let challenged = phone_client::pair(&p.client, &p.list, &payload(&d, SECRET, None), "Pixel").await.expect("challenged");
+            let sent = d.window.sent();
+            let asked = requests(&sent);
+            assert_eq!(asked.len(), 1, "the prompt is up");
+            assert_eq!(challenged.code(), asked[0].code, "both screens show one code, before anybody answers");
+            assert_eq!(asked[0].phone_name, "Pixel");
+
+            assert_eq!(d.answer(true), Ok(Outcome::Paired));
+            let entry = challenged.finish(&p.list, 7).await.expect("paired");
+            assert_eq!(entry.id, d.endpoint.id().to_string());
+            assert_eq!(entry.desktop_name.as_deref(), Some("desk"));
+            assert_eq!(p.list.read().unwrap().desktops, vec![entry]);
+            assert_eq!(d.paired(), vec![p.client.endpoint().id().to_string()]);
+            d.endpoint.stop().await;
+        }
+
+        #[tokio::test]
+        async fn a_no_is_declined_and_stores_nothing() {
+            let d = Desktop::new("cl-no").await;
+            let p = phone_for(&d, "cl-no-phone", quick(), online()).await;
+            let challenged = phone_client::pair(&p.client, &p.list, &payload(&d, SECRET, None), "Pixel").await.expect("challenged");
+            assert_eq!(d.answer(false), Ok(Outcome::Declined));
+            assert_eq!(challenged.finish(&p.list, 7).await, Err(Reason::PairDeclined));
+            assert!(p.list.read().unwrap().desktops.is_empty());
+            d.endpoint.stop().await;
+        }
+
+        #[tokio::test]
+        async fn a_wrong_secret_is_refused_and_burns_the_code() {
+            let d = Desktop::new("cl-wrong").await;
+            let p = phone_for(&d, "cl-wrong-phone", quick(), online()).await;
+            let wrong = phone_client::pair(&p.client, &p.list, &payload(&d, [9; 32], None), "Pixel").await;
+            assert!(matches!(&wrong, Err(Reason::PairRefused { reason }) if reason.contains("not the pairing code")), "{wrong:?}");
+            let right = phone_client::pair(&p.client, &p.list, &payload(&d, SECRET, None), "Pixel").await;
+            assert!(matches!(&right, Err(Reason::PairRefused { reason }) if reason.contains("already been used")), "{right:?}");
+            assert!(requests(&d.window.sent()).is_empty());
+            d.endpoint.stop().await;
+        }
+
+        #[tokio::test]
+        async fn dropping_the_challenge_takes_the_prompt_down() {
+            let d = Desktop::new("cl-drop").await;
+            let p = phone_for(&d, "cl-drop-phone", quick(), online()).await;
+            let challenged = phone_client::pair(&p.client, &p.list, &payload(&d, SECRET, None), "Pixel").await.expect("challenged");
+            d.window.sent();
+            drop(challenged);
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+            let mut ended = Vec::new();
+            while ended.is_empty() && tokio::time::Instant::now() < deadline {
+                settle().await;
+                ended = d.window.sent();
+            }
+            assert_eq!(ended, vec![Sent::Ended(Outcome::Declined)]);
+            assert!(d.paired().is_empty());
+            d.endpoint.stop().await;
+        }
+
+        /// The phone pressed Back as the desktop's yes arrived: a Paired the
+        /// phone has already read is committed, whatever the cancel says, so
+        /// the two ends agree.
+        #[tokio::test]
+        async fn a_paired_result_already_read_is_committed_despite_a_cancel() {
+            let d = Desktop::new("cl-race").await;
+            let p = phone_for(&d, "cl-race-phone", quick(), online()).await;
+            let mut challenged = phone_client::pair(&p.client, &p.list, &payload(&d, SECRET, None), "Pixel").await.expect("challenged");
+            let (cancel, cancelled) = tokio::sync::oneshot::channel::<()>();
+            assert_eq!(d.answer(true), Ok(Outcome::Paired));
+            let result = challenged.read_result().await.expect("the desktop's answer");
+            cancel.send(()).unwrap();
+            assert!(cancelled.await.is_ok(), "the cancel is pending");
+            let entry = challenged.commit(result, &p.list, 7).expect("committed");
+            assert_eq!(p.list.read().unwrap().desktops, vec![entry]);
+            d.endpoint.stop().await;
+        }
+
+        #[tokio::test]
+        async fn an_unreadable_phone_list_dials_nothing_and_leaves_the_code_usable() {
+            let d = Desktop::new("cl-unreadable").await;
+            let p = phone_for(&d, "cl-unreadable-phone", quick(), online()).await;
+            std::fs::write(p._dir.0.join(PHONE_FILE), "{ not json").unwrap();
+            let refused = phone_client::pair(&p.client, &p.list, &payload(&d, SECRET, None), "Pixel").await;
+            assert!(matches!(&refused, Err(Reason::PhoneListUnreadable { why }) if why.contains("could not be read")), "{refused:?}");
+            settle().await;
+            assert!(requests(&d.window.sent()).is_empty(), "no prompt was raised");
+
+            std::fs::remove_file(p._dir.0.join(PHONE_FILE)).unwrap();
+            let challenged = phone_client::pair(&p.client, &p.list, &payload(&d, SECRET, None), "Pixel").await.expect("the code still works");
+            assert_eq!(d.answer(true), Ok(Outcome::Paired));
+            challenged.finish(&p.list, 7).await.expect("paired");
+            d.endpoint.stop().await;
+        }
+
+        #[tokio::test]
+        async fn a_yes_the_phone_cannot_save_says_so_and_leaves_the_file_alone() {
+            let d = Desktop::new("cl-not-saved").await;
+            let p = phone_for(&d, "cl-not-saved-phone", quick(), online()).await;
+            let challenged = phone_client::pair(&p.client, &p.list, &payload(&d, SECRET, None), "Pixel").await.expect("challenged");
+            std::fs::write(p._dir.0.join(PHONE_FILE), "{ not json").unwrap();
+            assert_eq!(d.answer(true), Ok(Outcome::Paired));
+            let got = challenged.finish(&p.list, 7).await;
+            assert!(
+                matches!(&got, Err(Reason::PairedNotSaved { desktop_name, why }) if desktop_name.as_deref() == Some("desk") && why.contains("could not be read")),
+                "{got:?}"
+            );
+            assert_eq!(d.paired(), vec![p.client.endpoint().id().to_string()], "the desktop holds the phone");
+            assert_eq!(std::fs::read_to_string(p._dir.0.join(PHONE_FILE)).unwrap(), "{ not json");
+            d.endpoint.stop().await;
+        }
+
+        #[tokio::test]
+        async fn a_stale_relay_hint_still_reaches_the_prompt_by_lookup() {
+            let d = Desktop::new("cl-stale").await;
+            let p = phone_for(&d, "cl-stale-phone", quick(), online()).await;
+            let stale = payload(&d, SECRET, Some("https://stale.relay.example./"));
+            let challenged = phone_client::pair(&p.client, &p.list, &stale, "Pixel").await.expect("found by id");
+            assert_eq!(requests(&d.window.sent()).len(), 1);
+            assert_eq!(d.answer(true), Ok(Outcome::Paired));
+            challenged.finish(&p.list, 7).await.expect("paired");
+            d.endpoint.stop().await;
+        }
+
+        /// Every phone deadline is 50ms and the desktop answers after 500ms:
+        /// pairing still finishes, because nothing on the phone times it.
+        #[tokio::test]
+        async fn pairing_has_no_phone_side_deadline() {
+            let d = Desktop::new("cl-no-deadline").await;
+            let tiny = Duration::from_millis(50);
+            let p = phone_for(&d, "cl-no-deadline-phone", Timeouts { hint: tiny, dial: tiny, unpair_dial: tiny, unpair_wait: tiny }, online()).await;
+            let challenged = phone_client::pair(&p.client, &p.list, &payload(&d, SECRET, None), "Pixel").await.expect("challenged");
+            let answer = async {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                d.answer(true)
+            };
+            let (answered, finished) = tokio::join!(answer, challenged.finish(&p.list, 7));
+            assert_eq!(answered, Ok(Outcome::Paired));
+            assert!(finished.is_ok(), "{finished:?}");
+            d.endpoint.stop().await;
+        }
+
+        #[tokio::test]
+        async fn a_probe_reaches_the_desktop_and_burns_nothing() {
+            let d = Desktop::new("cl-probe").await;
+            let p = phone_for(&d, "cl-probe-phone", quick(), online()).await;
+            let entry = vibe_remote::paired::DesktopEntry {
+                id: d.endpoint.id().to_string(),
+                relay: None,
+                desktop_name: None,
+                name: None,
+                paired_at: 0,
+                last_seen: None,
+            };
+            assert_eq!(phone_client::probe(&p.client, &entry).await, Probe::Reachable { relay: None });
+            settle().await;
+            assert!(d.window.sent().is_empty(), "no prompt, no ending");
+            let challenged = phone_client::pair(&p.client, &p.list, &payload(&d, SECRET, None), "Pixel").await.expect("the code is still usable");
+            drop(challenged);
+
+            d.endpoint.stop().await;
+            let quick_dial = Timeouts { dial: Duration::from_millis(500), ..quick() };
+            let gone = Client::new(p.client.endpoint().clone(), online(), quick_dial);
+            assert_eq!(phone_client::probe(&gone, &entry).await, Probe::Down { reason: Reason::Unreachable });
+            let offline = Client::new(
+                p.client.endpoint().clone(),
+                Arc::new(|| Net { online: false, relays: vec![], phone_relays: vec![] }),
+                quick_dial,
+            );
+            assert_eq!(phone_client::probe(&offline, &entry).await, Probe::Down { reason: Reason::Offline });
+        }
+
+        #[tokio::test]
+        async fn a_relay_less_endpoint_sees_no_relays_and_classifies_as_unreachable() {
+            let (ep, _lookup) = phone_finding(key()).await;
+            let seen = phone_client::relays_seen(&ep);
+            assert!(seen.is_empty());
+            let net = Net { online: true, relays: seen, phone_relays: vec![] };
+            assert_eq!(phone_client::classify(&net, &phone_client::Attempt::default()), Reason::Unreachable);
+        }
+    }
+
     #[test]
     fn the_pairing_message_bound_is_pinned() {
         // The phone reads with the same bound; a desktop that wrote more than

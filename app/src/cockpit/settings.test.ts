@@ -85,7 +85,9 @@ describe('light or dark (#347)', () => {
     expect(cockpit).toMatch(/document\.documentElement\.dataset\['theme'\] = drawn;/);
     expect(cockpit).toMatch(/if \(theme !== 'system'\) return;\s*query\.addEventListener\('change', apply\);/);
     expect(main.indexOf("dataset['theme'] = drawn")).toBeGreaterThan(-1);
-    expect(main.indexOf("dataset['theme'] = drawn")).toBeLessThan(main.indexOf('await loadMemory()'));
+    // Case 2 (#346 moved the memory load into `prepare.ts`, behind `boot`):
+    // the system's palette is still set before anything renders or loads.
+    expect(main.indexOf("dataset['theme'] = drawn")).toBeLessThan(main.indexOf('void boot(root)'));
   });
 
   test('it is chosen on the desktop and on the phone, each for itself', () => {

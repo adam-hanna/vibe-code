@@ -190,17 +190,34 @@ impl Live {
     /// many were closed. Called after the phone has left the paired list, so the
     /// hook refuses it when it dials again.
     pub fn close(&self, id: &EndpointId) -> usize {
-        let mut live = self.live.lock().unwrap_or_else(|p| p.into_inner());
-        let Some(handles) = live.remove(id) else { return 0 };
-        let mut closed = 0;
-        for conn in handles.iter().filter_map(|h| h.upgrade()) {
-            if conn.close_reason().is_none() {
-                conn.close(VarInt::from_u32(NOT_PAIRED), b"not paired");
-                closed += 1;
-            }
-        }
-        closed
+        self.close_with(id, NOT_PAIRED, b"not paired")
     }
+
+    /// Close every connection one phone has open, with `code`, and only that
+    /// phone's. Returns how many were closed.
+    pub fn close_with(&self, id: &EndpointId, code: u32, reason: &[u8]) -> usize {
+        let handles = self.live.lock().unwrap_or_else(|p| p.into_inner()).remove(id);
+        handles.map_or(0, |handles| close_handles(&handles, code, reason))
+    }
+
+    /// Close every connection of every phone, with `code`: remote access
+    /// turning off (#346), so each phone reads [`REMOTE_OFF`] rather than a bare
+    /// drop. Returns how many were closed.
+    pub fn close_all(&self, code: u32, reason: &[u8]) -> usize {
+        let all: Vec<_> = self.live.lock().unwrap_or_else(|p| p.into_inner()).drain().collect();
+        all.iter().map(|(_, handles)| close_handles(handles, code, reason)).sum()
+    }
+}
+
+fn close_handles(handles: &[WeakConnectionHandle], code: u32, reason: &[u8]) -> usize {
+    let mut closed = 0;
+    for conn in handles.iter().filter_map(|h| h.upgrade()) {
+        if conn.close_reason().is_none() {
+            conn.close(VarInt::from_u32(code), reason);
+            closed += 1;
+        }
+    }
+    closed
 }
 
 /// The revoke and the status speak the paired list's spelling of an id, a string.
@@ -516,6 +533,24 @@ pub(crate) mod tests {
             .expect("a phone endpoint binds")
     }
 
+    /// A loopback phone that finds desktops by id through an in-memory lookup
+    /// the test fills: what n0's DNS and mDNS do for a real phone, with no
+    /// network. The phone client's tests (#346) dial through it.
+    pub(crate) async fn phone_finding(key: SecretKey) -> (Endpoint, iroh::address_lookup::memory::MemoryLookup) {
+        let lookup = iroh::address_lookup::memory::MemoryLookup::new();
+        let ep = Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::Disabled)
+            .clear_address_lookup()
+            .address_lookup(lookup.clone())
+            .bind_addr(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
+            .expect("loopback")
+            .secret_key(key)
+            .bind()
+            .await
+            .expect("a phone endpoint binds");
+        (ep, lookup)
+    }
+
     /// The desktop's address, by its bound loopback socket: no lookup exists in
     /// these tests, which is the point of them.
     pub(crate) fn addr_of(desktop: &RemoteEndpoint) -> EndpointAddr {
@@ -647,6 +682,46 @@ pub(crate) mod tests {
         let again = closing_code(&p, addr_of(&d), REMOTE_ALPN).await;
         assert_eq!(again, Some(NOT_PAIRED as u64), "and refused on the next dial");
         assert_eq!(bridge.seen(), 1, "the second dial never reached the bridge");
+        d.stop().await;
+    }
+
+    /// `close_with` closes only the phone it names, with the code it was
+    /// given; `close` is still NOT_PAIRED; `close_all` takes every phone (#346).
+    #[tokio::test]
+    async fn close_with_is_scoped_to_its_id_and_close_is_still_not_paired() {
+        use vibe_remote::REMOTE_OFF;
+        let (a, b) = (key(), key());
+        let d = desktop(List::with(&[a.public(), b.public()]), Count::default(), Count::default()).await;
+        let pa = phone(a.clone()).await;
+        let pb = phone(b.clone()).await;
+        let ca = pa.connect(addr_of(&d), REMOTE_ALPN).await.expect("a connects");
+        let cb = pb.connect(addr_of(&d), REMOTE_ALPN).await.expect("b connects");
+        settle().await;
+
+        assert_eq!(d.connections().close_with(&a.public(), REMOTE_OFF, b"off"), 1);
+        let code = |ended: &ConnectionError| match ended {
+            ConnectionError::ApplicationClosed(c) => Some(c.error_code.into_inner()),
+            _ => None,
+        };
+        let ended = tokio::time::timeout(Duration::from_secs(10), ca.closed()).await.expect("a is closed");
+        assert_eq!(code(&ended), Some(REMOTE_OFF as u64));
+        settle().await;
+        assert!(cb.close_reason().is_none(), "b was not named, and stays open");
+
+        assert_eq!(d.connections().close(&b.public()), 1);
+        let ended = tokio::time::timeout(Duration::from_secs(10), cb.closed()).await.expect("b is closed");
+        assert_eq!(code(&ended), Some(NOT_PAIRED as u64), "close is a revoke, as it always was");
+
+        let pc = phone(a.clone()).await;
+        let cc = pc.connect(addr_of(&d), REMOTE_ALPN).await.expect("a connects again");
+        let pd = phone(b.clone()).await;
+        let cd = pd.connect(addr_of(&d), REMOTE_ALPN).await.expect("b connects again");
+        settle().await;
+        assert_eq!(d.connections().close_all(REMOTE_OFF, b"off"), 2);
+        for conn in [cc, cd] {
+            let ended = tokio::time::timeout(Duration::from_secs(10), conn.closed()).await.expect("closed");
+            assert_eq!(code(&ended), Some(REMOTE_OFF as u64));
+        }
         d.stop().await;
     }
 

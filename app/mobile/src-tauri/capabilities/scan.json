@@ -1,0 +1,13 @@
+{
+  "$schema": "../gen/schemas/mobile-schema.json",
+  "identifier": "scan",
+  "description": "The camera, for the pairing QR code (#346): the one plugin permission the phone's window is granted. The barcode scanner has no Rust API - `scan()` exists only as a webview call - so there is no Rust road to drive it, unlike biometrics and notifications, which the phone's Rust drives. Only `Pair.tsx` imports it. Phones only.",
+  "windows": ["main"],
+  "platforms": ["iOS", "android"],
+  "permissions": [
+    "barcode-scanner:allow-scan",
+    "barcode-scanner:allow-cancel",
+    "barcode-scanner:allow-check-permissions",
+    "barcode-scanner:allow-request-permissions"
+  ]
+}

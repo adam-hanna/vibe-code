@@ -5,6 +5,7 @@ import phone from './PhoneSettings.tsx?raw';
 import diagnostics from './PhoneDiagnostics.tsx?raw';
 import statusBar from '../shell/StatusBar.tsx?raw';
 import paneTabs from '../shell/PaneTabs.tsx?raw';
+import phoneApp from '../phone/PhoneApp.tsx?raw';
 
 /**
  * The phone's own settings (#347). Source-read, because the claims are about
@@ -63,5 +64,14 @@ describe("the phone's chrome fits its one row", () => {
   test("the run-status toggle is the Explorer button's size, behind a rule", () => {
     expect(cockpit).toMatch(/trail=\{[\s\S]*?<Tool label="Show run status" on=\{panels\.loop\} onClick=\{act\.toggleLoop\}>/);
     expect(paneTabs).toMatch(/border-l border-rule-inner[^"]*">\{trail\}/);
+  });
+});
+
+describe("the phone's way back to its desktops (#346)", () => {
+  test('is in the sidebar head beside This phone, never a button floating over the cockpit', () => {
+    expect(phoneApp).toMatch(/<Cockpit onDesktops=\{\(\) => void leave\(\)\} \/>/);
+    expect(phoneApp).not.toMatch(/fixed bottom-/);
+    const head = cockpit.slice(cockpit.indexOf('{SURFACE.compactChrome && panels.sidebar && ('), cockpit.indexOf('label="This phone"'));
+    expect(head).toMatch(/onDesktops !== undefined && \(\s*<Tool label="Desktops"/);
   });
 });
