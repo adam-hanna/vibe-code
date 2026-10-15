@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { resync } from './link';
+import { lockGate, resync } from './link';
 import type { Session } from './link';
 
 /**
@@ -79,5 +79,63 @@ describe('the reconnect resync is monotonic', () => {
     const two = r.link.connected(2);
     r.answer(0);
     expect(await two).toBe(false);
+  });
+});
+
+describe('a reconnect under the lock', () => {
+  const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+  test('starts locked, and asks nothing until it is unlocked', async () => {
+    const gate = lockGate();
+    const asked: string[] = [];
+    const answer = gate.when(() => {
+      asked.push('session');
+      return Promise.resolve(7);
+    });
+    await flush();
+    expect(gate.locked()).toBe(true);
+    expect(asked).toEqual([]);
+    gate.set(false);
+    await expect(answer).resolves.toBe(7);
+    expect(asked).toEqual(['session']);
+  });
+
+  test('a session and a release read while locked wait: only the unlock lets the replay through', async () => {
+    const gate = lockGate();
+    gate.set(false);
+    gate.set(true);
+    const log: string[] = [];
+    const link = resync({
+      session: () => gate.when(() => Promise.resolve({ generation: 2, idBase: 2 << 20 })),
+      startIds: (base) => log.push(`start ${String(base)}`),
+      release: (g) => gate.when(() => Promise.resolve(void log.push(`release ${String(g)}`))),
+    });
+    const connected = link.connected(2);
+    await flush();
+    expect(log).toEqual([]);
+    gate.set(false);
+    await expect(connected).resolves.toBe(true);
+    expect(log).toEqual([`start ${String(2 << 20)}`, 'release 2']);
+  });
+
+  test('a refusal because the lock came down mid-ask waits for the next unlock; any other failure is thrown', async () => {
+    const gate = lockGate();
+    gate.set(false);
+    let calls = 0;
+    const answer = gate.when(() => {
+      calls += 1;
+      if (calls === 1) {
+        gate.set(true);
+        return Promise.reject(new Error('The app is locked.'));
+      }
+      return Promise.resolve('ok');
+    });
+    await flush();
+    expect(calls).toBe(1);
+    gate.set(false);
+    await expect(answer).resolves.toBe('ok');
+    expect(calls).toBe(2);
+
+    await expect(gate.when(() => Promise.reject(new Error('no session')))).rejects.toThrow('no session');
   });
 });

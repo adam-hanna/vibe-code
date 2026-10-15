@@ -2376,7 +2376,11 @@ travel with it:
   `seen` and `set_relay` never bring back a desktop an unpair removed while a probe was out.
 - **The app opens locked** when its lock is on and the device has, or may have, a screen lock, and
   when `phone.json` cannot be read; the Rust guard refuses every desktop command until
-  `phone_unlock`. Only the plugin's explicit `passcodeNotSet` is *no lock*: biometrics being
+  `phone_unlock`, `phone_session` and `phone_release` included. A reconnect while locked is
+  kept by the link and held at its gate; the webview's `lockGate` makes both reads wait for the
+  unlock, and the cockpit stays mounted under the cover so the runs it folded are not lost.
+  Leaving the pairing screen, by Back or by the lock, ends the attempt: a scan that resolves
+  late pairs nothing. Only the plugin's explicit `passcodeNotSet` is *no lock*: biometrics being
   unavailable is not, because a PIN is still a lock. The mock build opens unlocked, since no CI
   emulator can answer a prompt. `confirmOnDevice` is the transport seam's fourth function: the
   cockpit asks before storing a key, turning YOLO on, deleting a run and pairing or unpairing, and

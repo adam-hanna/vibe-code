@@ -1,5 +1,5 @@
 import { useEffect, useReducer, useRef, useState } from 'react';
-import { Format, checkPermissions, requestPermissions, scan } from '@tauri-apps/plugin-barcode-scanner';
+import { Format, cancel as cancelScan, checkPermissions, requestPermissions, scan } from '@tauri-apps/plugin-barcode-scanner';
 import { Button } from '@/ui/button';
 import { confirmed } from '../confirm';
 import { listen, local } from '../transport';
@@ -17,6 +17,12 @@ import { sentence } from './sentences';
  * `phone://pair-code`, so the listener goes up before the call is made. They
  * carry this screen's attempt number, and `pairStep` drops a code from any
  * other attempt.
+ *
+ * **Leaving the screen ends the attempt.** Back, or the screen going away (the
+ * lock coming down), marks it over and cancels the camera; every step after an
+ * await checks that first, so a scan that resolves late never listens, never
+ * dispatches and never calls `phone_pair`. A pairing already dialling is
+ * cancelled through `phone_pair_cancel`, which is the Rust flow's own Back.
  *
  * This is the only module that imports the barcode scanner: it has no Rust API,
  * so it is the one plugin the window is granted permissions for
@@ -40,12 +46,30 @@ export function Pair({
   const [name, setName] = useState(settings.name);
   const [problem, setProblem] = useState<string | null>(null);
   const begun = useRef(false);
+  /** False once the person has left this attempt: Back, or the screen unmounting. */
+  const live = useRef(true);
+  /** True while `phone_pair` is waiting, so leaving can cancel it. */
+  const dialling = useRef(false);
+
+  useEffect(() => {
+    // Set on mount as well, because StrictMode mounts twice with the same refs.
+    live.current = true;
+    return () => {
+      live.current = false;
+      void cancelScan().catch(() => undefined);
+      if (dialling.current) void local('phone_pair_cancel').catch(() => undefined);
+    };
+  }, []);
 
   useEffect(() => {
     if (state.step !== 'confirming') return;
     void confirmed('Pair a desktop')
-      .then(() => dispatch({ type: 'confirmed' }))
-      .catch(onBack);
+      .then(() => {
+        if (live.current) dispatch({ type: 'confirmed' });
+      })
+      .catch(() => {
+        if (live.current) onBack();
+      });
   }, [state.step, onBack]);
 
   useEffect(() => {
@@ -57,16 +81,25 @@ export function Pair({
         if ((await checkPermissions()) !== 'granted' && (await requestPermissions()) !== 'granted') {
           throw new Error('Vibe needs the camera to scan the pairing code. Allow it in this phone’s settings.');
         }
+        if (!live.current) return;
         const scanned = await scan({ formats: [Format.QRCode] });
+        if (!live.current) return;
         const attempt = Date.now();
         // Listening before the call: the digits arrive before it returns.
         stop = await listen<{ attempt: number; code: string }>('phone://pair-code', (event) =>
           dispatch({ type: 'code', attempt: event.payload.attempt, code: event.payload.code }),
         );
+        if (!live.current) return;
         dispatch({ type: 'scanned', attempt });
+        dialling.current = true;
         const outcome = await local<Outcome>('phone_pair', { payload: scanned.content, phoneName: name, attempt });
+        dialling.current = false;
+        // Dispatched after Back too: `pairStep` keeps an `ok` the phone had
+        // already committed, and drops the rest.
         dispatch({ type: 'outcome', attempt, outcome });
       } catch (err) {
+        dialling.current = false;
+        if (!live.current) return;
         setProblem(err instanceof Error ? err.message : String(err));
         onBack();
       } finally {
@@ -80,6 +113,8 @@ export function Pair({
       void local('phone_pair_cancel');
       dispatch({ type: 'back' });
     } else {
+      live.current = false;
+      if (state.step === 'scanning') void cancelScan().catch(() => undefined);
       onBack();
     }
   };

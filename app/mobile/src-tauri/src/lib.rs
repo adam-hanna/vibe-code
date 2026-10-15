@@ -202,19 +202,21 @@ async fn phone_open(phone: State<'_, Phone>, id: Option<String>) -> Result<Value
     phone.desktop.open(id).await
 }
 
-/// Not behind the lock, with `phone_release`: a reconnect while the app sits
-/// locked in the background has to finish, or the cockpit under the cover is
-/// left counting from a dead range with its replay held. Neither carries
-/// anything of the desktop's - a generation, a request range - and a connection
-/// already open goes on forwarding under the cover just the same.
+/// Behind the lock, with `phone_release`: a connection's range and the release
+/// of its replay are what let the desktop's frames reach the window. A
+/// reconnect while the app sits locked is kept by the link and held at its
+/// gate; the webview waits for the unlock before it asks for either.
 #[tauri::command]
 fn phone_session(phone: State<'_, Phone>) -> Result<Value, String> {
+    phone.unlocked()?;
     phone.desktop.session()
 }
 
 #[tauri::command]
-fn phone_release(phone: State<'_, Phone>, generation: u64) {
+fn phone_release(phone: State<'_, Phone>, generation: u64) -> Result<(), String> {
+    phone.unlocked()?;
     phone.desktop.release(generation);
+    Ok(())
 }
 
 #[tauri::command]

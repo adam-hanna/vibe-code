@@ -9,7 +9,7 @@ import * as api from './api';
 import { bootStep } from './boot';
 import type { PhoneSettings } from './boot';
 import { Desktops } from './Desktops';
-import { resync } from './link';
+import { lockGate, resync } from './link';
 import { networkSignals } from './network';
 import { Pair } from './Pair';
 
@@ -41,13 +41,20 @@ export function PhoneApp() {
   const started = useRef(false);
   const entering = useRef(false);
   const notifyOn = useRef(true);
+  // The phone's Rust refuses the session and the release while locked, so a
+  // connection that comes back under the cover waits for the unlock here.
+  const gate = useRef(lockGate());
   const link = useRef(
     resync({
-      session: api.session,
+      session: () => gate.current.when(api.session),
       startIds: (base) => host.startRequestIds(base),
-      release: api.release,
+      release: (generation) => gate.current.when(() => api.release(generation)),
     }),
   );
+  const lock = useCallback((next: boolean) => {
+    gate.current.set(next);
+    setLocked(next);
+  }, []);
 
   /** The open desktop is connected: count from its range, then draw the cockpit. */
   const enter = useCallback(async () => {
@@ -99,7 +106,7 @@ export function PhoneApp() {
   useEffect(() => {
     const stopNet = networkSignals((online) => void api.networkChange(online).catch(() => undefined), window);
     const stops: Promise<() => void>[] = [
-      listen('phone://locked', () => setLocked(true)),
+      listen('phone://locked', () => lock(true)),
       // The open desktop came back after the first open failed: draw it.
       listen('phone://connected', () => {
         if (started.current) void enter();
@@ -109,20 +116,23 @@ export function PhoneApp() {
       const read = await local<PhoneSettings>('phone_settings');
       setSettings(read);
       notifyOn.current = read.notify;
-      if (bootStep(read) === 'locked') setLocked(true);
-      else await start();
+      if (bootStep(read) === 'locked') lock(true);
+      else {
+        lock(false);
+        await start();
+      }
     })();
     return () => {
       stopNet();
       for (const stop of stops) void stop.then((f) => f());
     };
-  }, [enter, start]);
+  }, [enter, start, lock]);
 
   const unlock = async () => {
     try {
       const still = await api.unlock();
       if (still) return;
-      setLocked(false);
+      lock(false);
       await start();
     } catch (err) {
       setProblem(err instanceof Error ? err.message : String(err));
@@ -139,29 +149,33 @@ export function PhoneApp() {
     notifyOn.current = next.notify;
   };
 
-  if (locked) {
-    return (
-      <div className={COVER}>
-        <h1 className="m-0 text-emphasis font-bold text-primary">Vibe is locked</h1>
-        <p className={NOTE}>Unlock with Face ID, Touch ID, or this phone's fingerprint or PIN.</p>
-        <Button variant="primary" onClick={() => void unlock()}>
-          Unlock
-        </Button>
-        {problem !== null && <p className={NOTE}>{problem}</p>}
-      </div>
-    );
-  }
+  const cover = (
+    <div className={COVER}>
+      <h1 className="m-0 text-emphasis font-bold text-primary">Vibe is locked</h1>
+      <p className={NOTE}>Unlock with Face ID, Touch ID, or this phone's fingerprint or PIN.</p>
+      <Button variant="primary" onClick={() => void unlock()}>
+        Unlock
+      </Button>
+      {problem !== null && <p className={NOTE}>{problem}</p>}
+    </div>
+  );
 
   if (screen === 'cockpit') {
+    // The cockpit stays mounted under the cover: unmounting it would forget
+    // the live runs it has folded, and the desktop replays them only to a new
+    // connection. A reconnect while locked waits for the unlock (`lockGate`).
     return (
       <>
         <Cockpit />
         <Button className="fixed bottom-3 left-3 z-40" size="sm" onClick={() => void leave()}>
           Desktops
         </Button>
+        {locked && cover}
       </>
     );
   }
+
+  if (locked) return cover;
 
   if (settings === null || screen === 'loading') {
     return <div className={COVER}>{problem !== null && <p className={NOTE}>{problem}</p>}</div>;

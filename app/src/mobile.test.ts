@@ -165,6 +165,23 @@ describe("the phone's own boundary", () => {
     expect(handler.split(',').map((c) => c.trim()).filter(Boolean).sort()).toEqual(COMMANDS);
   });
 
+  test('every command that reads or reaches a desktop takes the lock guard, and only those', () => {
+    const commands = [...phoneLib.matchAll(/#\[tauri::command\]\s*(?:async )?fn (\w+)\([\s\S]*?\{([\s\S]*?)\n\}/g)];
+    const guarded = commands.filter(([, , body]) => /^\s*phone\.unlocked\(\)\?;/.test(body ?? '')).map((m) => m[1]);
+    expect(guarded.sort()).toEqual([
+      'phone_desktops',
+      'phone_open',
+      'phone_pair',
+      'phone_probe',
+      'phone_release',
+      'phone_rename',
+      'phone_session',
+      'phone_unpair',
+    ]);
+    // `remote_call` is guarded inside `Phone::remote_call`.
+    expect(phoneLib).toMatch(/async fn remote_call\(&self[\s\S]*?\{\s*self\.unlocked\(\)\?;/);
+  });
+
   test('the window is granted no plugin permission but the camera, on phones only', () => {
     expect(JSON.parse(phoneCapability).permissions).toEqual(['core:default']);
     const scan = JSON.parse(scanCapability) as { windows: string[]; platforms: string[]; permissions: string[] };
@@ -215,7 +232,10 @@ describe('the phone app', () => {
     expect(gate).toBeGreaterThan(settings);
     expect(open).toBeGreaterThan(-1);
     // `phone_open` is only reached through `start`, which only an unlocked boot runs.
-    expect(phoneApp).toMatch(/if \(bootStep\(read\) === 'locked'\) setLocked\(true\);\s*else await start\(\);/);
+    expect(phoneApp).toMatch(/if \(bootStep\(read\) === 'locked'\) lock\(true\);\s*else \{\s*lock\(false\);\s*await start\(\);/);
+    // The session and the release wait for the unlock: the Rust refuses both while locked.
+    expect(phoneApp).toContain('session: () => gate.current.when(api.session)');
+    expect(phoneApp).toContain('release: (generation) => gate.current.when(() => api.release(generation))');
   });
 
   test('sends the network signals', () => {
@@ -229,6 +249,20 @@ describe('the phone app', () => {
     expect(asks).toBeGreaterThan(listens);
     expect(pairScreen).toContain('Check that the desktop shows the same number, then press Allow there.');
     expect(pairScreen).toContain('lockWarning(settings.deviceLock)');
+  });
+
+  test('leaving the pairing screen ends the attempt: nothing after a late scan listens, dispatches or pairs', () => {
+    // A scan that resolves after Back (or after the lock unmounted the screen)
+    // must not go on to pair a desktop nobody is looking at.
+    const scans = pairScreen.indexOf('await scan(');
+    const listens = pairScreen.indexOf("listen<{ attempt: number; code: string }>('phone://pair-code'");
+    const asks = pairScreen.indexOf("local<Outcome>('phone_pair'");
+    const between = (from: number, to: number) => pairScreen.slice(from, to);
+    expect(between(scans, listens)).toContain('if (!live.current) return;');
+    expect(between(listens, asks)).toContain('if (!live.current) return;');
+    // Back from the scan cancels the camera, and unmounting cancels both.
+    expect(pairScreen).toMatch(/live\.current = false;\s*if \(state\.step === 'scanning'\) void cancelScan\(\)/);
+    expect(pairScreen).toMatch(/return \(\) => \{\s*live\.current = false;\s*void cancelScan\(\)[^;]*;\s*if \(dialling\.current\) void local\('phone_pair_cancel'\)/);
   });
 });
 
