@@ -2122,7 +2122,7 @@ export function Cockpit({
 
   return (
     <TooltipProvider>
-    <div className="flex h-screen flex-col bg-panel text-primary">
+    <div className="flex h-full flex-col bg-panel text-primary">
 
       {confirmStop && (
         <StopConfirm

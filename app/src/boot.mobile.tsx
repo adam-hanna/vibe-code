@@ -9,6 +9,8 @@ import { PhoneApp } from './phone/PhoneApp';
  */
 
 export async function boot(into: HTMLElement): Promise<void> {
+  // Keeps the page inside the status and navigation bars (`theme.css`).
+  document.documentElement.dataset['surface'] = 'phone';
   createRoot(into).render(
     <StrictMode>
       <Boundary>

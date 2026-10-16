@@ -62,6 +62,11 @@ export function PhoneApp() {
     entering.current = true;
     try {
       await link.current.prepare();
+      // Released now, not when the cockpit mounts: the memory read below is
+      // answered by an event, and a held answer is one that never arrives
+      // (`phone/tap.ts`). What comes meanwhile is caught for the cockpit.
+      await host.catchEarly();
+      await link.current.listening();
       host.setLinkHooks({ connected: (g) => link.current.connected(g), listening: () => link.current.listening() });
       setNoticeSink(
         phoneSink({

@@ -3,6 +3,8 @@ import { confirmed } from './confirm';
 import type { PilotAccess } from './pilot/access';
 import type { Outcome, UpdateInfo, UpdateProgress } from './shell/update';
 import { requestIds } from './changed';
+import { tap } from './phone/tap';
+import type { Tap } from './phone/tap';
 import type { RequestIds } from './changed';
 
 /**
@@ -707,6 +709,23 @@ export interface LinkHooks {
   listening(): Promise<void>;
 }
 
+const HOST_EVENTS = ['host://frame', 'host://log', 'host://exit'] as const;
+type HostEvent = (typeof HOST_EVENTS)[number];
+let early: Tap<HostEvent> | null = null;
+
+/**
+ * A phone's events, caught from now until the cockpit connects (#346), so the
+ * connection can be released before the window's memory is read: that read is
+ * answered by an event the release lets through. See `phone/tap.ts`. Called
+ * once, before the release; the desktop never calls it.
+ */
+export async function catchEarly(): Promise<void> {
+  if (early !== null) return;
+  const caught = tap<HostEvent>();
+  early = caught;
+  await Promise.all(HOST_EVENTS.map((name) => listen<unknown>(name, (event) => caught.push(name, event.payload))));
+}
+
 let linkHooks: LinkHooks | null = null;
 export function setLinkHooks(hooks: LinkHooks | null): void {
   linkHooks = hooks;
@@ -789,26 +808,34 @@ export function inShell(): boolean {
  * `status()` is where it is picked up instead.
  */
 export async function connect(handlers: Handlers): Promise<() => void> {
+  const take = (kind: HostEvent, got: unknown): void => {
+    switch (kind) {
+      case 'host://frame':
+        // Shown rather than dropped: a relay that stopped enveloping is exactly
+        // the disagreement somebody needs to be able to see.
+        if (!isEnvelope(got)) return handlers.unknown('?', got);
+        if (isFrame(got['frame'])) handlers.frame(got.host, got['frame']);
+        else handlers.unknown(got.host, got['frame']);
+        return;
+      case 'host://log':
+        if (isEnvelope(got)) handlers.log(got.host, String(got['line']));
+        else handlers.unknown('?', got);
+        return;
+      case 'host://exit': {
+        if (!isEnvelope(got)) return handlers.unknown('?', got);
+        const code: unknown = got['code'];
+        handlers.exit(got.host, typeof code === 'number' ? code : null);
+        return;
+      }
+    }
+  };
+  // A phone that caught its desktop's events while the memory was read hands
+  // them over here, in order, through its one listener (`phone/tap.ts`).
+  const caught = early;
   const stops = await Promise.all([
-    listen<unknown>('host://frame', (event) => {
-      const got: unknown = event.payload;
-      // Shown rather than dropped: a relay that stopped enveloping is exactly
-      // the disagreement somebody needs to be able to see.
-      if (!isEnvelope(got)) return handlers.unknown('?', got);
-      if (isFrame(got['frame'])) handlers.frame(got.host, got['frame']);
-      else handlers.unknown(got.host, got['frame']);
-    }),
-    listen<unknown>('host://log', (event) => {
-      const got: unknown = event.payload;
-      if (isEnvelope(got)) handlers.log(got.host, String(got['line']));
-      else handlers.unknown('?', got);
-    }),
-    listen<unknown>('host://exit', (event) => {
-      const got: unknown = event.payload;
-      if (!isEnvelope(got)) return handlers.unknown('?', got);
-      const code: unknown = got['code'];
-      handlers.exit(got.host, typeof code === 'number' ? code : null);
-    }),
+    ...(caught !== null
+      ? [Promise.resolve(caught.attach(take))]
+      : HOST_EVENTS.map((name) => listen<unknown>(name, (event) => take(name, event.payload)))),
     // A phone's reconnect (#346). Nothing is sent from here until the new
     // connection's request range is known: an id from the old range would be
     // read by the desktop as somebody else's.
