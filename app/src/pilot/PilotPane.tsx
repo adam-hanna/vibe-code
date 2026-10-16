@@ -22,13 +22,14 @@ import { useFollow } from './follow';
 import { autoRun, NO_ACCESS } from './access';
 import { archiveContent, declare, settleCall } from './tools';
 import { chatKey, readChat, replyKey, sameExchange, worthSaving, writable } from './saved';
-import { getChat, putChat, useChats } from './chatstore';
+import { getChat, putChat, useChatRevision, useChats } from './chatstore';
 import {
   costOf,
   describeDay,
   formatUsd,
   limitVerdict,
   readLedger,
+  LEDGER_KEY,
   record,
   today,
   writeLedger,
@@ -69,7 +70,11 @@ import type { Effect, Settlement } from './tools';
 import type { Call, Conversation, Reply } from './transcript';
 import type { Launched } from '../cockpit/argv';
 import { line, outcome } from '../cockpit/commands';
-import { memory } from '../memory';
+import { memory, useFollowedMemory } from '../memory';
+import { PICK_KEY, readPick, writePick } from './pick';
+import { asReply, foldElsewhere, holdsComposer, letGo, LINGER_MS, startElsewhere } from './elsewhere';
+import type { Elsewhere } from './elsewhere';
+import type { Pick } from './pick';
 import { Markdown } from './Markdown';
 import { splitBrief } from '../cockpit/argv';
 import { CopyText } from './CopyText';
@@ -192,6 +197,15 @@ const ALARM = 'bg-alarm px-4 py-1.5 text-body-sm text-emphasis';
  * spend ceiling is there: it is this window's preference, not a project fact,
  * and `vibe.config.json` is a file meant to be committed.
  */
+/** A key of the window's memory, or null when storage cannot be read. */
+function readMemory(key: string): string | null {
+  try {
+    return memory.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
 function readWatch(): boolean {
   try {
     return memory.getItem(WATCH_KEY) === 'on';
@@ -913,6 +927,11 @@ export function PilotPane({
    */
   const chat = useRef<string | null>(null);
   /**
+   * A turn another client is running in this conversation (#371), drawn as it
+   * streams and never kept: the asker folds and saves it. See `elsewhere.ts`.
+   */
+  const [elsewhere, setElsewhere] = useState<Elsewhere | null>(null);
+  /**
    * What is on screen, for the loader to read without depending on it.
    *
    * The loader must fire on the **key** alone — a conversation in its deps would
@@ -928,10 +947,18 @@ export function PilotPane({
   // first restore would find nothing and the first save would write that
   // nothing over a conversation that was there.
   const chats = useChats();
+  // Another client's save to the conversation on screen (#371): the same key,
+  // read again. Never over a turn this window is streaming - the composer of a
+  // window following a turn elsewhere is closed, so two turns cannot be
+  // composed on one conversation, and this one saves when it ends.
+  const revision = useChatRevision(chatKey(dir, runId));
+  const seenRevision = useRef(revision);
   useEffect(() => {
     if (!chats.ready) return;
     const key = chatKey(dir, runId);
-    if (chat.current === key) return;
+    const moved = seenRevision.current !== revision;
+    seenRevision.current = revision;
+    if (chat.current === key && (!moved || held.current.live !== null)) return;
     chat.current = key;
     const stored = getChat(key);
 
@@ -963,7 +990,55 @@ export function PilotPane({
     // reopened. They still settle, and a proposal among them is a card.
     for (const reply of back.replies) for (const call of reply.calls) restored.current.add(call.id);
     dispatch({ type: 'restore', conversation: back });
-  }, [dir, runId, chats.ready]);
+  }, [dir, runId, chats.ready, revision]);
+
+  // A turn another client started here before this pane was looking (#371) -
+  // a phone that has just opened the conversation, or the window pointed at it
+  // mid-reply - is asked of the host, which holds the text so far. Pointing
+  // the pane elsewhere lets go of whatever it was drawing.
+  useEffect(() => {
+    setElsewhere(null);
+    if (!host.inShell()) return;
+    const key = chatKey(dir, runId);
+    let current = true;
+    host
+      .pilotTurnsNow()
+      .then((turns) => {
+        if (!current) return;
+        for (const t of turns) {
+          const found = startElsewhere(t, key, host.allocatedHere);
+          if (found !== null) {
+            setElsewhere(found);
+            return;
+          }
+        }
+      })
+      // Nothing to draw is what a host that cannot answer leaves: the
+      // conversation still arrives when the asker saves it.
+      .catch(() => undefined);
+    return () => {
+      current = false;
+    };
+  }, [dir, runId]);
+
+  // An ended turn stays until the asker's save lands, which is `revision`
+  // moving, or until it has waited `LINGER_MS` for one that may never come.
+  const savedAtEnd = useRef(revision);
+  useEffect(() => {
+    if (elsewhere === null || elsewhere.endedAt === null) {
+      savedAtEnd.current = revision;
+      return;
+    }
+    if (letGo(elsewhere, savedAtEnd.current !== revision, Date.now())) {
+      setElsewhere(null);
+      return;
+    }
+    const wait = setTimeout(
+      () => setElsewhere((e) => (e !== null && letGo(e, false, Date.now()) ? null : e)),
+      LINGER_MS,
+    );
+    return () => clearTimeout(wait);
+  }, [elsewhere, revision]);
 
   // Save on every settled change. `live` is dropped by `writable`, so a turn in
   // flight is not stored half-streamed and a window killed mid-turn leaves a
@@ -986,7 +1061,28 @@ export function PilotPane({
    * vendor and Settings picks the road — its CLI on the subscription, or the
    * API — so the backend is derived and never chosen here.
    */
-  const [vendor, setVendor] = useState<keys.Provider>('anthropic');
+  // The vendor, the model and the effort are one pick every client follows
+  // (#371, `pick.ts`): a model changed on the phone is the model the desktop
+  // asks with, and the other way round.
+  const [pick, setPick] = useFollowedMemory(PICK_KEY, () => readPick(readMemory(PICK_KEY)));
+  const pickRef = useRef(pick);
+  pickRef.current = pick;
+  const choose = useCallback(
+    (next: Partial<Pick>) => {
+      const chosen = { ...pickRef.current, ...next };
+      pickRef.current = chosen;
+      setPick(chosen);
+      try {
+        memory.setItem(PICK_KEY, writePick(chosen));
+      } catch {
+        // Kept for this window only; the pick still applies here.
+      }
+    },
+    [setPick],
+  );
+  const vendor: keys.Provider = pick.vendor;
+  // A vendor change starts that vendor on its own default model.
+  const setVendor = (v: keys.Provider) => choose({ vendor: v, model: null });
   const provider: Backend = backendFor(vendor, access ?? NO_ACCESS);
   // The model is the one picked, or else the first the road's own listing
   // offers (#223) - which for a CLI is `default`, so the pilot follows the CLI
@@ -995,11 +1091,13 @@ export function PilotPane({
   // use.
   const listings = useModels();
   const listing = listings[sourceOf(provider)];
-  const [picked, setPicked] = useState<string | null>(null);
+  const picked = pick.model;
   const model = picked ?? firstOf(listing) ?? (needsKey(provider) ? '' : CLI_DEFAULT);
-  const setModel = setPicked;
-  // Beside the model, and like it kept for the window session only (#296).
-  const [effort, setEffort] = useState<string>(DEFAULT_EFFORT);
+  const setModel = (m: string | null) => choose({ model: m });
+  const setPicked = setModel;
+  // Beside the model (#296), and shared with it.
+  const effort = pick.effort;
+  const setEffort = (e: string) => choose({ effort: e });
   useEffect(() => {
     if (needsKey(provider)) loadApiModels(provider);
     else loadCliModels();
@@ -1008,12 +1106,17 @@ export function PilotPane({
   // with the chat (#223) - see `Session` for the two defects a ref here had. It
   // names its backend, so a session is never resumed on a wire that has never
   // heard of it (#193), and a turn taken on another backend retires it.
-  const heldBy = useRef<Backend>(provider);
+  // A road changed under the same vendor - Settings moved it from the
+  // subscription to a key - so the model picked for the old road may not exist
+  // on the new one. Every client sees that setting move and resets alike, so
+  // this is local and saves nothing. A vendor change already reset the pick.
+  const heldBy = useRef({ vendor, provider });
   useEffect(() => {
-    if (heldBy.current === provider) return;
-    heldBy.current = provider;
-    setModel(null);
-  }, [provider]);
+    const was = heldBy.current;
+    heldBy.current = { vendor, provider };
+    if (was.provider === provider || was.vendor !== vendor) return;
+    setPick((p) => (p.model === null ? p : { ...p, model: null }));
+  }, [vendor, provider, setPick]);
   /**
    * The host-backed turn whose frames we are listening for, or -1.
    *
@@ -1066,7 +1169,9 @@ export function PilotPane({
   }, [turning, onBusy]);
   // The pilot's own books (#145). Read from the window's memory at mount, because a
   // per-day ceiling that reset when the app restarted would not be a ceiling.
-  const [ledger, setLedger] = useState<Ledger>(readLedger);
+  // Another client's turn is in the same books (#371): followed, so today's
+  // figure and the ceiling's check agree on every screen.
+  const [ledger, setLedger] = useFollowedMemory<Ledger>(LEDGER_KEY, readLedger);
   /** Turns already in the books, so a re-render cannot bill one twice. */
   const counted = useRef<Set<string>>(new Set());
   /** The chain ran out and the pilot is holding for a person. */
@@ -1242,6 +1347,19 @@ export function PilotPane({
     void (async () => {
       stop = await host.onPilotFrame((frame) => {
         const turn = frame.id;
+        // Another client's turn here (#371). Told apart by who allocated the
+        // id, never by `hostTurn`, which is set only once this pane's own
+        // request has resolved and so would call its own early frames foreign.
+        if (frame.type === 'pilot_started') {
+          const started = startElsewhere(frame, chat.current, host.allocatedHere);
+          if (started !== null) setElsewhere(started);
+          return;
+        }
+        if (turn !== null && !host.allocatedHere(turn)) {
+          const at = Date.now();
+          setElsewhere((e) => (e === null ? e : foldElsewhere(e, frame, at)));
+          return;
+        }
         if (turn === null || turn !== hostTurn.current) return;
         if (frame.type === 'pilot_delta') {
           // Kept for the parse, not for the display (#223). The pane shows the
@@ -1391,6 +1509,8 @@ ${frame.text}`, turn, origin.current))) {
             dir,
             sessionId: id ?? crypto.randomUUID(),
             resume: id !== null,
+            // Every client is told (#371), so one beside this draws the turn.
+            ...(chat.current === null ? {} : { chat: chat.current, asked: said ?? '' }),
           })
           .then((turn) => {
             hostTurn.current = turn;
@@ -1507,8 +1627,9 @@ ${frame.text}`, turn, origin.current))) {
    * where it runs the thing it is allowed to read. Refused rather than defaulted
    * to this window's own directory (#211).
    */
-  const blocked: string | null =
-    needsKey(provider) && (statuses === null || !keys.usable(statuses).includes(provider))
+  const blocked: string | null = holdsComposer(elsewhere)
+    ? 'a reply is being written here from another device — wait for it, or stop it'
+    : needsKey(provider) && (statuses === null || !keys.usable(statuses).includes(provider))
       ? `no ${keys.PROVIDER_NAME[provider]} key — enter one in Settings, or switch ${keys.PROVIDER_NAME[provider]} to your subscription there`
       : model === ''
         ? whyNot(listing) === null
@@ -1535,6 +1656,13 @@ ${frame.text}`, turn, origin.current))) {
               : null;
 
   const ready = blocked === null;
+  // The turn the one working indicator is about (#371).
+  const working: Reply | null =
+    conversation.live !== null && conversation.live.outcome === null
+      ? conversation.live
+      : elsewhere !== null && elsewhere.endedAt === null
+        ? asReply(elsewhere, provider)
+        : null;
 
   useEffect(() => {
     onPending?.(proposals.length);
@@ -1569,7 +1697,7 @@ ${frame.text}`, turn, origin.current))) {
    *   still holds until a person presses. This is a second opinion arriving on
    *   time, not an autopilot.
    */
-  const [watching, setWatching] = useState(readWatch);
+  const [watching, setWatching] = useFollowedMemory(WATCH_KEY, readWatch);
   /** The gate this pane has already woken for, so an open gate wakes it once. */
   const seenGate = useRef<number | null>(null);
   useEffect(() => {
@@ -2031,9 +2159,13 @@ ${frame.text}`, turn, origin.current))) {
             onDecide={onDecide}
           />
         )}
-        {conversation.live !== null && conversation.live.outcome === null && (
-          <TurnWorking reply={conversation.live} now={now} />
+        {/* Another client's turn here (#371), drawn as the asker draws it. */}
+        {elsewhere !== null && (
+          <ReplyCard reply={asReply(elsewhere, provider)} conversation={conversation} busy onDecide={onDecide} />
         )}
+        {/* One indicator, after every card: this pane's turn or the other
+            client's, never both, since the composer is shut while either runs. */}
+        {working !== null && <TurnWorking reply={working} now={now} />}
       </div>
 
       {/* A conversation that is not being saved says so (#223). Swallowing this
@@ -2103,7 +2235,7 @@ ${frame.text}`, turn, origin.current))) {
             submit();
           }}
         />
-        {live === null ? (
+        {live === null && !holdsComposer(elsewhere) ? (
           <Button
             variant="primary"
             size="icon"
@@ -2125,7 +2257,11 @@ ${frame.text}`, turn, origin.current))) {
               // A subscription turn is a `claude` child of the HOST; an API turn
               // is a stream in Rust. Asking Rust to cancel the first was refused
               // and swallowed, so the button did nothing on the default backend.
-              if (live === hostTurn.current) void host.stopPilot(live).catch(() => {});
+              // A turn another client started here is stopped on the host by its
+              // own id (#371) - the same stop that client's button sends.
+              if (live === null) {
+                if (elsewhere !== null) void host.stopPilot(elsewhere.id).catch(() => {});
+              } else if (live === hostTurn.current) void host.stopPilot(live).catch(() => {});
               else void pilot.cancel(live).catch(() => {});
             }}
           >

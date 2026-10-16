@@ -133,12 +133,13 @@ import { useStats } from './useStats';
 import { rounds } from './rounds';
 import { implementArgv, readLaunchArgv, resumeArgv } from './argv';
 import { LIGHT_QUERY, SCALE_KEY, SCALE_VAR, THEME_KEY, readScale, readTheme, resolveTheme, writable, type Theme } from './appearance';
-import { readLimits, writeLimits } from '../pilot/ledger';
+import { LIMITS_KEY, readLimits, writeLimits } from '../pilot/ledger';
 import type { PilotLimits } from '../pilot/ledger';
 import type { Raise } from './argv';
 import type { Caps } from './Footer';
 import type { Effect } from '../pilot/tools';
-import { memory } from '../memory';
+import { showsConfig } from '../changed';
+import { memory, useFollowedMemory, useMemoryRevision } from '../memory';
 import { connectedNames } from '../remote/pairing';
 import { useRemoteStatus } from '../remote/useRemoteStatus';
 import type { Run } from './model';
@@ -384,8 +385,9 @@ export function Cockpit({
    * memory, never a project's.
    */
   const [update, setUpdate] = useState<UpdateInfo | null>(null);
-  const [skipped, setSkipped] = useState<string | null>(() => memory.getItem(SKIP_KEY));
-  const [checkUpdates, setCheckUpdates] = useState(() => checkEnabled(memory.getItem(CHECK_KEY)));
+  // Both followed (#371): a version skipped on one client is skipped on all.
+  const [skipped, setSkipped] = useFollowedMemory<string | null>(SKIP_KEY, () => memory.getItem(SKIP_KEY));
+  const [checkUpdates, setCheckUpdates] = useFollowedMemory(CHECK_KEY, () => checkEnabled(memory.getItem(CHECK_KEY)));
   /**
    * A phone that was allowed and could not be saved (#341). The prompt that
    * learns it is mounted here and closes on the same answer, so the sentence is
@@ -489,7 +491,8 @@ export function Cockpit({
    * The window's memory (`memory.ts`) and not `vibe.config.json`, unchanged: this is the *pilot's*
    * ceiling, it is this machine's, and the run's two ceilings are the project's.
    */
-  const [limits, setLimits] = useState<PilotLimits>(readLimits);
+  // Followed (#371): a ceiling set on the phone is the ceiling here.
+  const [limits, setLimits] = useFollowedMemory<PilotLimits>(LIMITS_KEY, readLimits);
   const relimit = useCallback((next: PilotLimits) => {
     setLimits(next);
     writeLimits(next);
@@ -691,6 +694,31 @@ export function Cockpit({
    * including the pilot's safe list, which an open conversation acts on.
    */
   const [configEpoch, setConfigEpoch] = useState(0);
+  // And by another client's save (#371): a gate mode, a cap or the pilot's
+  // access changed on the phone is what this window acts on from then on. The
+  // file for all projects counts as well as this project's own.
+  const repoNow = useRef(repoDir);
+  repoNow.current = repoDir;
+  useEffect(() => {
+    if (!host.inShell()) return;
+    let off: (() => void) | null = null;
+    let live = true;
+    void host
+      .onChanged((c) => {
+        if (c.what !== 'config') return;
+        if (showsConfig(c.key, 'global', repoNow.current) || showsConfig(c.key, 'project', repoNow.current)) {
+          setConfigEpoch((n) => n + 1);
+        }
+      })
+      .then((stop) => {
+        if (live) off = stop;
+        else stop();
+      });
+    return () => {
+      live = false;
+      off?.();
+    };
+  }, []);
   useEffect(() => {
     if (repoDir.trim() === '' || !host.inShell() || !wire.connected) return;
     let cancelled = false;
@@ -908,16 +936,33 @@ export function Cockpit({
    * second press in the same tick sees the claim and is refused.
    */
   const draftsRef = useRef<readonly Draft[]>(drafts);
-  const updateDrafts = useCallback((change: (list: readonly Draft[]) => readonly Draft[]) => {
+
+  const updateDrafts = useCallback((change: (list: readonly Draft[]) => readonly Draft[], save = true) => {
     const next = change(draftsRef.current);
     draftsRef.current = next;
     setDrafts(next);
+    if (!save) return;
     try {
       memory.setItem(DRAFTS_KEY, JSON.stringify(next));
     } catch {
       // The drafts still work for this session; they will not be back next time.
     }
   }, []);
+  // Another client's drafts (#371): a run asked for on the phone is a row here
+  // at once. Through the one writer, and never saved back.
+  const draftsElsewhere = useMemoryRevision(DRAFTS_KEY);
+  const draftsSeen = useRef(draftsElsewhere);
+  useEffect(() => {
+    if (draftsSeen.current === draftsElsewhere) return;
+    draftsSeen.current = draftsElsewhere;
+    let next: readonly Draft[];
+    try {
+      next = readDrafts(memory.getItem(DRAFTS_KEY));
+    } catch {
+      return;
+    }
+    updateDrafts(() => next, false);
+  }, [draftsElsewhere, updateDrafts]);
   /**
    * Point the project on screen at another directory, from its settings (#223).
    * `moveProject` decides; this writes the four lists it returns, moves any
@@ -2194,6 +2239,7 @@ export function Cockpit({
       {composing !== null && (
         <NewWorkstream
           dir={composing.dir}
+          configEpoch={configEpoch}
           // A project's `＋` has already settled this, so the composer states it
           // rather than offering a field. Only the unlocked one can move the
           // window's own repository.

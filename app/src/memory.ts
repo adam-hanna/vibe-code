@@ -1,4 +1,5 @@
-import { useSyncExternalStore } from 'react';
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import type { Dispatch, SetStateAction } from 'react';
 import * as host from './host';
 import { reread } from './changed';
 
@@ -206,11 +207,72 @@ function flushOne(key: string): void {
  */
 async function refresh(keys: readonly string[]): Promise<void> {
   const entries = await host.memory();
+  const moved: string[] = [];
   for (const key of keys) {
+    const was = cache.get(key) ?? null;
     const next = reread(key, entries, pending.has(key) || inflight.has(key));
     if (next.kind === 'set') cache.set(key, next.value);
     else if (next.kind === 'remove') cache.delete(key);
+    if ((cache.get(key) ?? null) !== was) moved.push(key);
   }
+  announce(moved);
+}
+
+/**
+ * Which keys another client has moved, and how often (#371). The cache alone
+ * was half of #354: every reader takes its value once, at mount, so a refreshed
+ * key changed nothing on screen - a project added on the phone did not appear
+ * on the desktop until something unrelated re-read the list. A reader that
+ * follows a key takes `useMemoryRevision(key)` and reads again when it moves.
+ *
+ * Only a change of value counts, so this window's own write coming back as an
+ * announcement moves nothing, and a reader re-reading a key never feeds a loop.
+ */
+const revisions = new Map<string, number>();
+const revisionListeners = new Set<() => void>();
+
+function announce(keys: readonly string[]): void {
+  if (keys.length === 0) return;
+  for (const key of keys) revisions.set(key, (revisions.get(key) ?? 0) + 1);
+  for (const l of revisionListeners) l();
+}
+
+function subscribeRevisions(listener: () => void): () => void {
+  revisionListeners.add(listener);
+  return () => revisionListeners.delete(listener);
+}
+
+/** How many times another client has moved any of these keys: a dependency, not a count to show. */
+export function memoryRevision(...keys: readonly string[]): number {
+  let sum = 0;
+  for (const key of keys) sum += revisions.get(key) ?? 0;
+  return sum;
+}
+
+/** The same, for a component that has to read again when one of them moves. */
+export function useMemoryRevision(...keys: readonly string[]): number {
+  return useSyncExternalStore(subscribeRevisions, () => memoryRevision(...keys));
+}
+
+/**
+ * `useState(read)` that reads again whenever another client moves one of `keys`
+ * (#371) - the shape most readers of the window's memory already had, made to
+ * follow. Setting it is this window's own act and saves nothing by itself: each
+ * caller keeps its own write, and a re-read never writes.
+ */
+export function useFollowedMemory<T>(keys: string | readonly string[], read: () => T): [T, Dispatch<SetStateAction<T>>] {
+  const list = typeof keys === 'string' ? [keys] : keys;
+  const revision = useMemoryRevision(...list);
+  const [value, setValue] = useState(read);
+  const seen = useRef(revision);
+  const reader = useRef(read);
+  reader.current = read;
+  useEffect(() => {
+    if (seen.current === revision) return;
+    seen.current = revision;
+    setValue(reader.current());
+  }, [revision]);
+  return [value, setValue];
 }
 
 /**

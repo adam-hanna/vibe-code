@@ -74,6 +74,26 @@ export interface PilotDelta {
 }
 
 /**
+ * A pilot turn began, said to every client (#371): the conversation it
+ * continues and what was sent, so a second client showing that conversation can
+ * draw it as it runs. See `src/protocol.ts`.
+ */
+export interface PilotStarted {
+  type: 'pilot_started';
+  id: number;
+  chat: string;
+  asked: string;
+  startedAt: number;
+}
+
+/** The pilot turns in flight, for a client that has just joined (#371). */
+export interface PilotTurnsFrame {
+  type: 'pilot_turns';
+  id: number;
+  turns: readonly { id: number; chat: string; asked: string; startedAt: number; text: string }[];
+}
+
+/**
  * A pilot turn finished.
  *
  * **No money on it, and nowhere to put any.** A subscription turn bills nothing
@@ -553,6 +573,8 @@ export type Frame =
   | CommandOutput
   | CommandEnded
   | PilotDelta
+  | PilotStarted
+  | PilotTurnsFrame
   | PilotReply
   | PilotStopped
   | FsFrame
@@ -596,6 +618,8 @@ export function isFrame(v: unknown): v is Frame {
     // reads. Recognised here or they would be reported as unknown frames and
     // land in the diagnostics list instead of in the conversation (#193).
     type === 'pilot_delta' ||
+    type === 'pilot_started' ||
+    type === 'pilot_turns' ||
     type === 'pilot_reply' ||
     type === 'pilot_stopped' ||
     // The pilot's reads (#223), answered for the pane and nothing else.
@@ -964,11 +988,12 @@ function listenService(handler: (frame: Frame) => void): Promise<() => void> {
  * relay cannot, because it does not know whose id it is.
  */
 export async function onPilotFrame(
-  handler: (frame: PilotDelta | PilotReply | PilotStopped | HostError) => void,
+  handler: (frame: PilotDelta | PilotStarted | PilotReply | PilotStopped | HostError) => void,
 ): Promise<() => void> {
   return listenService((frame) => {
     if (
       frame.type === 'pilot_delta' ||
+      frame.type === 'pilot_started' ||
       frame.type === 'pilot_reply' ||
       frame.type === 'pilot_stopped' ||
       frame.type === 'error'
@@ -1509,10 +1534,27 @@ export async function stopCommand(commandId: string): Promise<void> {
  * reads pilot frames, and neither has to know about commands.
  */
 export async function onCommandFrame(
-  handler: (frame: CommandOutput | CommandEnded) => void,
+  handler: (frame: CommandStarted | CommandOutput | CommandEnded) => void,
 ): Promise<() => void> {
   return listenService((frame) => {
-    if (frame.type === 'command_output' || frame.type === 'command_ended') handler(frame);
+    // A start every client hears (#371), so a command run from the phone is a
+    // card here too. A refusal started nothing and is the asker's alone.
+    if (frame.type === 'command_started' && frame.command !== null) handler(frame);
+    else if (frame.type === 'command_output' || frame.type === 'command_ended') handler(frame);
+  });
+}
+
+/** Answers written into a run's NEEDS-INPUT.md, by any client (#371). */
+export async function onQuestionsAnswered(handler: (frame: QuestionsAnswered) => void): Promise<() => void> {
+  return listenService((frame) => {
+    if (frame.type === 'questions_answered') handler(frame);
+  });
+}
+
+/** A run deleted, by any client (#371): the archive lists that hold it are stale. */
+export async function onRunDeleted(handler: (frame: RunDeleted) => void): Promise<() => void> {
+  return listenService((frame) => {
+    if (frame.type === 'run_deleted') handler(frame);
   });
 }
 
@@ -1536,6 +1578,13 @@ export interface PilotTurn {
   resume: boolean;
   /** `--effort` / `model_reasoning_effort`, or absent for the CLI's default (#296). */
   effort?: string;
+  /**
+   * The conversation this turn continues - its chat key - and what was sent,
+   * as the pane shows it (#371). With them every client is told the turn has
+   * begun, and the host refuses a second turn on the same conversation.
+   */
+  chat?: string;
+  asked?: string;
 }
 
 /**
@@ -1554,6 +1603,13 @@ export async function pilotTurn(turn: PilotTurn): Promise<number> {
   const id = nextRequestId();
   await send({ type: 'pilot', id, ...turn });
   return id;
+}
+
+/** The pilot turns running now, as the host holds them (#371). */
+export async function pilotTurnsNow(): Promise<PilotTurnsFrame['turns']> {
+  const id = nextRequestId();
+  const frame = await ask<PilotTurnsFrame>({ type: 'pilot_turns', id }, id, 'pilot_turns', 'the host did not say which pilot turns are running');
+  return frame.turns;
 }
 
 /**

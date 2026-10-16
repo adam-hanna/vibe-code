@@ -173,7 +173,9 @@ export function putChat(key: string, value: string | null): void {
  */
 async function refresh(keys: readonly string[]): Promise<void> {
   const entries = await host.chats();
+  const moved: string[] = [];
   for (const key of keys) {
+    const was = cache.get(key) ?? null;
     const next = reread(key, entries, pending.has(key) || inflight.has(key));
     if (next.kind === 'set') {
       cache.set(key, next.value);
@@ -182,7 +184,31 @@ async function refresh(keys: readonly string[]): Promise<void> {
       cache.delete(key);
       written.set(key, null);
     }
+    if ((cache.get(key) ?? null) !== was) moved.push(key);
   }
+  if (moved.length === 0) return;
+  for (const key of moved) revisions.set(key, (revisions.get(key) ?? 0) + 1);
+  for (const l of revisionListeners) l();
+}
+
+/**
+ * How many times another client has moved a conversation (#371). The pane
+ * restored only when it was pointed at a different chat, so a message sent from
+ * the phone reached the desktop's cache and never its screen: the desktop showed
+ * it only after somebody switched chats and back. Only a change of value counts,
+ * so this window's own save coming back moves nothing.
+ */
+const revisions = new Map<string, number>();
+const revisionListeners = new Set<() => void>();
+
+function subscribeRevisions(listener: () => void): () => void {
+  revisionListeners.add(listener);
+  return () => revisionListeners.delete(listener);
+}
+
+/** A dependency for a pane showing `key`: it moves when another client's save changed it. */
+export function useChatRevision(key: string): number {
+  return useSyncExternalStore(subscribeRevisions, () => revisions.get(key) ?? 0);
 }
 
 /**

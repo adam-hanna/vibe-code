@@ -11,6 +11,7 @@ import { useArtifact, useArtifacts, noText } from './useArtifacts';
 import type { RecordedAnswer } from './artifacts';
 import { answerFiles, humanAnswers, questionKey } from './humananswers';
 import type { Question, QuestionRound } from './model';
+import { dirKey } from './projects';
 
 /**
  * The open questions, with the answerer's draft beside each (`1f`, #223).
@@ -457,6 +458,25 @@ export function QuestionsPane({
   // Bumped by a save from the form below, which rewrites NEEDS-INPUT.md without
   // writing an artifact the listing would notice.
   const [saves, setSaves] = useState(0);
+  // And by another client's save (#371): answers typed on the phone are drawn
+  // as yours here at once. Only this run's.
+  useEffect(() => {
+    if (!host.inShell() || runId === null) return;
+    let off: (() => void) | null = null;
+    let live = true;
+    void host
+      .onQuestionsAnswered((f) => {
+        if (f.runId === runId && dirKey(f.dir) === dirKey(dir)) setSaves((n) => n + 1);
+      })
+      .then((stop) => {
+        if (live) off = stop;
+        else stop();
+      });
+    return () => {
+      live = false;
+      off?.();
+    };
+  }, [dir, runId]);
   const mine = useHumanAnswers(dir, runId, entries.map((e) => e.name), revision + saves);
   // Every settled round, minus the one the wire is still describing: the loop
   // writes `answers-<n>.json` the moment the answerer's turn ends, so the live

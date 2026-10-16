@@ -330,7 +330,8 @@ describe('a project can be pointed at another directory (#223)', () => {
     expect(settingsSrc).toContain("{scope === 'project' && onRelocate !== undefined && <WhereItIs dir={dir} onRelocate={onRelocate} />}");
     expect(cockpit).toContain('onRelocate={relocate}');
     expect(cockpit).toContain('epoch={projectsEpoch}');
-    expect(sidebar).toContain('}, [epoch]);');
+    // Case 2 (#371): and when another client moved one of the lists.
+    expect(sidebar).toContain('}, [epoch, elsewhere]);');
   });
 });
 

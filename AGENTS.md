@@ -1934,6 +1934,35 @@ with the disk, which is what stops a stale save. A config write's origin travels
 and is never written - `vibe.config.json` is committed - while an invoke's is recorded once as
 `run_origin`, by `gate_released`'s carve-out, so a run with none is byte-identical.
 
+**And what is on screen follows it, both ways** (#371). #354 kept the caches right and nothing
+read them again: every reader took its value once, so a project added on the phone, a message
+sent from it or a model picked on it reached the desktop's cache and not its screen until
+somebody navigated away and back. The owner's line: *"EVERYTHING needs to be in sync and
+updated bidirectionally in real time."* Four rules carry it:
+
+- **A store says which keys moved, and only on a change of value.** `memory.ts` and the chat
+  store count each key another client changed (`useMemoryRevision`, `useChatRevision`), and
+  `useFollowedMemory` is `useState(read)` that reads again when its key moves. A re-read
+  writes nothing, so a client's own write coming back moves nothing and nothing loops. The
+  drafts are re-read through their one writer, unsaved.
+- **The conversation on screen is restored again when another client saved it**, never over a
+  turn this pane is streaming. The pilot's vendor, model and effort are one pick in memory
+  (`pilot/pick.ts`), shared by every client, as they were within one window.
+- **A pilot turn is announced** (`pilot_started`, naming the chat and what was sent), so a
+  second client showing that conversation draws it as it streams and can stop it
+  (`pilot/elsewhere.ts`); it is drawn and never kept, since the asker saves it. `pilot_turns`
+  answers a client that opens mid-turn. **One conversation takes one turn at a time**: the
+  host refuses a second, because two turns resuming one session would each answer blind to the
+  other. Not a protocol bump, by the rule above `PROTOCOL_VERSION`: a host that never
+  announces leaves a window drawing what it drew before. API-key turns run in Rust and are not
+  announced.
+- **Settings, commands, deletions and answers follow too.** A config save bumps the cockpit's
+  own read, the composer's and the Settings screen's; a field somebody is typing in keeps its
+  text (`useTyped`), and a refusal always puts back what is in force. A `command_started`
+  reaches every client and folds once per id, and `run_deleted` and `questions_answered` make
+  the sidebar and the Questions pane read again. What stays per screen: unsent text, unsaved
+  edits, scroll, and what each device has open (`deviceKey`, at the owner's decision).
+
 **The window predicts no filename, and `artifacts` is why that was possible** (#223). Four
 tabs — Plans, Plan critique, Code review and Code — draw a run's own artifacts, and the
 dangerous shape they could have taken is composing `plan-${round}.json` from a round number

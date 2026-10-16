@@ -43,7 +43,7 @@ import type { RunLoop } from '@src/cli.js';
 import type { GateContext, Host } from '@src/host.js';
 import type { Narration } from '@src/log.js';
 import type { PilotChatOptions, PilotChatResult } from '@src/pilotchat.js';
-import type { Outbound } from '@src/protocol.js';
+import type { Outbound, PilotTurnLive } from '@src/protocol.js';
 import type { RunSummary } from '@src/types.js';
 import { scoreArchive } from '@src/scorecard.js';
 import type { Scorecard } from '@src/scorecard.js';
@@ -297,6 +297,12 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
   const chatCodex = deps.pilotCodex ?? pilotCodex;
   /** Subscription pilot turns in flight, by request id, so `pilot_stop` can reach one. */
   const pilotTurns = new Map<number, AbortController>();
+  /**
+   * The announced turns in flight, by request id (#371): what `pilot_turns`
+   * answers a client that joins mid-turn with, and how a second turn on one
+   * conversation is refused. Only a turn whose frame named its conversation.
+   */
+  const announced = new Map<number, PilotTurnLive>();
   const archive = deps.archive ?? ((dir: string) => listRuns(dir));
   const stats = deps.stats ?? scoreArchive;
   const listModelsWith = deps.models ?? listModels;
@@ -878,6 +884,11 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
       return;
     }
 
+    if (msg.type === 'pilot_turns') {
+      send({ type: 'pilot_turns', id: msg.id, turns: [...announced.values()] });
+      return;
+    }
+
     if (msg.type === 'pilot_stop') {
       // A turn that has already ended is not an error: the click raced the
       // reply, and the reply is what the pane is about to draw anyway.
@@ -920,10 +931,31 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
         send({ type: 'error', id, message: err instanceof Error ? err.message : String(err) });
         return;
       }
+      // One turn per conversation (#371). Two clients showing one chat could
+      // otherwise each send a message into it at once, and two turns resuming
+      // one session would each answer without the other's messages.
+      const chatKey = msg.chat;
+      if (chatKey !== undefined) {
+        const busy = [...announced.values()].find((t) => t.chat === chatKey);
+        if (busy !== undefined) {
+          send({
+            type: 'error',
+            id,
+            message: 'a reply is already being written in this conversation - wait for it, or stop it',
+          });
+          return;
+        }
+      }
       // This turn's own off switch (#223), held until it settles either way.
       const stopper = new AbortController();
       pilotTurns.set(id, stopper);
       const turnStarted = Date.now();
+      // Said to every client (#371), so the one beside the asker draws it.
+      if (chatKey !== undefined) {
+        const asked = msg.asked ?? '';
+        announced.set(id, { id, chat: chatKey, asked, startedAt: turnStarted, text: '' });
+        send({ type: 'pilot_started', id, chat: chatKey, asked, startedAt: turnStarted });
+      }
       void (msg.agent === 'codex' ? chatCodex : chat)({
         prompt: msg.prompt,
         system: msg.system,
@@ -946,6 +978,8 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
         timeoutMs: granted.timeoutMs,
         signal: stopper.signal,
         onDelta: (text: string) => {
+          const live = announced.get(id);
+          if (live !== undefined) live.text += text;
           send({ type: 'pilot_delta', id, text });
         },
       })
@@ -984,6 +1018,7 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
         })
         .finally(() => {
           pilotTurns.delete(id);
+          announced.delete(id);
         });
       return;
     }
