@@ -1954,8 +1954,14 @@ updated bidirectionally in real time."* Four rules carry it:
   answers a client that opens mid-turn. **One conversation takes one turn at a time**: the
   host refuses a second, because two turns resuming one session would each answer blind to the
   other. Not a protocol bump, by the rule above `PROTOCOL_VERSION`: a host that never
-  announces leaves a window drawing what it drew before. API-key turns run in Rust and are not
-  announced.
+  announces leaves a window drawing what it drew before. **An API-key turn is announced by
+  Rust**, the same way on its own road: `pilot_send` takes an `announce`, emits an `announced`
+  pilot event before the thread starts, keeps the text so far for `pilot_turns` (a new command,
+  answering only what every client was already sent) and refuses a second
+  turn in one conversation. The id comes back after the announcement has gone out, so the
+  asker knows its own turn by `asker`, a token of its window, rather than by id. The two
+  roads' ids are two counters, so a drawn turn folds only what came down its own road, and
+  is stopped back down it.
 - **Settings, commands, deletions and answers follow too.** A config save bumps the cockpit's
   own read, the composer's and the Settings screen's; a field somebody is typing in keeps its
   text (`useTyped`), and a refusal always puts back what is in force. A `command_started`

@@ -72,7 +72,7 @@ import type { Launched } from '../cockpit/argv';
 import { line, outcome } from '../cockpit/commands';
 import { memory, useFollowedMemory } from '../memory';
 import { PICK_KEY, readPick, writePick } from './pick';
-import { asReply, foldElsewhere, holdsComposer, letGo, LINGER_MS, startElsewhere } from './elsewhere';
+import { asReply, foldApi, foldElsewhere, holdsComposer, letGo, LINGER_MS, startElsewhere } from './elsewhere';
 import type { Elsewhere } from './elsewhere';
 import type { Pick } from './pick';
 import { Markdown } from './Markdown';
@@ -1001,20 +1001,32 @@ export function PilotPane({
     if (!host.inShell()) return;
     const key = chatKey(dir, runId);
     let current = true;
+    const found = (e: Elsewhere | null): void => {
+      if (current && e !== null) setElsewhere((was) => was ?? e);
+    };
     host
       .pilotTurnsNow()
       .then((turns) => {
-        if (!current) return;
-        for (const t of turns) {
-          const found = startElsewhere(t, key, host.allocatedHere);
-          if (found !== null) {
-            setElsewhere(found);
-            return;
-          }
-        }
+        for (const t of turns) found(startElsewhere(t, key, host.allocatedHere));
       })
       // Nothing to draw is what a host that cannot answer leaves: the
       // conversation still arrives when the asker saves it.
+      .catch(() => undefined);
+    // And the API-key road, which Rust runs and the host never sees.
+    pilot
+      .turnsNow()
+      .then((turns) => {
+        for (const t of turns) {
+          found(
+            startElsewhere(
+              { id: t.turn, chat: t.chat, asked: t.asked, startedAt: t.started_at, text: t.text },
+              key,
+              () => t.asker === origin.current,
+              { road: 'api', vendor: t.provider },
+            ),
+          );
+        }
+      })
       .catch(() => undefined);
     return () => {
       current = false;
@@ -1217,6 +1229,20 @@ export function PilotPane({
     void (async () => {
       stop = await pilot.connect(
         (event) => {
+          // Another client's API-key turn in the conversation on screen (#371).
+          // Its own is known by `asker`, since the announcement beats the id.
+          if (event.kind === 'announced') {
+            const started = startElsewhere(
+              { id: event.turn, chat: event.chat, asked: event.asked, startedAt: event.started_at },
+              chat.current,
+              () => event.asker === origin.current,
+              { road: 'api', vendor: event.provider },
+            );
+            if (started !== null) setElsewhere(started);
+            return;
+          }
+          const at = Date.now();
+          setElsewhere((e) => (e === null ? e : foldApi(e, event, at)));
           dispatch({ type: 'event', event });
           // Rust guarantees exactly one terminal event per turn and that it is
           // last, so this is safe to act on the first time it is seen.
@@ -1546,7 +1572,15 @@ ${frame.text}`, turn, origin.current))) {
         // model is only ever sent the most recent one, so there is no earlier
         // description for this to contradict - see `brief.ts` for why that
         // settles the staleness question rather than trading it away.
-        .send({ provider, model, messages, tools: declare(), system: systemPrompt(run, launched, 'native', access, null, standing ?? null) })
+        .send({
+          provider,
+          model,
+          messages,
+          tools: declare(),
+          system: systemPrompt(run, launched, 'native', access, null, standing ?? null),
+          // Named, so every other client draws it as it streams (#371).
+          ...(chat.current === null ? {} : { announce: { chat: chat.current, asked: said ?? '', asker: origin.current } }),
+        })
         .then((turn) => {
           // Rust's turn ids and the host's request ids are two counters, so a
           // stale host turn could share this number and send the stop button
@@ -2257,10 +2291,11 @@ ${frame.text}`, turn, origin.current))) {
               // A subscription turn is a `claude` child of the HOST; an API turn
               // is a stream in Rust. Asking Rust to cancel the first was refused
               // and swallowed, so the button did nothing on the default backend.
-              // A turn another client started here is stopped on the host by its
-              // own id (#371) - the same stop that client's button sends.
+              // A turn another client started here is stopped by its own id, on
+              // its own road (#371) - the same stop that client's button sends.
               if (live === null) {
-                if (elsewhere !== null) void host.stopPilot(elsewhere.id).catch(() => {});
+                if (elsewhere?.road === 'host') void host.stopPilot(elsewhere.id).catch(() => {});
+                else if (elsewhere?.road === 'api') void pilot.cancel(elsewhere.id).catch(() => {});
               } else if (live === hostTurn.current) void host.stopPilot(live).catch(() => {});
               else void pilot.cancel(live).catch(() => {});
             }}

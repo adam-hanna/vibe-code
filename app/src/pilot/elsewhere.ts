@@ -1,4 +1,6 @@
 import type { Backend } from './backend';
+import type { Provider } from './keys';
+import type { PilotEvent } from './pilot';
 import type { Reply } from './transcript';
 
 /**
@@ -19,10 +21,19 @@ import type { Reply } from './transcript';
  * never comes - the asking client gone mid-turn - lets go of it after
  * `LINGER_MS`, a choice and not a measurement.
  *
+ * **Two roads, as a pilot turn has.** A subscription turn is the host's and
+ * arrives as host frames; an API-key turn is the desktop's Rust and arrives as
+ * pilot events. Their ids are two counters, so a turn remembers its road and
+ * folds only what came down it, and the stop button goes back the same way.
+ *
  * Pure, because the app has no jsdom: the pane feeds it frames and a clock.
  */
 export interface Elsewhere {
   id: number;
+  /** Which road the turn is on: the host's (subscription) or Rust's (API key). */
+  road: 'host' | 'api';
+  /** The vendor an API-key turn is asking, or null on the host's road. */
+  vendor: Provider | null;
   chat: string;
   asked: string;
   startedAt: number;
@@ -41,10 +52,13 @@ export function startElsewhere(
   turn: { id: number; chat: string; asked: string; startedAt: number; text?: string },
   chat: string | null,
   mine: (id: number) => boolean,
+  road: { road: 'host' } | { road: 'api'; vendor: Provider } = { road: 'host' },
 ): Elsewhere | null {
   if (mine(turn.id) || chat === null || turn.chat !== chat) return null;
   return {
     id: turn.id,
+    road: road.road,
+    vendor: road.road === 'api' ? road.vendor : null,
     chat: turn.chat,
     asked: turn.asked,
     startedAt: turn.startedAt,
@@ -60,9 +74,9 @@ type Frame =
   | { type: 'pilot_stopped'; id: number }
   | { type: 'error'; id: number | null };
 
-/** One of its frames. A frame for any other turn changes nothing. */
+/** One of its host frames. A frame for any other turn changes nothing. */
 export function foldElsewhere(turn: Elsewhere, frame: Frame, now: number): Elsewhere {
-  if (frame.id !== turn.id || turn.endedAt !== null) return turn;
+  if (turn.road !== 'host' || frame.id !== turn.id || turn.endedAt !== null) return turn;
   switch (frame.type) {
     case 'pilot_delta':
       return { ...turn, text: turn.text + frame.text };
@@ -73,6 +87,26 @@ export function foldElsewhere(turn: Elsewhere, frame: Frame, now: number): Elsew
       return { ...turn, endedAt: now, ending: 'stopped' };
     case 'error':
       return { ...turn, endedAt: now, ending: 'failed' };
+  }
+}
+
+/**
+ * One of its pilot events, on the API-key road. Rust sends no final text, so the
+ * deltas are the reply; a tool call is the asker's to run and is not drawn here.
+ */
+export function foldApi(turn: Elsewhere, event: PilotEvent, now: number): Elsewhere {
+  if (turn.road !== 'api' || event.turn !== turn.id || turn.endedAt !== null) return turn;
+  switch (event.kind) {
+    case 'text':
+      return { ...turn, text: turn.text + event.delta };
+    case 'ended':
+      return { ...turn, endedAt: now, ending: 'answered' };
+    case 'cancelled':
+      return { ...turn, endedAt: now, ending: 'stopped' };
+    case 'failed':
+      return { ...turn, endedAt: now, ending: 'failed' };
+    default:
+      return turn;
   }
 }
 
@@ -91,7 +125,7 @@ export function holdsComposer(turn: Elsewhere | null): boolean {
 export function asReply(turn: Elsewhere, provider: Backend): Reply {
   return {
     turn: turn.id,
-    provider,
+    provider: turn.vendor ?? provider,
     model: null,
     text: turn.text,
     calls: [],

@@ -488,6 +488,7 @@ async fn run(app: AppHandle, command: &str, args: Value, written: Written) -> Re
             let a: TurnId = args_of(command, args)?;
             blocking(move || app.state::<crate::pilot::Pilot>().cancel(a.turn)).await
         }
+        "pilot_turns" => blocking(move || app.state::<crate::pilot::Pilot>().turns()).await,
         "pilot_models" => {
             let a: ProviderArg = args_of(command, args)?;
             blocking(move || crate::pilot::models::list(a.provider)).await

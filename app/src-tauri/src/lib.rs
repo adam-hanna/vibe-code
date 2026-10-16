@@ -56,7 +56,7 @@ use keys::{key_clear, key_set, key_status};
 use autostart::{shows_window, PluginAutostart, AUTOSTART_ARG};
 use remote::{remote_pair_answer, remote_pair_begin, remote_revoke, remote_set, remote_status, Remote};
 use pilot::models::pilot_models;
-use pilot::{pilot_cancel, pilot_send, Pilot};
+use pilot::{pilot_cancel, pilot_send, pilot_turns, Pilot};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{Emitter, Manager, WindowEvent};
@@ -154,6 +154,10 @@ pub fn run() {
             key_status,
             pilot_send,
             pilot_cancel,
+            // The announced turns in flight, for a client that opens a
+            // conversation mid-reply (#371). What it returns every client was
+            // already sent as events; never a key.
+            pilot_turns,
             // The one command that answers with data from a vendor, and it is a
             // list of model names - never a key and never a reply (#223).
             pilot_models,

@@ -61,6 +61,15 @@ describe('the conversation on screen follows another client', () => {
     // A pane opened mid-turn asks what is already running.
     expect(paneSrc).toMatch(/host\s*\.pilotTurnsNow\(\)/);
   });
+
+  test('so does an API-key turn, which Rust runs and the host never sees', () => {
+    expect(paneSrc).toMatch(/announce: \{ chat: chat\.current, asked: said \?\? '', asker: origin\.current \}/);
+    expect(paneSrc).toMatch(/if \(event\.kind === 'announced'\)/);
+    expect(paneSrc).toMatch(/\(\) => event\.asker === origin\.current/);
+    expect(paneSrc).toMatch(/pilot\s*\.turnsNow\(\)/);
+    // Stopped on its own road.
+    expect(paneSrc).toMatch(/elsewhere\?\.road === 'api'\) void pilot\.cancel\(elsewhere\.id\)/);
+  });
 });
 
 describe("the pilot's vendor, model and effort are one pick", () => {

@@ -30,7 +30,9 @@ describe('stop reaches the turn', () => {
   });
 
   test('an API turn clears the host turn, so the two id counters cannot collide', () => {
-    const api = pane.slice(pane.indexOf('.send({ provider, model, messages, tools: declare()'));
-    expect(api.slice(0, 600)).toContain('hostTurn.current = -1;');
+    // Anchored on the declared tools, which only the API send carries: the call
+    // spans lines since it names its conversation (#371).
+    const api = pane.slice(pane.indexOf('tools: declare(),'));
+    expect(api.slice(0, 900)).toContain('hostTurn.current = -1;');
   });
 });

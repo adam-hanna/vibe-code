@@ -159,6 +159,7 @@ pub const ALLOWED_COMMANDS: &[&str] = &[
     "key_status",
     "pilot_send",
     "pilot_cancel",
+    "pilot_turns",
     "pilot_models",
     "app_quit",
     "update_check",

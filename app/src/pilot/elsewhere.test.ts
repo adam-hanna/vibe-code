@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { asReply, foldElsewhere, holdsComposer, letGo, LINGER_MS, startElsewhere } from './elsewhere';
+import { asReply, foldApi, foldElsewhere, holdsComposer, letGo, LINGER_MS, startElsewhere } from './elsewhere';
 
 /**
  * A pilot turn another client started, drawn where its conversation is open
@@ -57,5 +57,27 @@ describe("another client's pilot turn", () => {
     const reply = asReply(startElsewhere({ ...ANNOUNCED, text: 'hi' }, CHAT, notMine)!, 'subscription');
     expect(reply).toMatchObject({ turn: 900_001, asked: 'pr?', text: 'hi', outcome: null, startedAt: 1_000, calls: [] });
     expect(asReply(startElsewhere({ ...ANNOUNCED, asked: '' }, CHAT, notMine)!, 'subscription').asked).toBeNull();
+  });
+
+  test('an API-key turn folds its own pilot events, and the deltas are the reply', () => {
+    const api = { road: 'api' as const, vendor: 'openai' as const };
+    let t = startElsewhere({ ...ANNOUNCED, id: 3 }, CHAT, notMine, api)!;
+    expect(t).toMatchObject({ road: 'api', vendor: 'openai' });
+    t = foldApi(t, { kind: 'started', turn: 3, provider: 'openai', model: 'gpt-6' }, 1);
+    t = foldApi(t, { kind: 'text', turn: 3, delta: 'No, ' }, 1);
+    t = foldApi(t, { kind: 'text', turn: 4, delta: 'another turn' }, 1);
+    t = foldApi(t, { kind: 'text', turn: 3, delta: 'not yet.' }, 1);
+    expect(holdsComposer(t)).toBe(true);
+    t = foldApi(t, { kind: 'ended', turn: 3, stop: 'stop' }, 9);
+    expect(t).toMatchObject({ text: 'No, not yet.', endedAt: 9, ending: 'answered' });
+    expect(asReply(t, 'subscription').provider).toBe('openai');
+    expect(foldApi(startElsewhere({ ...ANNOUNCED, id: 3 }, CHAT, notMine, api)!, { kind: 'cancelled', turn: 3 }, 2).ending).toBe('stopped');
+  });
+
+  test("the two roads' ids are two counters, so a turn folds only what came down its own", () => {
+    const host = startElsewhere({ ...ANNOUNCED, id: 3 }, CHAT, notMine)!;
+    expect(foldApi(host, { kind: 'text', turn: 3, delta: 'x' }, 1)).toBe(host);
+    const api = startElsewhere({ ...ANNOUNCED, id: 3 }, CHAT, notMine, { road: 'api', vendor: 'anthropic' })!;
+    expect(foldElsewhere(api, { type: 'pilot_delta', id: 3, text: 'x' }, 1)).toBe(api);
   });
 });
