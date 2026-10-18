@@ -81,6 +81,10 @@ To build it yourself (Rust and the [Tauri prerequisites](https://tauri.app/start
 cd app && npm install && npm run app:build
 ```
 
+## On your phone
+
+The phone app is a remote for the desktop app: the same runs, pilot chat and settings, kept in step both ways while the desktop does the work. It is not in any app store. Download the latest [Android `.apk`](https://github.com/adam-hanna/vibe-code/releases/latest/download/Vibe-android.apk) and open it on the phone, or the [iPhone `.ipa`](https://github.com/adam-hanna/vibe-code/releases/latest/download/Vibe-ios-unsigned.ipa), which is unsigned and installed with [AltStore](https://altstore.io), [SideStore](https://sidestore.io) or [Sideloadly](https://sideloadly.io) and your own Apple ID. Then pair it from **Settings → Remote access** on the desktop. Each release also carries versioned copies, such as `Vibe_1.7.0_android.apk`. The steps, and how to build both apps from source, are in [On your phone](https://adam-hanna.github.io/vibe-code/phone.html).
+
 ## Configuration
 
 Put a `vibe.config.json` in the repository. Flags override it. `vibe.config.example.json` is a worked example, and the [configuration reference](https://adam-hanna.github.io/vibe-code/configuration.html) lists every key. The keys most worth knowing:

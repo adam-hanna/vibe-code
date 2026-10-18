@@ -13,6 +13,8 @@ Download the latest version:
 | Windows (x64) | [installer (`.exe`)](https://github.com/adam-hanna/vibe-code/releases/latest/download/Vibe-windows-x64-setup.exe) or [`.msi`](https://github.com/adam-hanna/vibe-code/releases/latest/download/Vibe-windows-x64.msi) |
 | macOS (Apple Silicon only) | [`.dmg`](https://github.com/adam-hanna/vibe-code/releases/latest/download/Vibe-macos-arm64.dmg) |
 | Linux (x86-64) | [`.AppImage`](https://github.com/adam-hanna/vibe-code/releases/latest/download/Vibe-linux-x86_64.AppImage) or [`.deb`](https://github.com/adam-hanna/vibe-code/releases/latest/download/Vibe-linux-amd64.deb) |
+| Android phone | [`.apk`](https://github.com/adam-hanna/vibe-code/releases/latest/download/Vibe-android.apk) - see [On your phone](./phone.md) |
+| iPhone | [`.ipa`](https://github.com/adam-hanna/vibe-code/releases/latest/download/Vibe-ios-unsigned.ipa), unsigned, for AltStore or Sideloadly - see [On your phone](./phone.md) |
 
 These links always point at the newest published release. Older versions, and pre-releases such as `v1.6.0-rc.1`, are on the [releases page](https://github.com/adam-hanna/vibe-code/releases). A pre-release is never what these links serve.
 

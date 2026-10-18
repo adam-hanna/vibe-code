@@ -1,4 +1,4 @@
-# Builds the desktop app on every `v*` tag and attaches the bundles to one draft
+# Builds the desktop app and the phone apps on every `v*` tag and attaches them to one draft
 # GitHub release (#239).
 #
 # - The `release` job creates the draft once, before the matrix runs, so no two
@@ -77,6 +77,12 @@
 #   APPLE_API_ISSUER, APPLE_API_KEY (key id), APPLE_API_KEY_P8_BASE64
 #       Notarisation through App Store Connect. The .p8 is written to
 #       $RUNNER_TEMP and APPLE_API_KEY_PATH points at it. Needs the certificate.
+#   ANDROID_KEYSTORE (base64 .jks), ANDROID_KEYSTORE_PASSWORD,
+#   ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD
+#       Signs the phone's APK (#348). Without them the `mobile` job builds no
+#       APK and says so. **This key cannot be replaced either**: Android refuses
+#       an update signed by a different key, so a new one means every phone
+#       uninstalls the app, and its pairing, before it can update.
 #   WINDOWS_CERTIFICATE (base64 .pfx), WINDOWS_CERTIFICATE_PASSWORD,
 #   WINDOWS_TIMESTAMP_URL (optional, default http://timestamp.digicert.com)
 #       Authenticode signing on Windows. The certificate is imported into the
@@ -410,6 +416,168 @@ jobs:
           done <<< "$PATHS"
           gh release upload "$GITHUB_REF_NAME" "${files[@]}" --clobber
 
+  # The phone apps (#348), beside the desktop bundles and on the same draft.
+  # There is no store: the APK is signed with the release key and installed by
+  # hand, and the .ipa is unsigned, for AltStore, SideStore or Sideloadly to
+  # sign with the person's own Apple ID (README, "On your phone"). Each is
+  # uploaded under its versioned name and a stable one, as an installer is, and
+  # attested from the same list it is uploaded from. Neither is a mock build.
+  mobile:
+    needs: release
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Phones from the last decade: 64-bit and 32-bit ARM.
+          - os: ubuntu-latest
+            platform: android
+            assets: >-
+              mobile-out/Vibe_*_android.apk=Vibe-android.apk
+          - os: macos-latest
+            platform: ios
+            assets: >-
+              mobile-out/Vibe_*_ios-unsigned.ipa=Vibe-ios-unsigned.ipa
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            app/package-lock.json
+            app/mobile/package-lock.json
+      - if: matrix.platform == 'android'
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'android' && 'aarch64-linux-android,armv7-linux-androideabi' || 'aarch64-apple-ios' }}
+      - run: npm ci
+        working-directory: app
+      - run: npm ci
+        working-directory: app/mobile
+      - name: Version
+        shell: bash
+        run: echo "VERSION=$(node -p "require('./package.json').version")" >> "$GITHUB_ENV"
+
+      # The key is checked for, never echoed. Without it there is no APK to
+      # ship: an unsigned one will not install.
+      - name: Android signing key
+        if: matrix.platform == 'android'
+        shell: bash
+        env:
+          ANDROID_KEYSTORE: ${{ secrets.ANDROID_KEYSTORE }}
+        run: |
+          set -euo pipefail
+          if [ -z "$ANDROID_KEYSTORE" ]; then
+            echo "::warning::No ANDROID_KEYSTORE secret: no APK is built for this release."
+            echo "SKIP=1" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          printf '%s' "$ANDROID_KEYSTORE" | base64 --decode > "$RUNNER_TEMP/release.jks"
+          echo "ANDROID_KEYSTORE_FILE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+
+      - name: Build and sign the APK
+        if: matrix.platform == 'android' && env.SKIP != '1'
+        shell: bash
+        working-directory: app/mobile
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        # The runner's own variable, read in the shell: the `env` context holds
+        # only what a workflow sets.
+        run: |
+          set -euo pipefail
+          export NDK_HOME="$ANDROID_NDK_LATEST_HOME"
+          npx tauri android init --ci
+          npx tauri android build --apk --target aarch64 armv7 --ci
+          mkdir -p "$GITHUB_WORKSPACE/mobile-out"
+          scripts/sign-apk.sh \
+            src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release-unsigned.apk \
+            "$GITHUB_WORKSPACE/mobile-out/Vibe_${VERSION}_android.apk"
+          rm -f "$ANDROID_KEYSTORE_FILE"
+
+      # `--no-sign` (tauri-cli 2.11) archives without a signing identity and
+      # packs Payload/Vibe.app into an .ipa. A sideloading tool signs it.
+      - name: Build the unsigned .ipa
+        if: matrix.platform == 'ios'
+        shell: bash
+        working-directory: app/mobile
+        run: |
+          set -euo pipefail
+          npx tauri ios init --ci
+          npx tauri ios build --target aarch64 --no-sign --ci
+          shopt -s nullglob globstar
+          ipas=(src-tauri/gen/apple/build/**/*.ipa)
+          if [ ${#ipas[@]} -ne 1 ]; then
+            echo "::error::the iOS build made ${#ipas[@]} .ipa files; expected one."
+            exit 1
+          fi
+          unzip -l "${ipas[0]}" | grep -q 'Payload/.*\.app/Info.plist' || {
+            echo "::error::${ipas[0]} holds no Payload/*.app"
+            exit 1
+          }
+          mkdir -p "$GITHUB_WORKSPACE/mobile-out"
+          cp "${ipas[0]}" "$GITHUB_WORKSPACE/mobile-out/Vibe_${VERSION}_ios-unsigned.ipa"
+
+      - name: Collect the release files
+        id: assets
+        if: env.SKIP != '1'
+        shell: bash
+        env:
+          ASSETS: ${{ matrix.assets }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=()
+          read -r -a entries <<< "$ASSETS"
+          for entry in "${entries[@]}"; do
+            glob="${entry%%=*}"
+            name="${entry#*=}"
+            matched=($glob)
+            if [ ${#matched[@]} -ne 1 ]; then
+              echo "::error::$glob matched ${#matched[@]} files; it must match exactly one to be uploaded as $name."
+              exit 1
+            fi
+            cp "${matched[0]}" "mobile-out/$name"
+            files+=("${matched[0]}" "mobile-out/$name")
+          done
+          {
+            echo 'paths<<VIBE_EOF'
+            printf '%s\n' "${files[@]}"
+            echo 'VIBE_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Attest the release files
+        if: env.SKIP != '1'
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: ${{ steps.assets.outputs.paths }}
+
+      - name: Upload to the draft release
+        if: env.SKIP != '1'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PATHS: ${{ steps.assets.outputs.paths }}
+        run: |
+          set -euo pipefail
+          # A `read` loop, not `mapfile`: macOS's /bin/bash is 3.2.
+          files=()
+          while IFS= read -r f; do
+            if [ -n "$f" ]; then files+=("$f"); fi
+          done <<< "$PATHS"
+          gh release upload "$GITHUB_REF_NAME" "${files[@]}" --clobber
+
   # latest.json: what an installed app reads to learn of a new version and fetch
   # it. Built from the `.sig` files the matrix uploaded, so it only names
   # bundles that are really on this release, and only runs when every platform
@@ -421,7 +589,8 @@ jobs:
   # checksums. The job keeps the name `updater` from its first file;
   # tests/download-names.test.ts cites it by that name.
   updater:
-    needs: build
+    # After the phones too, so SHA256SUMS lists their files.
+    needs: [build, mobile]
     runs-on: ubuntu-latest
     permissions:
       contents: write
