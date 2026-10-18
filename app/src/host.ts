@@ -60,6 +60,17 @@ export interface Result {
   exit: number;
 }
 
+/**
+ * A run's pause and stop as they now stand (#371), after any client's `pause`,
+ * `unpause` or `cancel` - so every client showing the run draws the same
+ * buttons, and not only the one that pressed.
+ */
+export interface Controls {
+  type: 'controls';
+  pausing: boolean;
+  stopping: boolean;
+}
+
 export interface HostError {
   type: 'error';
   id: number | null;
@@ -568,6 +579,7 @@ export type Frame =
   | Narration
   | Ask
   | Result
+  | Controls
   | HostError
   | CommandStarted
   | CommandOutput
@@ -613,6 +625,9 @@ export function isFrame(v: unknown): v is Frame {
     type === 'narration' ||
     type === 'ask' ||
     type === 'result' ||
+    // A run's pause and stop (#371), which the cockpit sets on the run's entry
+    // and the reducer has no use for.
+    type === 'controls' ||
     type === 'error' ||
     // The pilot's two, which the cockpit's reducer ignores and the pilot pane
     // reads. Recognised here or they would be reported as unknown frames and

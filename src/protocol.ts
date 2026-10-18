@@ -89,6 +89,15 @@ export type Outbound =
   /** A request finished. `exit` is the exit code the same command would have returned. */
   | { type: 'result'; id: number; exit: number }
   /**
+   * A run's pause and stop as they now stand, after a `pause`, an `unpause` or
+   * a `cancel` (#371). The asker learns it from its own `result`; every other
+   * client showing the run learned nothing, so a pause pressed on the phone
+   * left the desktop's button offering a pause that was already armed. Sent to
+   * everyone, and it is the state rather than the request, so a client that
+   * hears it twice draws it once.
+   */
+  | { type: 'controls'; pausing: boolean; stopping: boolean }
+  /**
    * A request could not be run at all.
    *
    * Distinct from a `result` with a non-zero exit, and the distinction matters:

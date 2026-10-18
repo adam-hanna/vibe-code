@@ -713,6 +713,23 @@ async fn build_endpoint(app: AppHandle, key: SecretKey, relay: Option<RelayUrl>)
 /// status re-reads `remote_status`.
 const CONNECTIONS_EVENT: &str = "remote://connections";
 
+/// Something the desktop keeps outside the host changed, by any client (#371):
+/// a stored key, or remote access's settings and paired phones. The window and
+/// every phone re-read it with the read they already use - `key_status` or
+/// `remote_status` - so this carries which, and never a value.
+pub(crate) const DESKTOP_CHANGED_EVENT: &str = "desktop://changed";
+
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Changed {
+    Keys,
+    Remote,
+}
+
+pub(crate) fn desktop_changed(app: &AppHandle, what: Changed) {
+    hub::emit(app, DESKTOP_CHANGED_EVENT, &what);
+}
+
 /// Make the app's endpoint match its settings, waiting for it.
 async fn reconcile(app: &AppHandle, remote: &Remote) {
     let built = app.clone();
@@ -820,6 +837,7 @@ pub async fn remote_set(patch: Patch, app: AppHandle, remote: State<'_, Remote>)
     let _guard = patch_locked(&remote, || apply_patch(&app, &remote, &patch)).await?;
     let built = app.clone();
     reconcile_locked(&remote, || identity::read(&Keychain), move |key, relay| build_endpoint(built, key, relay), None).await;
+    desktop_changed(&app, Changed::Remote);
     Ok(status_now(&app, &remote))
 }
 
@@ -850,6 +868,7 @@ pub(crate) async fn set_remote_from_phone(
         reconcile_locked(remote, || identity::read(&Keychain), |key, relay| build_endpoint(app.clone(), key, relay), None)
             .await;
         drop(guard);
+        desktop_changed(app, Changed::Remote);
         return Ok(status_now(app, remote));
     }
     let mut decided = status_now(app, remote);
@@ -866,6 +885,8 @@ pub(crate) async fn set_remote_from_phone(
         )
         .await;
         drop(guard);
+        // Heard by the window: the phone that asked has been closed by now.
+        desktop_changed(&app, Changed::Remote);
     });
     Ok(decided)
 }
@@ -930,7 +951,9 @@ pub(crate) fn revoke_phone(app: &AppHandle, remote: &Remote, id: &str) -> Result
     match &*remote.running() {
         Running::Up { ep, .. } => revoke(&store, ep.connections(), id),
         _ => revoke(&store, &NoConnections, id),
-    }
+    }?;
+    desktop_changed(app, Changed::Remote);
+    Ok(())
 }
 
 #[cfg(test)]

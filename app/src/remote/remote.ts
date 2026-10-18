@@ -193,6 +193,16 @@ export function onConnections(handler: () => void): Promise<() => void> {
   return listen<null>('remote://connections', () => handler());
 }
 
+/**
+ * Remote access's settings or its paired phones changed, by any client (#371) -
+ * `desktop://changed` saying `remote`. Re-read `status()`, as for a connection.
+ */
+export function onRemoteChanged(handler: () => void): Promise<() => void> {
+  return listen<string>('desktop://changed', (event) => {
+    if (event.payload === 'remote') handler();
+  });
+}
+
 export function onPairRequest(handler: (request: PairRequest) => void): Promise<() => void> {
   return listen<PairRequest>('remote://pair-request', (event) => handler(event.payload));
 }

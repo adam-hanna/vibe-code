@@ -13,7 +13,7 @@ export function useRemoteStatus(): remote.RemoteStatus | null {
   const [status, setStatus] = useState<remote.RemoteStatus | null>(null);
   useEffect(() => {
     if (!inShell()) return;
-    const follower = remote.followStatus(setStatus, [remote.onConnections]);
+    const follower = remote.followStatus(setStatus, [remote.onConnections, remote.onRemoteChanged]);
     return () => follower.stop();
   }, []);
   return status;

@@ -387,6 +387,18 @@ export function setFlag(lives: LiveRuns, handle: string, flag: 'pausing' | 'stop
   return edit(lives, handle, (e) => ({ ...e, [flag]: value }));
 }
 
+/**
+ * A run's pause and stop as its host says they now stand (#371), whichever
+ * client pressed. Never over what `updateRun` already cleared: a run that has
+ * settled, or is holding at a gate, is pausing and stopping no longer.
+ */
+export function setControls(lives: LiveRuns, handle: string, pausing: boolean, stopping: boolean): LiveRuns {
+  return edit(lives, handle, (e) => {
+    const over = settled(e.run) || e.run.reason !== null;
+    return { ...e, pausing: pausing && !over && e.run.gate === null, stopping: stopping && !over };
+  });
+}
+
 export function markAdopted(lives: LiveRuns, handle: string, adopted: 'moved' | 'skipped'): LiveRuns {
   return edit(lives, handle, (e) => ({ ...e, adopted }));
 }

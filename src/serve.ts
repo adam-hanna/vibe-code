@@ -1,4 +1,4 @@
-import { requestCancel } from '@src/cancel.js';
+import { cancelRequested, requestCancel } from '@src/cancel.js';
 import { main } from '@src/cli.js';
 import { commandLogDir } from '@src/commandlog.js';
 import { adoptedSnapshot, keepCommandLogs, refused as commandRefused, startCommand, stopTiedCommands, stopCommand } from '@src/commands.js';
@@ -373,6 +373,19 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
    */
   let pauseRequested = false;
 
+  /**
+   * Every client hears a pause or a stop as it now stands (#371), not only the
+   * asker - said before the asker's answer, and only when it moved, so a second
+   * pause or an unpause with nothing armed says nothing new.
+   */
+  let saidControls = { pausing: false, stopping: false };
+  const sayControls = (): void => {
+    const now = { pausing: pauseRequested, stopping: cancelRequested() !== null };
+    if (now.pausing === saidControls.pausing && now.stopping === saidControls.stopping) return;
+    saidControls = now;
+    send({ type: 'controls', ...now });
+  };
+
   const host: Host = {
     decide: (ctx: GateContext) =>
       new Promise<unknown>((resolve) => {
@@ -383,6 +396,8 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
     takePause: () => {
       const asked = pauseRequested;
       pauseRequested = false;
+      // Not said: the ask that follows is how every client learns it was taken.
+      saidControls = { ...saidControls, pausing: false };
       return asked;
     },
   };
@@ -422,6 +437,8 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
         // A pause asked for before any run starts still holds that run: this
         // clears only when a run returns.
         pauseRequested = false;
+        // Not said either: every client draws a returned run as neither.
+        saidControls = { pausing: false, stopping: false };
         settleIfDone();
       });
   };
@@ -1034,6 +1051,7 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
       // The count is on the wire because it is a different thing to tell
       // somebody: zero means the cancel arrived between turns, so the run still
       // ends but no work was discarded.
+      sayControls();
       send({ type: 'result', id: msg.id, exit: killed });
       return;
     }
@@ -1044,6 +1062,7 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
       // pause was asked for. Never an error - too late is a run that is holding.
       const had = pauseRequested;
       pauseRequested = false;
+      sayControls();
       send({ type: 'result', id: msg.id, exit: had ? 0 : 1 });
       return;
     }
@@ -1058,6 +1077,7 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
       // presses pause a moment before a run starts meant to hold that run, and
       // refusing it would be this seam deciding their timing was wrong. It costs
       // nothing, because `takePause` clears itself at the first boundary.
+      sayControls();
       send({ type: 'result', id: msg.id, exit: 0 });
       return;
     }

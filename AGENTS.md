@@ -1968,6 +1968,17 @@ updated bidirectionally in real time."* Four rules carry it:
   reaches every client and folds once per id, and `run_deleted` and `questions_answered` make
   the sidebar and the Questions pane read again. What stays per screen: unsent text, unsaved
   edits, scroll, and what each device has open (`deviceKey`, at the owner's decision).
+- **And a new setting cannot be forgotten, because each place a change lives has a closed
+  list.** Asked as *"What happens if we add a new setting or a new tab?"* A tab needs nothing:
+  the phone runs this `src`. What can be missed is who hears a change, so `sync-guard.test.ts`
+  fails on a `vibe.` key not in `MEMORY_KEYS` (shared or per device), on a device key not read
+  through `deviceKey`, on a component reading a shared key without following it, and on an
+  inbound frame not classified as a read or by the frame every client hears it on. In Rust,
+  `COMMAND_REACH` in `control.rs` does the same for every allowed command. Writing them found
+  three gaps, now closed: a key stored or forgotten, and remote access changed or a phone
+  revoked, are announced as `desktop://changed` (`keys` or `remote`) and re-read; and a pause
+  or stop is announced as `controls`, said before the asker's answer and only when it moved.
+  A config key needs nothing: a save is `changed`, and the settings re-read it.
 
 **The window predicts no filename, and `artifacts` is why that was possible** (#223). Four
 tabs — Plans, Plan critique, Code review and Code — draw a run's own artifacts, and the

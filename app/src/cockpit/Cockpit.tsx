@@ -120,6 +120,7 @@ import {
   routeFrame,
   runIdOf,
   runLabel,
+  setControls,
   setFlag,
   setPid,
   settleRejoin,
@@ -1225,6 +1226,12 @@ export function Cockpit({
       });
   }, []);
   useEffect(refreshKeys, [refreshKeys]);
+  // A key stored or forgotten on another client (#371).
+  useEffect(() => {
+    if (!host.inShell()) return;
+    const off = keys.onKeysChanged(refreshKeys);
+    return () => void off.then((f) => f(), () => undefined);
+  }, [refreshKeys]);
 
   // A local tick, because the heartbeat lands every 30 seconds
   // (`progress.intervalMs`) and a clock that only moved when one arrived would
@@ -1305,6 +1312,11 @@ export function Cockpit({
           }
           if (route === 'stale') {
             note('log', `[${from}] a ${frame.type} frame from a host this window is not running a run on`);
+            return;
+          }
+          // Another client's pause or stop (#371): the buttons follow it.
+          if (frame.type === 'controls') {
+            updateLives((l) => setControls(l, from, frame.pausing, frame.stopping));
             return;
           }
           const outcome = invokeOutcome(lives, from, frame);

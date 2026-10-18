@@ -24,6 +24,7 @@ import {
   routeFrame,
   runIdOf,
   runLabel,
+  setControls,
   setFlag,
   setPid,
   started,
@@ -213,6 +214,21 @@ describe('the collection', () => {
     lives = fold(lives, 'run-7', result(7));
     expect(lives[0]?.stopping).toBe(false);
     expect(setFlag(lives, 'run-7', 'pausing', true)[0]?.pausing).toBe(true);
+  });
+
+  test("another client's pause and stop set the flags, never over a gate or an ending (#371)", () => {
+    let lives: LiveRuns = [entry({ pid: null })];
+    lives = fold(lives, 'run-7', say('phase_started', { phase: 'planning' }));
+    lives = setControls(lives, 'run-7', true, false);
+    expect(lives[0]).toMatchObject({ pausing: true, stopping: false });
+    lives = setControls(lives, 'run-7', false, true);
+    expect(lives[0]).toMatchObject({ pausing: false, stopping: true });
+    // Held at a gate, a late pause is not drawn as armed.
+    const held = fold(lives, 'run-7', ask(2));
+    expect(setControls(held, 'run-7', true, true)[0]).toMatchObject({ pausing: false, stopping: true });
+    // A returned run holds neither.
+    const over = fold(lives, 'run-7', result(7));
+    expect(setControls(over, 'run-7', true, true)[0]).toMatchObject({ pausing: false, stopping: false });
   });
 });
 

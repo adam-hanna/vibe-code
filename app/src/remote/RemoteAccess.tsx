@@ -55,7 +55,7 @@ export function RemoteAccess({
 
   useEffect(() => {
     if (!inShell()) return;
-    const f = remote.followStatus(setStatus, [(h) => remote.onPairEnded(h), remote.onConnections]);
+    const f = remote.followStatus(setStatus, [(h) => remote.onPairEnded(h), remote.onConnections, remote.onRemoteChanged]);
     follower.current = f;
     return () => {
       f.stop();

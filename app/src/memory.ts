@@ -38,6 +38,40 @@ import { reread } from './changed';
 /** The window's namespace, minus the conversations, which have a store of their own. */
 const PREFIX = 'vibe.';
 const CHAT_PREFIX = 'vibe.chat.';
+/**
+ * Every key the window remembers, and whose it is (#371).
+ *
+ * **`shared`** is one value for every client of a desktop - the phone included -
+ * and every component that reads one follows it (`useFollowedMemory` or
+ * `useMemoryRevision`), so a change on one screen is on the other at once.
+ * **`device`** is this screen's own, kept under `deviceKey` so a phone never
+ * moves the desktop's: where the window is pointed, how big the text is, the
+ * theme and the last repository named - at the owner's decision.
+ *
+ * A list rather than a convention, so a new setting is a decision about which
+ * it is: `sync-guard.test.ts` fails on a `vibe.` key the list does not name, on
+ * a device key not read through `deviceKey`, and on a component that reads a
+ * shared key without following it.
+ */
+export const MEMORY_KEYS: Readonly<Record<string, 'shared' | 'device'>> = {
+  'vibe.projects': 'shared',
+  'vibe.pinned': 'shared',
+  'vibe.runnames': 'shared',
+  'vibe.projectnames': 'shared',
+  'vibe.drafts': 'shared',
+  'vibe.promptdrafts': 'shared',
+  'vibe.pilot.pick': 'shared',
+  'vibe.pilot.ledger': 'shared',
+  'vibe.pilot.limits': 'shared',
+  'vibe.pilot.watchGates': 'shared',
+  'vibe.update.skipped': 'shared',
+  'vibe.update.check': 'shared',
+  'vibe.where': 'device',
+  'vibe.typescale': 'device',
+  'vibe.theme': 'device',
+  'vibe.repo': 'device',
+};
+
 /** A setting is small and rewritten whole, so a burst of changes is one write. */
 const DEBOUNCE_MS = 200;
 /** The host is spawned before the window loads; these cover it still starting. */

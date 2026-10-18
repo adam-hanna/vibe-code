@@ -472,11 +472,11 @@ async fn run(app: AppHandle, command: &str, args: Value, written: Written) -> Re
         // into the keychain and never comes back out, on either road.
         "key_set" => {
             let a: KeySet = args_of(command, args)?;
-            blocking(move || crate::keys::set_key(a.provider, &a.key, &app.state::<HostProcess>())).await
+            blocking(move || crate::keys::set_key(&app, a.provider, &a.key)).await
         }
         "key_clear" => {
             let a: ProviderArg = args_of(command, args)?;
-            blocking(move || crate::keys::clear_key(a.provider, &app.state::<HostProcess>())).await
+            blocking(move || crate::keys::clear_key(&app, a.provider)).await
         }
         // Presence only, as it is for the window.
         "key_status" => blocking(|| Ok(crate::keys::status())).await,
