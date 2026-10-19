@@ -7,6 +7,60 @@ for a change that breaks an existing config or an existing run.
 Each entry links the pull request that made it and, where there is one, the issue it
 closes.
 
+## 1.7.0 - 2026-10-19
+
+Seventeen pull requests since 1.6.1. **Nothing here breaks an existing config:** no key was renamed or removed, no flag was removed, and no key was added to `vibe.config.json`. What a running setup can notice is listed under Upgrading.
+
+The theme is vibe on your phone. The release now carries an Android app and an iPhone app. A phone pairs with a desktop by scanning a QR code, reaches it by key over iroh wherever either one is, and draws the same cockpit, laid out for a phone: runs, gates, the pilot, settings and all. One phone can pair with several desktops, and one desktop with several phones. Remote access is off until you turn it on.
+
+### Added
+
+- **The phone apps.** A Tauri 2 shell for Android and iOS that draws the same cockpit as the desktop window, built from the same `app/src`. Its calls go to the desktop's own command bodies, so a phone can do what the window can.
+  (#345, [#363](https://github.com/adam-hanna/vibe-code/pull/363))
+- **Pairing a phone, and taking it back.** The desktop has a device key in the OS keychain and shows a QR code that expires after five minutes and works once. A scan still needs a yes on the desktop, so a photographed code is not enough. Either end can unpair, and a removed phone is refused before anything is read.
+  (#341, [#360](https://github.com/adam-hanna/vibe-code/pull/360))
+- **The desktop is reachable by key, wherever it is.** An iroh endpoint that a paired phone dials by the desktop's key, so a reboot or a new IP needs nothing from you. Only paired phones get past the handshake.
+  (#342, [#361](https://github.com/adam-hanna/vibe-code/pull/361))
+- **A phone is another window onto the hosts.** It joins a run that is already going and draws what the window draws, with no gap and no duplicate. Every client sees every answer, and the desktop stamps a phone's frames with its name, so a phone cannot claim to be the desktop.
+  (#343, [#364](https://github.com/adam-hanna/vibe-code/pull/364))
+- **Remote access has a switch, in Settings.** It is off by default. Beside it are start at login, keep the machine awake while a run is going, and an optional relay. A chip shows when a phone is connected, and diagnostics list each phone. Turning it off closes every phone's connection, and a phone can turn it off too.
+  (#344, [#368](https://github.com/adam-hanna/vibe-code/pull/368))
+- **Pair, connect and reconnect from the phone.** The phone scans the QR code, keeps a list of paired desktops and opens one at a time. It reconnects when it comes back to the foreground, when the network changes and when a connection drops, without drawing a run twice. Each way a connection can fail has its own sentence.
+  (#346, [#371](https://github.com/adam-hanna/vibe-code/pull/371), [#374](https://github.com/adam-hanna/vibe-code/pull/374))
+- **The cockpit laid out for a phone.** The side panels are sheets over the main pane, one at a time. The chrome fits on one row. A held gate is decided from a sheet. Commands, Settings, Diagnostics and *This phone* are screens of their own, and the folder chooser takes the whole screen. Each phone keeps its own place and text size.
+  (#347, [#367](https://github.com/adam-hanna/vibe-code/pull/367), [#372](https://github.com/adam-hanna/vibe-code/pull/372))
+- **A light palette**, for the desktop as well as the phone.
+  (#347, [#372](https://github.com/adam-hanna/vibe-code/pull/372))
+- **The phone apps are on the release, with no app store.** `Vibe-android.apk` is signed with the release key. `Vibe-ios-unsigned.ipa` is signed on your own machine through AltStore, SideStore or Sideloadly with a free Apple ID. Both carry attestations and are in `SHA256SUMS`. The new [docs/phone.md](docs/phone.md) covers installing, updating, pairing and moving between desktops, and the README has an "On your phone" section.
+  (#348, #349, [#373](https://github.com/adam-hanna/vibe-code/pull/373), [#374](https://github.com/adam-hanna/vibe-code/pull/374))
+- **Every write is announced to every client, and a run or a setting records who made it.** The service host sends `changed` after a memory, chat or config write, and each window and phone re-reads rather than overwriting. An invoke or a config write can carry an `origin`, recorded once on a run as `run_origin`.
+  (#354, [#359](https://github.com/adam-hanna/vibe-code/pull/359))
+
+### Fixed
+
+- **The app no longer freezes when started from a terminal.** The login-shell probe ran `bash -l -i` in the app's process group, and an interactive bash in the background of a terminal stops its whole group with `SIGTTIN`. The window, the hosts and any running turn stopped until `fg` was typed. The probe now runs in its own session.
+  (#357, [#358](https://github.com/adam-hanna/vibe-code/pull/358))
+
+### Internal
+
+- **The product spec and the engineering design for vibe on your phone**, in `docs/plans/`.
+  (#338, [#353](https://github.com/adam-hanna/vibe-code/pull/353), #340, [#355](https://github.com/adam-hanna/vibe-code/pull/355))
+- **CI runs on `main` and by hand, not on `develop`,** to save Actions minutes. The local gates are the check before a merge into `develop`.
+  ([#369](https://github.com/adam-hanna/vibe-code/pull/369))
+- **`develop` is the default branch.** Per-issue PRs close their issues, and the release PR lists them with `Refs`.
+  ([#337](https://github.com/adam-hanna/vibe-code/pull/337))
+- **The suite fails on two files that differ only in case.** `Pair.tsx` and `pair.ts` built on Linux and failed on macOS, Windows and iOS. `pair.ts` is now `pairing.ts`, and `tests/case-collisions.test.ts` guards every path.
+  ([#375](https://github.com/adam-hanna/vibe-code/pull/375))
+- **The APK signing step says what failed.** It had exited 1 in silence because build-tools 37's `apksigner` prints its signer lines differently.
+  ([#374](https://github.com/adam-hanna/vibe-code/pull/374), [#375](https://github.com/adam-hanna/vibe-code/pull/375))
+- **Tested with claude `2.1.303`** (was `2.1.294`) and codex `0.157.1`, with a recorded fixture for each.
+
+### Upgrading
+
+- **`PROTOCOL_VERSION` is 2.** The window and the host ship together in the app, so this matters only to something else speaking the host protocol, which must now expect `changed` frames.
+- **Remote access is off until you turn it on** in Settings → Remote access. With it off, the desktop binds nothing and reaches no relay.
+- **Install the APK fresh.** This is the first signed APK. A build you made yourself is signed with a different key, and Android will not update one with the other; uninstall it first.
+
 ## 1.6.1 - 2026-10-11
 
 Two pull requests since 1.6.0, both fixes to the desktop builds. **Nothing here breaks an existing config.** 1.6.0 was published only as a pre-release, because its Linux AppImage and its macOS app did not work, so this is the first release of everything listed under 1.6.0 below.
