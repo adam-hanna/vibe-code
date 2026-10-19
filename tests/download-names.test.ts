@@ -33,7 +33,7 @@ const workflow = read('.github', 'workflows', 'release.yml');
 
 /** The stable names the workflow uploads: the right side of `<glob>=<name>`. */
 function uploaded(): string[] {
-  return [...workflow.matchAll(/^\s+bundle\/\S+=(Vibe-\S+)$/gm)].map((m) => m[1] ?? '');
+  return [...workflow.matchAll(/^\s+(?:bundle|mobile-out)\/\S+=(Vibe-\S+)$/gm)].map((m) => m[1] ?? '');
 }
 
 /** The names a page links under `releases/latest/download/`. */
@@ -47,6 +47,8 @@ const sorted = (xs: readonly string[]): string[] => [...new Set(xs)].sort();
 test('the workflow uploads one stable name per installer, each once', () => {
   const names = uploaded();
   assert.deepEqual(sorted(names), [
+    'Vibe-android.apk',
+    'Vibe-ios-unsigned.ipa',
     'Vibe-linux-amd64.deb',
     'Vibe-linux-x86_64.AppImage',
     'Vibe-macos-arm64.dmg',
