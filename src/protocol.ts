@@ -10,6 +10,15 @@ import type { ModelListings } from '@src/models.js';
 import type { Scorecard } from '@src/scorecard.js';
 
 /** Where one CLI is, as `config` reports it (#223). */
+/** A pilot turn in flight, as `pilot_turns` reports it (#371). */
+export interface PilotTurnLive {
+  id: number;
+  chat: string;
+  asked: string;
+  startedAt: number;
+  text: string;
+}
+
 export interface CliStatus {
   configured: string | null;
   via: 'settings' | 'env' | 'search';
@@ -80,6 +89,15 @@ export type Outbound =
   /** A request finished. `exit` is the exit code the same command would have returned. */
   | { type: 'result'; id: number; exit: number }
   /**
+   * A run's pause and stop as they now stand, after a `pause`, an `unpause` or
+   * a `cancel` (#371). The asker learns it from its own `result`; every other
+   * client showing the run learned nothing, so a pause pressed on the phone
+   * left the desktop's button offering a pause that was already armed. Sent to
+   * everyone, and it is the state rather than the request, so a client that
+   * hears it twice draws it once.
+   */
+  | { type: 'controls'; pausing: boolean; stopping: boolean }
+  /**
    * A request could not be run at all.
    *
    * Distinct from a `result` with a non-zero exit, and the distinction matters:
@@ -128,6 +146,21 @@ export type Outbound =
     }
   /** A fragment of a pilot reply, in order (#193). */
   | { type: 'pilot_delta'; id: number; text: string }
+  /**
+   * A pilot turn began, said to every client (#371). `chat` names the
+   * conversation it continues and `asked` what was sent, as the asker's pane
+   * shows it, so a second client showing that conversation draws the message,
+   * the thinking and the reply as its deltas arrive, and keeps its own composer
+   * shut until the turn ends. Only a turn whose frame named its conversation is
+   * announced; an older window sends none and is announced by nothing.
+   */
+  | { type: 'pilot_started'; id: number; chat: string; asked: string; startedAt: number }
+  /**
+   * The pilot turns in flight now, answering `pilot_turns` (#371): for a client
+   * that joins while one is running, which heard no `pilot_started`. `text` is
+   * what the turn has said so far.
+   */
+  | { type: 'pilot_turns'; id: number; turns: readonly PilotTurnLive[] }
   /**
    * A pilot turn that was stopped from the window (#223), answering `pilot_stop`.
    * Its own frame rather than an `error`, because a turn somebody stopped is not
@@ -580,7 +613,18 @@ export type Inbound =
        * before the Codex pilot sent.
        */
       agent?: 'claude' | 'codex';
+      /**
+       * The conversation the turn continues - the window's chat key - and what
+       * was sent, as the pane shows it (#371). Both or neither. With them the
+       * host announces the turn to every client and refuses a second turn on
+       * the same conversation while one is running, since two turns resuming
+       * one session would each answer without the other's messages.
+       */
+      chat?: string;
+      asked?: string;
     }
+  /** The pilot turns in flight now (#371): a read, for a client that has just joined. */
+  | { type: 'pilot_turns'; id: number }
   /**
    * Ask what runs the archive holds (#223, `1b`).
    *
@@ -860,6 +904,8 @@ export function decode(line: string): Decoded {
       }
       return { ok: true, message: { type: 'command', id, dir, program, args } };
     }
+    case 'pilot_turns':
+      return { ok: true, message: { type: 'pilot_turns', id } };
     case 'pilot_stop': {
       const turn = parsed['turn'];
       if (typeof turn !== 'number' || !Number.isInteger(turn)) {
@@ -909,6 +955,16 @@ export function decode(line: string): Decoded {
       if (agent !== undefined && agent !== 'claude' && agent !== 'codex') {
         return { ok: false, id, reason: 'pilot named an agent that was not "claude" or "codex"' };
       }
+      // Both or neither, and a string each (#371): a turn announced without
+      // saying what was sent would draw a reply under nothing.
+      const chat = parsed['chat'];
+      const asked = parsed['asked'];
+      if ((chat === undefined) !== (asked === undefined)) {
+        return { ok: false, id, reason: 'pilot named its conversation without what was sent, or the other way round' };
+      }
+      if (chat !== undefined && (typeof chat !== 'string' || chat === '' || typeof asked !== 'string')) {
+        return { ok: false, id, reason: 'pilot carried a conversation or message that was not text' };
+      }
       // Absent is the CLI's default; present must be one the CLIs take (#296).
       const effort = parsed['effort'];
       if (effort !== undefined && !(EFFORTS as readonly unknown[]).includes(effort)) {
@@ -927,6 +983,7 @@ export function decode(line: string): Decoded {
           resume,
           ...(agent === undefined ? {} : { agent }),
           ...(effort === undefined ? {} : { effort: effort as Effort }),
+          ...(chat === undefined ? {} : { chat: chat as string, asked: asked as string }),
         },
       };
     }

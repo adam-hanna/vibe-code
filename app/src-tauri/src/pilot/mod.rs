@@ -65,6 +65,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use serde::Serialize;
 use tauri::{AppHandle, Manager};
 
 use crate::keys::{self, Provider};
@@ -96,24 +97,79 @@ const MAX_ERROR_BYTES: u64 = 16 * 1024;
 #[derive(Default)]
 pub struct Pilot {
     next: AtomicU64,
-    /// One flag per running turn, set by `pilot_cancel` and read between events.
+    /// One entry per running turn: its stop flag, and what every other client
+    /// is told about it.
+    running: Mutex<HashMap<u64, Running>>,
+}
+
+/// One turn in flight.
+struct Running {
+    /// Set by `pilot_cancel` and read between events.
     ///
     /// The flag rather than killing a thread: there is no safe way to kill one,
     /// and there does not need to be. A cancelled turn stops at the next event,
     /// drops the connection, and says it was cancelled - which takes as long as
     /// one token.
-    running: Mutex<HashMap<u64, Arc<AtomicBool>>>,
+    cancel: Arc<AtomicBool>,
+    /// What it continues, if the window said (#371), with the reply so far, so
+    /// a client that opens the conversation mid-turn starts from the text
+    /// already written rather than from the next delta.
+    live: Option<LiveTurn>,
+}
+
+/// A turn in flight, as `pilot_turns` answers it (#371).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct LiveTurn {
+    pub turn: u64,
+    pub provider: Provider,
+    pub chat: String,
+    pub asked: String,
+    pub asker: String,
+    pub started_at: u64,
+    pub text: String,
+}
+
+/// Said when a conversation already has a turn running here. The host says the
+/// same for the subscription road, in the same words.
+const BUSY: &str = "a reply is already being written in this conversation - wait for it, or stop it";
+
+fn poisoned() -> String {
+    "the pilot lock was poisoned by a panic".to_string()
 }
 
 impl Pilot {
-    fn begin(&self) -> Result<(u64, Arc<AtomicBool>), String> {
+    /// Hand out an id, and refuse a second turn in one conversation (#371):
+    /// two turns continuing one conversation would each answer blind to the
+    /// other, and whichever saved last would erase the other's reply.
+    fn begin(&self, live: Option<(Provider, &request::Announce, u64)>) -> Result<(u64, Arc<AtomicBool>, Option<LiveTurn>), String> {
+        let mut running = self.running.lock().map_err(|_| poisoned())?;
+        if let Some((_, a, _)) = &live {
+            if running.values().any(|r| r.live.as_ref().is_some_and(|l| l.chat == a.chat)) {
+                return Err(BUSY.into());
+            }
+        }
         let turn = self.next.fetch_add(1, Ordering::Relaxed) + 1;
         let cancel = Arc::new(AtomicBool::new(false));
-        self.running
-            .lock()
-            .map_err(|_| "the pilot lock was poisoned by a panic".to_string())?
-            .insert(turn, cancel.clone());
-        Ok((turn, cancel))
+        let live = live.map(|(provider, a, started_at)| LiveTurn {
+            turn,
+            provider,
+            chat: a.chat.clone(),
+            asked: a.asked.clone(),
+            asker: a.asker.clone(),
+            started_at,
+            text: String::new(),
+        });
+        running.insert(turn, Running { cancel: cancel.clone(), live: live.clone() });
+        Ok((turn, cancel, live))
+    }
+
+    /// Add a delta to the text a joining client is given.
+    fn wrote(&self, turn: u64, delta: &str) {
+        if let Ok(mut running) = self.running.lock() {
+            if let Some(live) = running.get_mut(&turn).and_then(|r| r.live.as_mut()) {
+                live.text.push_str(delta);
+            }
+        }
     }
 
     fn finish(&self, turn: u64) {
@@ -124,19 +180,24 @@ impl Pilot {
 
     /// Ask a turn to stop. Unknown ids are refused rather than ignored.
     pub(crate) fn cancel(&self, turn: u64) -> Result<(), String> {
-        let running = self
-            .running
-            .lock()
-            .map_err(|_| "the pilot lock was poisoned by a panic".to_string())?;
+        let running = self.running.lock().map_err(|_| poisoned())?;
         match running.get(&turn) {
-            Some(flag) => {
-                flag.store(true, Ordering::Relaxed);
+            Some(r) => {
+                r.cancel.store(true, Ordering::Relaxed);
                 Ok(())
             }
             // Said rather than swallowed. A window cancelling a turn that is
             // already over should find that out, not watch a button do nothing.
             None => Err(format!("turn {turn} is not running")),
         }
+    }
+
+    /// Every announced turn in flight, oldest first (#371).
+    pub(crate) fn turns(&self) -> Result<Vec<LiveTurn>, String> {
+        let running = self.running.lock().map_err(|_| poisoned())?;
+        let mut turns: Vec<LiveTurn> = running.values().filter_map(|r| r.live.clone()).collect();
+        turns.sort_by_key(|t| t.turn);
+        Ok(turns)
     }
 }
 
@@ -333,6 +394,9 @@ fn drive(app: &AppHandle, turn_id: u64, turn: Turn, cancel: Arc<AtomicBool>) {
     // **The one seam every event leaves through**, so redaction cannot be
     // forgotten at one of the four places a failure is built.
     let emit = |event: PilotEvent| {
+        if let PilotEvent::Text { turn, delta } = &event {
+            app.state::<Pilot>().wrote(*turn, delta);
+        }
         crate::remote::hub::emit(
             app,
             EVENT,
@@ -469,7 +533,14 @@ pub(crate) fn send_turn(app: &AppHandle, state: &Pilot, turn: Turn) -> Result<u6
     // Before an id is handed out, before a key is read, before a socket opens.
     turn.check()?;
 
-    let (id, cancel) = state.begin()?;
+    let announce = turn.announce.as_ref().map(|a| (turn.provider, a, now_ms()));
+    let (id, cancel, live) = state.begin(announce)?;
+    // Before the thread starts, so it reaches every client ahead of the turn's
+    // first event - and ahead of this id reaching the asker, which is why the
+    // asker knows its own turn by `asker` rather than by id.
+    if let Some(l) = live {
+        crate::remote::hub::emit(app, EVENT, &announced(l));
+    }
     let handle = app.clone();
     std::thread::spawn(move || {
         drive(&handle, id, turn, cancel);
@@ -478,9 +549,36 @@ pub(crate) fn send_turn(app: &AppHandle, state: &Pilot, turn: Turn) -> Result<u6
     Ok(id)
 }
 
+fn announced(l: LiveTurn) -> PilotEvent {
+    PilotEvent::Announced {
+        turn: l.turn,
+        provider: l.provider,
+        chat: l.chat,
+        asked: l.asked,
+        asker: l.asker,
+        started_at: l.started_at,
+    }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 #[tauri::command]
 pub fn pilot_cancel(state: tauri::State<'_, Pilot>, turn: u64) -> Result<(), String> {
     state.cancel(turn)
+}
+
+/// The announced turns in flight, with the text each has written so far (#371),
+/// for a client that opens a conversation mid-reply. Never a key: a turn's
+/// conversation key, what was sent and the reply, all of which every client was
+/// already sent as events.
+#[tauri::command]
+pub fn pilot_turns(state: tauri::State<'_, Pilot>) -> Result<Vec<LiveTurn>, String> {
+    state.turns()
 }
 
 #[cfg(test)]
@@ -499,6 +597,7 @@ mod tests {
             }],
             tools: vec![],
             max_tokens: 100,
+            announce: None,
         }
     }
 
@@ -829,7 +928,7 @@ mod tests {
         // find that out instead of watching a button do nothing.
         let pilot = Pilot::default();
         assert!(pilot.cancel(7).is_err());
-        let (id, flag) = pilot.begin().expect("begins");
+        let (id, flag, _) = pilot.begin(None).expect("begins");
         assert!(pilot.cancel(id).is_ok());
         assert!(flag.load(Ordering::Relaxed));
         pilot.finish(id);
@@ -891,11 +990,75 @@ mod tests {
         // Two turns with the same id would have the pane append one reply into
         // the other's bubble.
         let pilot = Pilot::default();
-        let (first, _) = pilot.begin().expect("begins");
-        let (second, _) = pilot.begin().expect("begins");
+        let (first, _, _) = pilot.begin(None).expect("begins");
+        let (second, _, _) = pilot.begin(None).expect("begins");
         assert_ne!(first, second);
         pilot.finish(first);
-        let (third, _) = pilot.begin().expect("begins");
+        let (third, _, _) = pilot.begin(None).expect("begins");
         assert_ne!(third, first, "an id is never reused after its turn ends");
+    }
+
+    fn asking(chat: &str) -> request::Announce {
+        request::Announce { chat: chat.into(), asked: "pr?".into(), asker: "w1".into() }
+    }
+
+    #[test]
+    fn a_turn_that_names_its_conversation_is_listed_with_its_text_so_far() {
+        // #371: a client that opens the conversation mid-reply starts from the
+        // text already written, and a settled turn is no longer in flight.
+        let pilot = Pilot::default();
+        let a = asking("vibe.chat./repo::run-1");
+        let (id, _, live) = pilot.begin(Some((Provider::Anthropic, &a, 7))).expect("begins");
+        let live = live.expect("announced");
+        assert_eq!((live.turn, live.chat.as_str(), live.asker.as_str(), live.started_at), (id, "vibe.chat./repo::run-1", "w1", 7));
+        pilot.wrote(id, "No, ");
+        pilot.wrote(id, "not yet.");
+        let turns = pilot.turns().expect("reads");
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].text, "No, not yet.");
+        pilot.finish(id);
+        assert!(pilot.turns().expect("reads").is_empty());
+    }
+
+    #[test]
+    fn a_turn_with_no_conversation_named_is_not_listed() {
+        let pilot = Pilot::default();
+        let (id, _, live) = pilot.begin(None).expect("begins");
+        assert!(live.is_none());
+        pilot.wrote(id, "hi");
+        assert!(pilot.turns().expect("reads").is_empty());
+        pilot.cancel(id).expect("still cancellable");
+    }
+
+    #[test]
+    fn one_conversation_takes_one_turn_at_a_time() {
+        let pilot = Pilot::default();
+        let one = asking("vibe.chat./repo::run-1");
+        let (first, _, _) = pilot.begin(Some((Provider::Openai, &one, 1))).expect("begins");
+        let refused = pilot.begin(Some((Provider::Openai, &one, 2))).expect_err("refused");
+        assert!(refused.contains("already being written in this conversation"), "{refused}");
+        // Another conversation is not held up, and neither is an unnamed turn.
+        pilot.begin(Some((Provider::Openai, &asking("vibe.chat./repo::run-2"), 3))).expect("begins");
+        pilot.begin(None).expect("begins");
+        pilot.finish(first);
+        pilot.begin(Some((Provider::Openai, &one, 4))).expect("the conversation takes a turn again");
+    }
+
+    #[test]
+    fn the_announcement_carries_what_another_client_draws() {
+        let event = serde_json::to_value(announced(LiveTurn {
+            turn: 3,
+            provider: Provider::Openai,
+            chat: "c".into(),
+            asked: "pr?".into(),
+            asker: "w1".into(),
+            started_at: 9,
+            text: "ignored".into(),
+        }))
+        .expect("serialises");
+        assert_eq!(
+            event,
+            serde_json::json!({"kind":"announced","turn":3,"provider":"openai","chat":"c","asked":"pr?","asker":"w1","started_at":9})
+        );
     }
 }

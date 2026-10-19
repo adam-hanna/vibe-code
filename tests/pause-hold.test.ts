@@ -60,7 +60,11 @@ test('a pause is acknowledged at once, because accepted is not honoured', () => 
   // taken", and the `ask` that follows is what says a hold happened.
   const { sent, session } = idle();
   session.receive(line({ type: 'pause', id: 5 }));
-  assert.deepEqual(sent, [{ type: 'result', id: 5, exit: 0 }]);
+  // Every client hears the pause armed (#371), and the asker's answer follows at once.
+  assert.deepEqual(sent, [
+    { type: 'controls', pausing: true, stopping: false },
+    { type: 'result', id: 5, exit: 0 },
+  ]);
 });
 
 test('the hold is taken exactly once, and clears itself', async () => {
@@ -117,7 +121,7 @@ test('a pause asked for before a run starts is kept, not refused', async () => {
   await settle();
   assert.deepEqual(
     sent.map((m) => m.type),
-    ['result', 'result'],
+    ['controls', 'result', 'result'],
   );
 
   session.receive(line({ type: 'shutdown', id: 3 }));
@@ -187,4 +191,23 @@ test('an unpause with nothing armed changes nothing', () => {
   session.receive(line({ type: 'unpause', id: 7 }));
   assert.deepEqual(sent, [{ type: 'result', id: 7, exit: 1 }]);
   assert.equal(session.host.takePause?.(), false);
+});
+
+test('every client hears a pause, an unpause and a stop as they now stand, before the answer (#371)', () => {
+  const { sent, session } = idle();
+  session.receive(line({ type: 'pause', id: 1 }));
+  assert.deepEqual(sent.slice(-2), [
+    { type: 'controls', pausing: true, stopping: false },
+    { type: 'result', id: 1, exit: 0 },
+  ]);
+  // A second pause moves nothing, so it says nothing new.
+  session.receive(line({ type: 'pause', id: 2 }));
+  assert.deepEqual(sent.at(-2), { type: 'result', id: 1, exit: 0 });
+  session.receive(line({ type: 'unpause', id: 3 }));
+  assert.deepEqual(sent.at(-2), { type: 'controls', pausing: false, stopping: false });
+  // A boundary taking the pause is told by its ask, so the next pause is said again.
+  session.receive(line({ type: 'pause', id: 4 }));
+  assert.equal(session.host.takePause?.(), true);
+  session.receive(line({ type: 'pause', id: 5 }));
+  assert.deepEqual(sent.at(-2), { type: 'controls', pausing: true, stopping: false });
 });

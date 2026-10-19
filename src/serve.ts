@@ -1,4 +1,4 @@
-import { requestCancel } from '@src/cancel.js';
+import { cancelRequested, requestCancel } from '@src/cancel.js';
 import { main } from '@src/cli.js';
 import { commandLogDir } from '@src/commandlog.js';
 import { adoptedSnapshot, keepCommandLogs, refused as commandRefused, startCommand, stopTiedCommands, stopCommand } from '@src/commands.js';
@@ -43,7 +43,7 @@ import type { RunLoop } from '@src/cli.js';
 import type { GateContext, Host } from '@src/host.js';
 import type { Narration } from '@src/log.js';
 import type { PilotChatOptions, PilotChatResult } from '@src/pilotchat.js';
-import type { Outbound } from '@src/protocol.js';
+import type { Outbound, PilotTurnLive } from '@src/protocol.js';
 import type { RunSummary } from '@src/types.js';
 import { scoreArchive } from '@src/scorecard.js';
 import type { Scorecard } from '@src/scorecard.js';
@@ -297,6 +297,12 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
   const chatCodex = deps.pilotCodex ?? pilotCodex;
   /** Subscription pilot turns in flight, by request id, so `pilot_stop` can reach one. */
   const pilotTurns = new Map<number, AbortController>();
+  /**
+   * The announced turns in flight, by request id (#371): what `pilot_turns`
+   * answers a client that joins mid-turn with, and how a second turn on one
+   * conversation is refused. Only a turn whose frame named its conversation.
+   */
+  const announced = new Map<number, PilotTurnLive>();
   const archive = deps.archive ?? ((dir: string) => listRuns(dir));
   const stats = deps.stats ?? scoreArchive;
   const listModelsWith = deps.models ?? listModels;
@@ -367,6 +373,19 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
    */
   let pauseRequested = false;
 
+  /**
+   * Every client hears a pause or a stop as it now stands (#371), not only the
+   * asker - said before the asker's answer, and only when it moved, so a second
+   * pause or an unpause with nothing armed says nothing new.
+   */
+  let saidControls = { pausing: false, stopping: false };
+  const sayControls = (): void => {
+    const now = { pausing: pauseRequested, stopping: cancelRequested() !== null };
+    if (now.pausing === saidControls.pausing && now.stopping === saidControls.stopping) return;
+    saidControls = now;
+    send({ type: 'controls', ...now });
+  };
+
   const host: Host = {
     decide: (ctx: GateContext) =>
       new Promise<unknown>((resolve) => {
@@ -377,6 +396,8 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
     takePause: () => {
       const asked = pauseRequested;
       pauseRequested = false;
+      // Not said: the ask that follows is how every client learns it was taken.
+      saidControls = { ...saidControls, pausing: false };
       return asked;
     },
   };
@@ -416,6 +437,8 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
         // A pause asked for before any run starts still holds that run: this
         // clears only when a run returns.
         pauseRequested = false;
+        // Not said either: every client draws a returned run as neither.
+        saidControls = { pausing: false, stopping: false };
         settleIfDone();
       });
   };
@@ -878,6 +901,11 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
       return;
     }
 
+    if (msg.type === 'pilot_turns') {
+      send({ type: 'pilot_turns', id: msg.id, turns: [...announced.values()] });
+      return;
+    }
+
     if (msg.type === 'pilot_stop') {
       // A turn that has already ended is not an error: the click raced the
       // reply, and the reply is what the pane is about to draw anyway.
@@ -920,10 +948,31 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
         send({ type: 'error', id, message: err instanceof Error ? err.message : String(err) });
         return;
       }
+      // One turn per conversation (#371). Two clients showing one chat could
+      // otherwise each send a message into it at once, and two turns resuming
+      // one session would each answer without the other's messages.
+      const chatKey = msg.chat;
+      if (chatKey !== undefined) {
+        const busy = [...announced.values()].find((t) => t.chat === chatKey);
+        if (busy !== undefined) {
+          send({
+            type: 'error',
+            id,
+            message: 'a reply is already being written in this conversation - wait for it, or stop it',
+          });
+          return;
+        }
+      }
       // This turn's own off switch (#223), held until it settles either way.
       const stopper = new AbortController();
       pilotTurns.set(id, stopper);
       const turnStarted = Date.now();
+      // Said to every client (#371), so the one beside the asker draws it.
+      if (chatKey !== undefined) {
+        const asked = msg.asked ?? '';
+        announced.set(id, { id, chat: chatKey, asked, startedAt: turnStarted, text: '' });
+        send({ type: 'pilot_started', id, chat: chatKey, asked, startedAt: turnStarted });
+      }
       void (msg.agent === 'codex' ? chatCodex : chat)({
         prompt: msg.prompt,
         system: msg.system,
@@ -946,6 +995,8 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
         timeoutMs: granted.timeoutMs,
         signal: stopper.signal,
         onDelta: (text: string) => {
+          const live = announced.get(id);
+          if (live !== undefined) live.text += text;
           send({ type: 'pilot_delta', id, text });
         },
       })
@@ -984,6 +1035,7 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
         })
         .finally(() => {
           pilotTurns.delete(id);
+          announced.delete(id);
         });
       return;
     }
@@ -999,6 +1051,7 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
       // The count is on the wire because it is a different thing to tell
       // somebody: zero means the cancel arrived between turns, so the run still
       // ends but no work was discarded.
+      sayControls();
       send({ type: 'result', id: msg.id, exit: killed });
       return;
     }
@@ -1009,6 +1062,7 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
       // pause was asked for. Never an error - too late is a run that is holding.
       const had = pauseRequested;
       pauseRequested = false;
+      sayControls();
       send({ type: 'result', id: msg.id, exit: had ? 0 : 1 });
       return;
     }
@@ -1023,6 +1077,7 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
       // presses pause a moment before a run starts meant to hold that run, and
       // refusing it would be this seam deciding their timing was wrong. It costs
       // nothing, because `takePause` clears itself at the first boundary.
+      sayControls();
       send({ type: 'result', id: msg.id, exit: 0 });
       return;
     }

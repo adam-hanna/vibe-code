@@ -6,11 +6,19 @@ import settings from './Settings.tsx?raw';
 // as saved. Every save-on-blur field must re-seed when a save is refused.
 test('every field that saves on blur resets when a save is refused', () => {
   const fields = ['NumberField', 'TextField', 'ListField'];
+  // Case 2 (#371): the re-seed moved into one hook every field takes, which
+  // also keeps a field somebody is typing in - but never past a refusal.
+  const hookAt = settings.indexOf('function useTyped(');
+  const hook = settings.slice(hookAt, settings.indexOf('\nfunction ', hookAt + 1));
+  expect(hook).toMatch(/useContext\(Refusals\)/);
+  expect(hook).toMatch(/refusals\]\);/);
+  expect(hook).toMatch(/if \(editing\.current && !byRefusal\) return;/);
   for (const name of fields) {
     const start = settings.indexOf(`function ${name}(`);
     const body = settings.slice(start, settings.indexOf('\nfunction ', start + 1));
-    expect(body, name).toMatch(/useContext\(Refusals\)/);
-    expect(body, name).toMatch(/refusals\]\);/);
+    expect(body, name).toMatch(/useTyped\(/);
+    expect(body, name).toMatch(/\{\.\.\.focus\}/);
+    expect(body, name).toMatch(/left\(\);/);
   }
   expect(settings).toMatch(/setRefusals\(\(n\) => n \+ 1\)/);
   expect(settings).toMatch(/<Refusals\.Provider value=\{refusals\}>/);

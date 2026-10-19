@@ -13,7 +13,8 @@ test('nothing is restored or saved before the stored conversations are read', ()
   expect(pane).toMatch(/if \(!chats\.ready\) return;/);
   // Case 2 (#246): `opened` is gone with the pane's adoption; the loader only
   // restores, and the cockpit's adopter waits for `chats.ready` as well.
-  expect(pane).toMatch(/\[dir, runId, chats\.ready\]/);
+  // Case 2 (#371): and when another client's save moved the chat on screen.
+  expect(pane).toMatch(/\[dir, runId, chats\.ready, revision\]/);
 });
 
 test('a failed save is shown, and a migrated conversation leaves localStorage only once the host has it', () => {

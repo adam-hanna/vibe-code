@@ -81,6 +81,12 @@ export interface Turn {
   tools?: readonly Tool[];
   /** Omitted to take Rust's default. Above its ceiling the request is refused, not clamped. */
   max_tokens?: number;
+  /**
+   * Which conversation this continues, so every other client can draw it (#371).
+   * `asker` is this window's own token: the announcement reaches every client
+   * before the id comes back here, so the asker knows its turn by this.
+   */
+  announce?: { chat: string; asked: string; asker: string };
 }
 
 /**
@@ -103,6 +109,16 @@ export interface Usage {
 }
 
 export type PilotEvent =
+  /** A turn has begun in a conversation, said to every client (#371). Never final. */
+  | {
+      kind: 'announced';
+      turn: number;
+      provider: Provider;
+      chat: string;
+      asked: string;
+      asker: string;
+      started_at: number;
+    }
   | { kind: 'started'; turn: number; provider: Provider; model: string | null }
   | { kind: 'text'; turn: number; delta: string }
   /**
@@ -143,6 +159,7 @@ export function isPilotEvent(v: unknown): v is PilotEvent {
   const kind: unknown = (v as { kind?: unknown }).kind;
   if (typeof (v as { turn?: unknown }).turn !== 'number') return false;
   return (
+    kind === 'announced' ||
     kind === 'started' ||
     kind === 'text' ||
     kind === 'tool_call' ||
@@ -161,6 +178,22 @@ export function send(turn: Turn): Promise<number> {
 /** Ask a turn to stop. Rejects if it is not running, rather than doing nothing. */
 export function cancel(turn: number): Promise<void> {
   return invoke('pilot_cancel', { turn });
+}
+
+/** An announced turn in flight, with what it has written so far (#371). */
+export interface LiveTurn {
+  turn: number;
+  provider: Provider;
+  chat: string;
+  asked: string;
+  asker: string;
+  started_at: number;
+  text: string;
+}
+
+/** The announced turns in flight, for a pane that opens a conversation mid-reply (#371). */
+export function turnsNow(): Promise<LiveTurn[]> {
+  return invoke<LiveTurn[]>('pilot_turns');
 }
 
 /** Listen for events. Returns a function that stops. */

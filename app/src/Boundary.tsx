@@ -63,7 +63,7 @@ export class Boundary extends Component<{ children: ReactNode }, State> {
     if (error === null) return this.props.children;
 
     return (
-      <div className="flex h-screen select-text flex-col gap-(--space-3) overflow-y-auto p-(--space-6)">
+      <div className="flex h-full select-text flex-col gap-(--space-3) overflow-y-auto p-(--space-6)">
         <div className="flex flex-col gap-(--space-2)">
           <span className={KICKER}>the window stopped</span>
           <span className="max-w-[76ch] text-emphasis [font:var(--type-body)]">

@@ -67,8 +67,11 @@ export function NewWorkstream({
   onClose,
   busy,
   locked = false,
+  configEpoch = 0,
 }: {
   dir: string;
+  /** Moves when the project's or the global file was saved, by any client (#371). */
+  configEpoch?: number;
   onDir: (dir: string) => void;
   /**
    * Hand the brief to the pilot instead of starting a run (#223).
@@ -130,7 +133,7 @@ export function NewWorkstream({
       // because the config could not be read would block the one action a new
       // user knows how to take.
       .catch(() => setCfg(null));
-  }, [dir]);
+  }, [dir, configEpoch]);
 
   const defaults = (cfg?.effective as { gates?: Gates } | undefined)?.gates ?? {};
   const differing = Object.entries(gates).filter(([b, m]) => defaults[b] !== m);

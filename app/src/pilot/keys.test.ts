@@ -83,6 +83,11 @@ describe('the webview can store a key and can never read one', () => {
       // what replaced a model list compiled into this window.
       'pilot_models',
       'pilot_send',
+      // Case 2 (#371): the announced pilot turns in flight, for a client that
+      // opens a conversation mid-reply. It answers with what every client was
+      // already sent as events - the conversation key, what was sent and the
+      // reply so far - and never a key.
+      'pilot_turns',
       // Case 2 (#341): four commands, on purpose - the paired-phones list,
       // a pairing code to show, the answer to *Allow this phone?* and revoking
       // one. None reads, returns or deletes the device key, which the tests

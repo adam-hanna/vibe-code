@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Activity, ChevronLeft, PanelLeft, PanelRightClose, PanelRightOpen, Plus, Settings as SettingsIcon, Smartphone, Terminal, X } from 'lucide-react';
+import { Activity, ChevronLeft, PanelLeft, PanelRightClose, PanelRightOpen, Monitor, Plus, Settings as SettingsIcon, Smartphone, Terminal, X } from 'lucide-react';
 import { usePanelRef } from 'react-resizable-panels';
 import type { Layout, LayoutChangedMeta, PanelImperativeHandle } from 'react-resizable-panels';
 import { Badge } from '@/ui/badge';
@@ -115,26 +115,32 @@ import {
   onScreen,
   pruneEnded,
   quitList,
+  rejoin,
   repoOf,
   routeFrame,
   runIdOf,
   runLabel,
+  setControls,
   setFlag,
   setPid,
+  settleRejoin,
+  ENDED_WHILE_AWAY,
   updateRun,
   writeRefusal,
 } from './hosts';
+import { exitNotice, offerNotice, runNotice } from './notices';
 import type { CapRead, LiveRun, LiveRuns } from './hosts';
 import { useStats } from './useStats';
 import { rounds } from './rounds';
 import { implementArgv, readLaunchArgv, resumeArgv } from './argv';
 import { LIGHT_QUERY, SCALE_KEY, SCALE_VAR, THEME_KEY, readScale, readTheme, resolveTheme, writable, type Theme } from './appearance';
-import { readLimits, writeLimits } from '../pilot/ledger';
+import { LIMITS_KEY, readLimits, writeLimits } from '../pilot/ledger';
 import type { PilotLimits } from '../pilot/ledger';
 import type { Raise } from './argv';
 import type { Caps } from './Footer';
 import type { Effect } from '../pilot/tools';
-import { memory } from '../memory';
+import { showsConfig } from '../changed';
+import { memory, useFollowedMemory, useMemoryRevision } from '../memory';
 import { connectedNames } from '../remote/pairing';
 import { useRemoteStatus } from '../remote/useRemoteStatus';
 import type { Run } from './model';
@@ -239,7 +245,16 @@ interface Wire {
   unknown: readonly string[];
 }
 
-export function Cockpit() {
+export function Cockpit({
+  onDesktops,
+}: {
+  /**
+   * The phone's way back to its list of paired desktops (#346), drawn in the
+   * sidebar's head beside This phone. Absent on the desktop. It was a fixed
+   * button over the whole cockpit, and it covered the gate sheet's continue.
+   */
+  onDesktops?: (() => void) | undefined;
+} = {}) {
   /**
    * Every run this window has started and not yet let go of (#246).
    *
@@ -371,8 +386,9 @@ export function Cockpit() {
    * memory, never a project's.
    */
   const [update, setUpdate] = useState<UpdateInfo | null>(null);
-  const [skipped, setSkipped] = useState<string | null>(() => memory.getItem(SKIP_KEY));
-  const [checkUpdates, setCheckUpdates] = useState(() => checkEnabled(memory.getItem(CHECK_KEY)));
+  // Both followed (#371): a version skipped on one client is skipped on all.
+  const [skipped, setSkipped] = useFollowedMemory<string | null>(SKIP_KEY, () => memory.getItem(SKIP_KEY));
+  const [checkUpdates, setCheckUpdates] = useFollowedMemory(CHECK_KEY, () => checkEnabled(memory.getItem(CHECK_KEY)));
   /**
    * A phone that was allowed and could not be saved (#341). The prompt that
    * learns it is mounted here and closes on the same answer, so the sentence is
@@ -476,7 +492,8 @@ export function Cockpit() {
    * The window's memory (`memory.ts`) and not `vibe.config.json`, unchanged: this is the *pilot's*
    * ceiling, it is this machine's, and the run's two ceilings are the project's.
    */
-  const [limits, setLimits] = useState<PilotLimits>(readLimits);
+  // Followed (#371): a ceiling set on the phone is the ceiling here.
+  const [limits, setLimits] = useFollowedMemory<PilotLimits>(LIMITS_KEY, readLimits);
   const relimit = useCallback((next: PilotLimits) => {
     setLimits(next);
     writeLimits(next);
@@ -678,6 +695,31 @@ export function Cockpit() {
    * including the pilot's safe list, which an open conversation acts on.
    */
   const [configEpoch, setConfigEpoch] = useState(0);
+  // And by another client's save (#371): a gate mode, a cap or the pilot's
+  // access changed on the phone is what this window acts on from then on. The
+  // file for all projects counts as well as this project's own.
+  const repoNow = useRef(repoDir);
+  repoNow.current = repoDir;
+  useEffect(() => {
+    if (!host.inShell()) return;
+    let off: (() => void) | null = null;
+    let live = true;
+    void host
+      .onChanged((c) => {
+        if (c.what !== 'config') return;
+        if (showsConfig(c.key, 'global', repoNow.current) || showsConfig(c.key, 'project', repoNow.current)) {
+          setConfigEpoch((n) => n + 1);
+        }
+      })
+      .then((stop) => {
+        if (live) off = stop;
+        else stop();
+      });
+    return () => {
+      live = false;
+      off?.();
+    };
+  }, []);
   useEffect(() => {
     if (repoDir.trim() === '' || !host.inShell() || !wire.connected) return;
     let cancelled = false;
@@ -895,16 +937,33 @@ export function Cockpit() {
    * second press in the same tick sees the claim and is refused.
    */
   const draftsRef = useRef<readonly Draft[]>(drafts);
-  const updateDrafts = useCallback((change: (list: readonly Draft[]) => readonly Draft[]) => {
+
+  const updateDrafts = useCallback((change: (list: readonly Draft[]) => readonly Draft[], save = true) => {
     const next = change(draftsRef.current);
     draftsRef.current = next;
     setDrafts(next);
+    if (!save) return;
     try {
       memory.setItem(DRAFTS_KEY, JSON.stringify(next));
     } catch {
       // The drafts still work for this session; they will not be back next time.
     }
   }, []);
+  // Another client's drafts (#371): a run asked for on the phone is a row here
+  // at once. Through the one writer, and never saved back.
+  const draftsElsewhere = useMemoryRevision(DRAFTS_KEY);
+  const draftsSeen = useRef(draftsElsewhere);
+  useEffect(() => {
+    if (draftsSeen.current === draftsElsewhere) return;
+    draftsSeen.current = draftsElsewhere;
+    let next: readonly Draft[];
+    try {
+      next = readDrafts(memory.getItem(DRAFTS_KEY));
+    } catch {
+      return;
+    }
+    updateDrafts(() => next, false);
+  }, [draftsElsewhere, updateDrafts]);
   /**
    * Point the project on screen at another directory, from its settings (#223).
    * `moveProject` decides; this writes the four lists it returns, moves any
@@ -1102,6 +1161,13 @@ export function Cockpit() {
    * draft whose run ended before saying who it is goes back to unlaunched, so it
    * can be proposed again rather than sitting at *starting* for ever.
    */
+  /** The newest reconnect generation (#346); a settle for any older one is dropped. */
+  const rejoinGen = useRef(0);
+  /** How a notification names a run (#346): as the sidebar does. */
+  const noticeLabel = (handle: string): string => {
+    const e = livesRef.current.find((x) => x.handle === handle);
+    return e === undefined ? 'A run' : labelOf(e);
+  };
   const endLive = useCallback(
     (handle: string) => {
       const e = livesRef.current.find((x) => x.handle === handle);
@@ -1160,6 +1226,12 @@ export function Cockpit() {
       });
   }, []);
   useEffect(refreshKeys, [refreshKeys]);
+  // A key stored or forgotten on another client (#371).
+  useEffect(() => {
+    if (!host.inShell()) return;
+    const off = keys.onKeysChanged(refreshKeys);
+    return () => void off.then((f) => f(), () => undefined);
+  }, [refreshKeys]);
 
   // A local tick, because the heartbeat lands every 30 seconds
   // (`progress.intervalMs`) and a clock that only moved when one arrived would
@@ -1242,7 +1314,15 @@ export function Cockpit() {
             note('log', `[${from}] a ${frame.type} frame from a host this window is not running a run on`);
             return;
           }
+          // Another client's pause or stop (#371): the buttons follow it.
+          if (frame.type === 'controls') {
+            updateLives((l) => setControls(l, from, frame.pausing, frame.stopping));
+            return;
+          }
           const outcome = invokeOutcome(lives, from, frame);
+          // A phone's notification (#346), read off the frame's type and id
+          // exactly as the fold below reads it; once per key.
+          offerNotice(runNotice(from, frame, outcome, noticeLabel(from)));
           const at = Date.now();
           // A watched run's ending cannot be told from a pause's answer until
           // its invoke id is known, so it waits to be claimed.
@@ -1278,6 +1358,7 @@ export function Cockpit() {
             setWire((w) => ({ ...w, connected: false, hostPid: null, failure: hostExitWording(code) }));
           } else if (means === 'run-lost') {
             // That run, and no other (#246).
+            offerNotice(exitNotice(from, code, noticeLabel(from)));
             const at = Date.now();
             updateLives((l) => updateRun(l, from, (r) => hostLost(r, at, hostExitWording(code))));
             endLive(from);
@@ -1285,6 +1366,25 @@ export function Cockpit() {
           // After the host has left Rust's set, so this read is the one that
           // settles what the diagnostics popover lists.
           refreshStatus();
+        },
+        // A phone reconnected (#346): the desktop is about to replay every live
+        // run's frames, so each starts again from its base rather than folding
+        // them twice. Settled once that generation's replay is released.
+        rejoined: (generation) => {
+          rejoinGen.current = generation;
+          updateLives((l) => rejoin(l));
+        },
+        settle: (generation) => {
+          void host
+            .status()
+            .then((status) => {
+              if (rejoinGen.current !== generation) return;
+              const alive = new Set(status.runs.map((r) => r.handle));
+              const settledNow = settleRejoin(livesRef.current, alive, Date.now(), ENDED_WHILE_AWAY);
+              updateLives(() => settledNow.lives);
+              for (const handle of settledNow.lost) endLive(handle);
+            })
+            .catch((err: unknown) => note('log', `could not settle after a reconnect: ${String(err)}`));
         },
       });
       if (cancelled) {
@@ -1490,6 +1590,8 @@ export function Cockpit() {
         pausing: false,
         stopping: false,
         run: { ...(seed ?? emptyRun()), protocol: protocolRef.current },
+        // What a phone's reconnect refolds the replay onto (#346).
+        base: seed ?? emptyRun(),
       };
       updateLives((l) => addRun(l, entry));
       everSeen.current.add(handle);
@@ -2077,7 +2179,7 @@ export function Cockpit() {
 
   return (
     <TooltipProvider>
-    <div className="flex h-screen flex-col bg-panel text-primary">
+    <div className="flex h-full flex-col bg-panel text-primary">
 
       {confirmStop && (
         <StopConfirm
@@ -2149,6 +2251,7 @@ export function Cockpit() {
       {composing !== null && (
         <NewWorkstream
           dir={composing.dir}
+          configEpoch={configEpoch}
           // A project's `＋` has already settled this, so the composer states it
           // rather than offering a field. Only the unlocked one can move the
           // window's own repository.
@@ -2296,6 +2399,11 @@ export function Cockpit() {
               something head it. */}
           {SURFACE.compactChrome && panels.sidebar && (
             <div className="flex flex-none items-center justify-end gap-1 border-b border-rule-structure px-2 py-1">
+              {onDesktops !== undefined && (
+                <Tool label="Desktops" className="mr-auto" onClick={onDesktops}>
+                  <Monitor className="size-5" aria-hidden />
+                </Tool>
+              )}
               <Tool label="New run" onClick={act.newRun}>
                 <Plus className="size-5" aria-hidden />
               </Tool>

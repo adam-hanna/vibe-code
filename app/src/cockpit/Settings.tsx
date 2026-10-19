@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { Badge } from '@/ui/badge';
 import { Button } from '@/ui/button';
@@ -18,13 +18,14 @@ import { DRAFTS_KEY, draftsFor, readDrafts, removeDraft, saveDraft } from './dra
 import type { Draft } from './drafts';
 import type { KeyStatus } from '../pilot/keys';
 import type { ConfigFrame, PromptsFrame } from '../host';
-import { memory } from '../memory';
+import { memory, useMemoryRevision } from '../memory';
 import { CLI_DEFAULT, loadCliModels, optionsFor, useModels, whyNot } from './models';
 import { backToCommand, convert, gatesPatch, pastedEscapes, readGates, ready, toRow } from './gateform';
 import type { Gate, GateRow } from './gateform';
 import type { Listing } from './models';
 import { RemoteAccess } from '../remote/RemoteAccess';
 import { SURFACE } from '../surface';
+import { confirmed } from '../confirm';
 
 /**
  * A table as a phone draws it (#347): each row a block, its cells flowing and
@@ -421,6 +422,44 @@ function Key({ name }: { name: string }) {
   return <code className={S.key}>{name}</code>;
 }
 
+/**
+ * A field's text: seeded from the value in force, and seeded again when that
+ * value moves or a save is refused (#371). Another client saving the same
+ * setting moves it, and the field follows - unless somebody is typing in it
+ * here, whose text is kept. They leave it and their text is compared with the
+ * value now in force, so what they typed is what is saved. A refusal always
+ * puts back what is in force, focused or not, since that is what it is for.
+ */
+function useTyped(inForce: string): {
+  typed: string;
+  setTyped: (next: string) => void;
+  focus: { onFocus: () => void };
+  left: () => void;
+} {
+  const [typed, setTyped] = useState(inForce);
+  const refusals = useContext(Refusals);
+  const editing = useRef(false);
+  const refused = useRef(refusals);
+  useEffect(() => {
+    const byRefusal = refused.current !== refusals;
+    refused.current = refusals;
+    if (editing.current && !byRefusal) return;
+    setTyped(inForce);
+  }, [inForce, refusals]);
+  return {
+    typed,
+    setTyped,
+    focus: {
+      onFocus: () => {
+        editing.current = true;
+      },
+    },
+    left: () => {
+      editing.current = false;
+    },
+  };
+}
+
 function NumberField({
   id,
   value,
@@ -432,15 +471,12 @@ function NumberField({
   disabled: boolean;
   onSave: (next: number) => void;
 }) {
-  const [typed, setTyped] = useState(value === undefined ? '' : String(value));
-  const refusals = useContext(Refusals);
   // Re-seeded when the saved value changes, and when a save is refused, so the
   // field shows what is actually in force rather than what was typed at it.
-  useEffect(() => {
-    setTyped(value === undefined ? '' : String(value));
-  }, [value, refusals]);
+  const { typed, setTyped, focus, left } = useTyped(value === undefined ? '' : String(value));
 
   const commit = (): void => {
+    left();
     const n = Number(typed);
     if (typed.trim() === '' || !Number.isFinite(n) || n < 0) {
       setTyped(value === undefined ? '' : String(value));
@@ -456,6 +492,7 @@ function NumberField({
       value={typed}
       disabled={disabled}
       inputMode="numeric"
+      {...focus}
       onChange={(e) => setTyped(e.target.value)}
       onBlur={commit}
       onKeyDown={(e) => {
@@ -489,11 +526,7 @@ function TextField({
   disabled: boolean;
   onSave: (next: string) => void;
 }) {
-  const [typed, setTyped] = useState(value ?? '');
-  const refusals = useContext(Refusals);
-  useEffect(() => {
-    setTyped(value ?? '');
-  }, [value, refusals]);
+  const { typed, setTyped, focus, left } = useTyped(value ?? '');
 
   return (
     <input
@@ -503,8 +536,10 @@ function TextField({
       disabled={disabled}
       placeholder={placeholder}
       spellCheck={false}
+      {...focus}
       onChange={(e) => setTyped(e.target.value)}
       onBlur={() => {
+        left();
         if (typed.trim() !== (value ?? '').trim()) onSave(typed.trim());
       }}
       onKeyDown={(e) => {
@@ -543,11 +578,7 @@ function ProseField({
   disabled: boolean;
   onSave: (next: string) => void;
 }) {
-  const [typed, setTyped] = useState(value);
-  const refusals = useContext(Refusals);
-  useEffect(() => {
-    setTyped(value);
-  }, [value, refusals]);
+  const { typed, setTyped, focus, left } = useTyped(value);
   return (
     <textarea
       id={id}
@@ -556,8 +587,10 @@ function ProseField({
       value={typed}
       disabled={disabled}
       placeholder={placeholder}
+      {...focus}
       onChange={(e) => setTyped(e.target.value)}
       onBlur={() => {
+        left();
         if (typed !== value) onSave(typed);
       }}
       onKeyDown={(e) => {
@@ -581,11 +614,7 @@ function ListField({
   onSave: (next: string[]) => void;
 }) {
   const joined = value.join('\n');
-  const [typed, setTyped] = useState(joined);
-  const refusals = useContext(Refusals);
-  useEffect(() => {
-    setTyped(joined);
-  }, [joined, refusals]);
+  const { typed, setTyped, focus, left } = useTyped(joined);
   return (
     <textarea
       id={id}
@@ -595,8 +624,10 @@ function ListField({
       disabled={disabled}
       placeholder={placeholder}
       spellCheck={false}
+      {...focus}
       onChange={(e) => setTyped(e.target.value)}
       onBlur={() => {
+        left();
         const next = typed
           .split(/\r?\n/)
           .map((line) => line.trim())
@@ -1065,6 +1096,8 @@ export function Settings({
    * gives for the project list.
    */
   const [drafts, setDrafts] = useState<readonly Draft[]>([]);
+  // And again when another client saved a version (#371).
+  const library = useMemoryRevision(DRAFTS_KEY);
   useEffect(() => {
     try {
       setDrafts(readDrafts(memory.getItem(DRAFTS_KEY)));
@@ -1072,7 +1105,7 @@ export function Settings({
       // Storage can be unavailable. An empty library is a smaller failure than
       // a settings screen that will not render.
     }
-  }, []);
+  }, [library]);
   const keep = useCallback((key: string, value: unknown) => {
     try {
       memory.setItem(key, JSON.stringify(value));
@@ -1658,7 +1691,10 @@ export function Settings({
                 confirm="turn YOLO on"
                 onConfirm={() => {
                   setAskYolo(false);
-                  write({ pilot: { yolo: true } }, 'global');
+                  // Asked on the device too (#346); a refusal leaves it off.
+                  void confirmed('Turn YOLO on')
+                    .then(() => write({ pilot: { yolo: true } }, 'global'))
+                    .catch(() => undefined);
                 }}
                 onCancel={() => setAskYolo(false)}
               />

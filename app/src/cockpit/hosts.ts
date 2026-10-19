@@ -2,7 +2,7 @@ import type { Frame } from '../host';
 import { CONFIG_WRITE_DURING_RUN, SERVICE_HOST } from '../host';
 import { chatKey, chatMove, cleanupWrites, readChat, writable } from '../pilot/saved';
 import type { Launched } from './argv';
-import { emptyRun, settled } from './model';
+import { emptyRun, hostLost, settled } from './model';
 import type { Run } from './model';
 import { dirKey, nameOf, preview } from './projects';
 import type { RunName } from './projects';
@@ -80,6 +80,28 @@ export interface LiveRun {
   /** A stop this window asked for and the core has not answered (#253). */
   stopping: boolean;
   run: Run;
+  /**
+   * What the run started from: a resume's seeded history, or nothing. A
+   * phone's reconnect (#346) folds the desktop's replay onto this again, so the
+   * history from before a resume is not lost with the connection.
+   */
+  base?: Run;
+  /** A phone reconnected and the replay is being folded again (#346). */
+  rejoining?: Rejoining | null;
+}
+
+/**
+ * A run being refolded after a phone reconnected (#346).
+ *
+ * The desktop replays every live run host's frames to a phone that joins, on
+ * every connection. Folding them on top of what was already folded would draw
+ * every turn twice, so a reconnect starts each live run again from its `base`
+ * and keeps what it had as `prior`, in case nothing is replayed at all.
+ */
+export interface Rejoining {
+  prior: Run;
+  /** A frame has been folded since the reconnect. */
+  replayed: boolean;
 }
 
 export type LiveRuns = readonly LiveRun[];
@@ -299,9 +321,54 @@ export function updateRun(lives: LiveRuns, handle: string, step: (run: Run) => R
       heard: true,
       pausing: over || run.gate !== null ? false : e.pausing,
       stopping: over ? false : e.stopping,
+      ...(e.rejoining ? { rejoining: { ...e.rejoining, replayed: true } } : {}),
     };
   });
 }
+
+/**
+ * A phone reconnected (#346): start every live run again from its `base`, so
+ * the desktop's replay folds onto nothing rather than onto itself. What was on
+ * screen is kept as `prior`. A second reconnect before anything was replayed
+ * keeps the first `prior`, which is still the last run actually folded.
+ */
+export function rejoin(lives: LiveRuns): LiveRuns {
+  return lives.map((e) => {
+    if (!e.live) return e;
+    const prior = e.rejoining && !e.rejoining.replayed ? e.rejoining.prior : e.run;
+    return { ...e, rejoining: { prior, replayed: false }, run: { ...(e.base ?? emptyRun()), protocol: prior.protocol } };
+  });
+}
+
+/**
+ * The replay has been folded (#346): settle every run that was rejoining.
+ *
+ * - **Replayed**: the refolded run stands, whatever its host is doing now.
+ * - **Nothing replayed, host alive**: nothing was said since, so what was on
+ *   screen is still right, and comes back.
+ * - **Nothing replayed, host gone**: the run ended while the phone was away;
+ *   what was on screen comes back, marked lost with `why`. Its handle is in
+ *   `lost`, so the window ends it as it ends any lost run.
+ */
+export function settleRejoin(
+  lives: LiveRuns,
+  alive: ReadonlySet<string>,
+  at: number,
+  why: string,
+): { lives: LiveRuns; lost: readonly string[] } {
+  const lost: string[] = [];
+  const next = lives.map((e) => {
+    if (!e.rejoining) return e;
+    if (e.rejoining.replayed) return { ...e, rejoining: null };
+    if (alive.has(e.handle)) return { ...e, run: e.rejoining.prior, rejoining: null };
+    lost.push(e.handle);
+    return { ...e, run: hostLost(e.rejoining.prior, at, why), rejoining: null };
+  });
+  return { lives: next, lost };
+}
+
+/** The sentence for a run whose host ended while a phone was away (#346). */
+export const ENDED_WHILE_AWAY = "the run's host ended while this phone was disconnected";
 
 /** The run's invoke is over: nothing more is routed to it. */
 export function endRun(lives: LiveRuns, handle: string): LiveRuns {
@@ -318,6 +385,18 @@ export function markAnswered(lives: LiveRuns, handle: string, askId: number): Li
 
 export function setFlag(lives: LiveRuns, handle: string, flag: 'pausing' | 'stopping', value: boolean): LiveRuns {
   return edit(lives, handle, (e) => ({ ...e, [flag]: value }));
+}
+
+/**
+ * A run's pause and stop as its host says they now stand (#371), whichever
+ * client pressed. Never over what `updateRun` already cleared: a run that has
+ * settled, or is holding at a gate, is pausing and stopping no longer.
+ */
+export function setControls(lives: LiveRuns, handle: string, pausing: boolean, stopping: boolean): LiveRuns {
+  return edit(lives, handle, (e) => {
+    const over = settled(e.run) || e.run.reason !== null;
+    return { ...e, pausing: pausing && !over && e.run.gate === null, stopping: stopping && !over };
+  });
 }
 
 export function markAdopted(lives: LiveRuns, handle: string, adopted: 'moved' | 'skipped'): LiveRuns {

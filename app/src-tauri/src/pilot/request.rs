@@ -113,6 +113,26 @@ pub struct Turn {
     pub tools: Vec<Tool>,
     #[serde(default = "default_max_tokens")]
     pub max_tokens: u32,
+    /// Which conversation this turn continues, so every other client can draw it
+    /// (#371). Absent from an older window, and then the turn is not announced.
+    #[serde(default)]
+    pub announce: Option<Announce>,
+}
+
+/// What another client needs to draw a turn it did not ask for (#371).
+///
+/// One field holding all three rather than three optional ones, so a turn can
+/// name its conversation only together with what was sent and who sent it.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct Announce {
+    /// The conversation's key, as the window stores it. Opaque here.
+    pub chat: String,
+    /// What the person sent, or empty for a turn nobody typed (a tool chain).
+    pub asked: String,
+    /// The asking window's own token. A turn's id is handed back only after the
+    /// announcement has gone out, so the asker cannot know its turn by id when
+    /// the announcement arrives; it knows it by this.
+    pub asker: String,
 }
 
 fn default_max_tokens() -> u32 {
@@ -160,6 +180,11 @@ impl Turn {
         if self.tools.iter().any(|t| t.name.trim().is_empty()) {
             return Err("a declared tool has no name".into());
         }
+        if let Some(a) = &self.announce {
+            if a.chat.trim().is_empty() || a.asker.trim().is_empty() {
+                return Err("a turn that names its conversation must name it, and who asked".into());
+            }
+        }
         if self.max_tokens == 0 {
             return Err("max_tokens is zero, so there is no reply to ask for".into());
         }
@@ -187,7 +212,21 @@ mod tests {
             }],
             tools: vec![],
             max_tokens: MAX_TOKENS_DEFAULT,
+            announce: None,
         }
+    }
+
+    #[test]
+    fn a_named_conversation_must_be_named_and_say_who_asked() {
+        // #371. An older window sends no `announce`, and that is a turn like any other.
+        assert!(turn().check().is_ok());
+        let named = |chat: &str, asker: &str| Turn {
+            announce: Some(Announce { chat: chat.into(), asked: String::new(), asker: asker.into() }),
+            ..turn()
+        };
+        assert!(named("vibe.chat./r::x", "w1").check().is_ok(), "nothing typed is a tool chain, and fine");
+        assert!(named(" ", "w1").check().is_err());
+        assert!(named("vibe.chat./r::x", "").check().is_err());
     }
 
     #[test]

@@ -33,6 +33,7 @@
 //! even if it held the key. The two agree, which is how it should be.
 
 use keyring::Entry;
+use tauri::Manager;
 use serde::{Deserialize, Serialize};
 
 /// The service name the keychain files these under.
@@ -190,32 +191,31 @@ pub fn status() -> Vec<KeyStatus> {
 /// use the key too and the host is what spawns them. A host that is not running
 /// is told when it starts.
 #[tauri::command]
-pub fn key_set(
-    provider: Provider,
-    key: String,
-    host: tauri::State<'_, crate::host::HostProcess>,
-) -> Result<(), String> {
-    set_key(provider, &key, &host)
+pub fn key_set(provider: Provider, key: String, app: tauri::AppHandle) -> Result<(), String> {
+    set_key(&app, provider, &key)
 }
 
 #[tauri::command]
-pub fn key_clear(provider: Provider, host: tauri::State<'_, crate::host::HostProcess>) -> Result<(), String> {
-    clear_key(provider, &host)
+pub fn key_clear(provider: Provider, app: tauri::AppHandle) -> Result<(), String> {
+    clear_key(&app, provider)
 }
 
 /// `key_set`'s body, shared with a phone's call through the bridge (#343).
 /// It writes the keychain and answers nothing back: the key goes in and never
-/// comes out, on either road.
-pub(crate) fn set_key(provider: Provider, key: &str, host: &crate::host::HostProcess) -> Result<(), String> {
+/// comes out, on either road. Every client is told a key moved (#371), so the
+/// one that did not store it stops saying there is none.
+pub(crate) fn set_key(app: &tauri::AppHandle, provider: Provider, key: &str) -> Result<(), String> {
     set(provider, key)?;
-    let _ = host.send_keys(None);
+    let _ = app.state::<crate::host::HostProcess>().send_keys(None);
+    crate::remote::desktop_changed(app, crate::remote::Changed::Keys);
     Ok(())
 }
 
 /// `key_clear`'s body, shared with a phone's call through the bridge (#343).
-pub(crate) fn clear_key(provider: Provider, host: &crate::host::HostProcess) -> Result<(), String> {
+pub(crate) fn clear_key(app: &tauri::AppHandle, provider: Provider) -> Result<(), String> {
     clear(provider)?;
-    let _ = host.send_keys(None);
+    let _ = app.state::<crate::host::HostProcess>().send_keys(None);
+    crate::remote::desktop_changed(app, crate::remote::Changed::Keys);
     Ok(())
 }
 

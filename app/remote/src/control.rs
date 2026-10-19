@@ -159,6 +159,7 @@ pub const ALLOWED_COMMANDS: &[&str] = &[
     "key_status",
     "pilot_send",
     "pilot_cancel",
+    "pilot_turns",
     "pilot_models",
     "app_quit",
     "update_check",
@@ -172,6 +173,49 @@ pub const ALLOWED_COMMANDS: &[&str] = &[
     // phone before its own connection closes.
     "remote_set",
 ];
+
+/// How every other client hears what a command changed (#371).
+///
+/// Every client sees every answer to its own calls, and nothing else unless an
+/// event says so - so a command that changes something a client draws, and is
+/// heard only by the client that called it, leaves every other screen stale.
+/// The phone's API-key pilot did exactly that until #371. A command is a read
+/// (it changes nothing), or names the event every client re-reads on. The
+/// list is checked against `ALLOWED_COMMANDS` both ways, so a new command is a
+/// decision about who hears it made on purpose.
+pub const COMMAND_REACH: &[(&str, Reach)] = &[
+    // The host's own frames say what a request changed: `changed`,
+    // `pilot_started`, a run's narration, `controls` and the rest, every one
+    // relayed to every client. `sync-guard.test.ts` holds the host's half.
+    ("host_start", Reach::Event("host://frame")),
+    ("host_send", Reach::Event("host://frame")),
+    ("host_status", Reach::Read),
+    ("key_set", Reach::Event("desktop://changed")),
+    ("key_clear", Reach::Event("desktop://changed")),
+    ("key_status", Reach::Read),
+    ("pilot_send", Reach::Event("pilot://event")),
+    ("pilot_cancel", Reach::Event("pilot://event")),
+    ("pilot_turns", Reach::Read),
+    ("pilot_models", Reach::Read),
+    // The desktop goes, and every connection with it.
+    ("app_quit", Reach::Event("host://exit")),
+    ("update_check", Reach::Read),
+    ("update_install", Reach::Event("app://update-progress")),
+    ("remote_status", Reach::Read),
+    ("remote_pair_begin", Reach::Event("remote://pair-request")),
+    ("remote_pair_answer", Reach::Event("remote://pair-ended")),
+    ("remote_revoke", Reach::Event("desktop://changed")),
+    ("remote_set", Reach::Event("desktop://changed")),
+];
+
+/// What `COMMAND_REACH` says of one command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reach {
+    /// It changes nothing another client draws.
+    Read,
+    /// Every client hears what it changed on this event.
+    Event(&'static str),
+}
 
 /// Desktop commands decided to be the desktop window's alone. None yet: a name
 /// goes here when somebody decides a command must not be reachable from a phone.
@@ -197,6 +241,10 @@ pub const REMOTE_EVENTS: &[&str] = &[
     // `remote_status` once after it joins and again on every one of these.
     // Forwarded because a phone draws the connected clients too.
     "remote://connections",
+    // Something the desktop keeps outside the host changed, by any client
+    // (#371): `"keys"` or `"remote"`. Every client re-reads `key_status` or
+    // `remote_status`, so a key stored on one shows as stored on the other.
+    "desktop://changed",
 ];
 
 /// The events that never leave the desktop: `app://quit-requested` is the
@@ -263,6 +311,20 @@ mod tests {
         }
         for name in REMOTE_EVENTS {
             assert!(!DESKTOP_ONLY_EVENTS.contains(name), "{name} is both forwarded and held back");
+        }
+    }
+
+    #[test]
+    fn every_allowed_command_says_who_hears_what_it_changed() {
+        for name in ALLOWED_COMMANDS {
+            let n = COMMAND_REACH.iter().filter(|(c, _)| c == name).count();
+            assert_eq!(n, 1, "{name} must be in COMMAND_REACH exactly once: a read, or the event every client hears");
+        }
+        for (name, reach) in COMMAND_REACH {
+            assert!(ALLOWED_COMMANDS.contains(name), "{name} is in COMMAND_REACH and not allowed");
+            if let Reach::Event(event) = reach {
+                assert!(REMOTE_EVENTS.contains(event), "{name} is heard on {event}, which never reaches a phone");
+            }
         }
         assert!(DESKTOP_ONLY_EVENTS.contains(&"app://quit-requested"));
     }

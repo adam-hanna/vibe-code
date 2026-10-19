@@ -354,6 +354,7 @@ mod tests {
             }],
             tools: vec![],
             max_tokens: 1024,
+            announce: None,
         }
     }
 

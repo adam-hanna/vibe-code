@@ -1948,6 +1948,52 @@ with the disk, which is what stops a stale save. A config write's origin travels
 and is never written - `vibe.config.json` is committed - while an invoke's is recorded once as
 `run_origin`, by `gate_released`'s carve-out, so a run with none is byte-identical.
 
+**And what is on screen follows it, both ways** (#371). #354 kept the caches right and nothing
+read them again: every reader took its value once, so a project added on the phone, a message
+sent from it or a model picked on it reached the desktop's cache and not its screen until
+somebody navigated away and back. The owner's line: *"EVERYTHING needs to be in sync and
+updated bidirectionally in real time."* Four rules carry it:
+
+- **A store says which keys moved, and only on a change of value.** `memory.ts` and the chat
+  store count each key another client changed (`useMemoryRevision`, `useChatRevision`), and
+  `useFollowedMemory` is `useState(read)` that reads again when its key moves. A re-read
+  writes nothing, so a client's own write coming back moves nothing and nothing loops. The
+  drafts are re-read through their one writer, unsaved.
+- **The conversation on screen is restored again when another client saved it**, never over a
+  turn this pane is streaming. The pilot's vendor, model and effort are one pick in memory
+  (`pilot/pick.ts`), shared by every client, as they were within one window.
+- **A pilot turn is announced** (`pilot_started`, naming the chat and what was sent), so a
+  second client showing that conversation draws it as it streams and can stop it
+  (`pilot/elsewhere.ts`); it is drawn and never kept, since the asker saves it. `pilot_turns`
+  answers a client that opens mid-turn. **One conversation takes one turn at a time**: the
+  host refuses a second, because two turns resuming one session would each answer blind to the
+  other. Not a protocol bump, by the rule above `PROTOCOL_VERSION`: a host that never
+  announces leaves a window drawing what it drew before. **An API-key turn is announced by
+  Rust**, the same way on its own road: `pilot_send` takes an `announce`, emits an `announced`
+  pilot event before the thread starts, keeps the text so far for `pilot_turns` (a new command,
+  answering only what every client was already sent) and refuses a second
+  turn in one conversation. The id comes back after the announcement has gone out, so the
+  asker knows its own turn by `asker`, a token of its window, rather than by id. The two
+  roads' ids are two counters, so a drawn turn folds only what came down its own road, and
+  is stopped back down it.
+- **Settings, commands, deletions and answers follow too.** A config save bumps the cockpit's
+  own read, the composer's and the Settings screen's; a field somebody is typing in keeps its
+  text (`useTyped`), and a refusal always puts back what is in force. A `command_started`
+  reaches every client and folds once per id, and `run_deleted` and `questions_answered` make
+  the sidebar and the Questions pane read again. What stays per screen: unsent text, unsaved
+  edits, scroll, and what each device has open (`deviceKey`, at the owner's decision).
+- **And a new setting cannot be forgotten, because each place a change lives has a closed
+  list.** Asked as *"What happens if we add a new setting or a new tab?"* A tab needs nothing:
+  the phone runs this `src`. What can be missed is who hears a change, so `sync-guard.test.ts`
+  fails on a `vibe.` key not in `MEMORY_KEYS` (shared or per device), on a device key not read
+  through `deviceKey`, on a component reading a shared key without following it, and on an
+  inbound frame not classified as a read or by the frame every client hears it on. In Rust,
+  `COMMAND_REACH` in `control.rs` does the same for every allowed command. Writing them found
+  three gaps, now closed: a key stored or forgotten, and remote access changed or a phone
+  revoked, are announced as `desktop://changed` (`keys` or `remote`) and re-read; and a pause
+  or stop is announced as `controls`, said before the asker's answer and only when it moved.
+  A config key needs nothing: a save is `changed`, and the settings re-read it.
+
 **The window predicts no filename, and `artifacts` is why that was possible** (#223). Four
 tabs — Plans, Plan critique, Code review and Code — draw a run's own artifacts, and the
 dangerous shape they could have taken is composing `plan-${round}.json` from a round number
@@ -2318,8 +2364,9 @@ that runs a turn. Four things carry it:
   against an allowed list: the desktop's is the one that decides. `local` reaches the
   phone's own commands (`phone_identity`, `phone_open_release_page`).
 - **The swaps are a list, `app/mobile-swaps.ts`**: the transport, the folder chooser
-  (`pick.mobile.tsx` browses the desktop over the `fs` frame, inside the pilot's roots)
-  and `surface.ts` (no keyboard chords, no palette). `mobile.test.ts` fails on a
+  (`pick.mobile.tsx` browses the desktop over the `fs` frame, inside the pilot's roots),
+  `surface.ts` (no keyboard chords, no palette), and `boot.tsx` (the paired desktops and
+  the lock in front of the cockpit, #346). `mobile.test.ts` fails on a
   `*.mobile.ts` the list does not name, and on a swap missing an export of what it
   replaces.
 - **The phone's key follows the desktop's rules**, which moved into
@@ -2348,6 +2395,89 @@ by `tauri <platform> init` on each machine and in CI, because iOS's needs macOS 
 `.github/workflows/mobile.yml` launches both mock builds - an Android emulator and an iOS
 simulator - and fails unless the cockpit read the recorded run. It runs on a pull request into
 `main`, or by hand with `gh workflow run mobile.yml --ref <branch>`, never on `develop`.
+
+**The phone pairs, connects and reconnects through `vibe_remote::client`** (#346). It is in the
+shared crate, so the desktop crate's tests run the **real** pairing handler and bridge against
+the **real** client in one process: they are child modules of `handshake.rs`'s and `bridge.rs`'s
+private `mod tests` (`mod tests { mod client }`), because a sibling file cannot reach those
+helpers, and `vibe-remote` has no tokio runtime of its own to test with. A phone finds a test
+desktop by id through iroh's in-memory lookup (`phone_finding`), the stand-in for n0 and mDNS.
+The phone's `Desktop` is `app/mobile/src-tauri/src/link.rs`, a thin wrapper over it. Ten things
+travel with it:
+
+- **`REMOTE_OFF` (3) is the one desktop change.** Both roads to *off* close every bridged phone
+  with it before the endpoint stops: the window's at once, a phone's own `remote_set` only after
+  its `Return` has arrived (`Written` names the asker, which is closed first, by id). A relay
+  change closes with no code, since the endpoint comes straight back under the same id.
+- **Every ending has a sentence, and there is no "dropped".** The three codes read as themselves;
+  anything else - code 0, an unknown code, a dial nobody answered - goes through `classify`, which
+  reads what the phone can see at that moment. `online` is the OS's word, sent by the webview from
+  `navigator.onLine`, **never** `Endpoint::addr`, which is what the phone advertises.
+  `RelaysUnreachable` needs a path that was not direct, the desktop's relay known and one of the
+  phone's own, and that relay (or every relay) failed; everything else is `Unreachable`. A desktop
+  on a relay of its own may be off or its relay may be down, and nothing the phone can observe
+  separates the two, so *can't reach* is the honest sentence for both.
+- **One dial for every caller**: the stored relay hint under `Timeouts::hint`, then the id alone
+  through lookup under a budget of its own. Connect and probe use `dial`, unpair `unpair_dial`,
+  and **pairing none**: the desktop bounds an attempt by its code's own life, and a second, shorter
+  clock on the phone would end one the desktop still meant to finish. The timeouts are injected,
+  so no test needs tokio's `test-util`. Every interval is a named choice in `client.rs`, and none
+  is a measurement; the device checks on #346 are what will say whether they were right.
+- **Pairing is two steps so the code can be shown between them.** `pair` reads the phone's list
+  first (an unreadable one dials nothing and burns no code), sends the secret and returns a
+  `Challenged` once the desktop's *Allow?* is up; `phone://pair-code` carries the six digits with
+  the screen's own `attempt` number. Then `read_result` and `commit`, split so **an answer the phone
+  has already read beats Back** (`pair_flow`'s biased select): the desktop stores a phone before it
+  sends `Paired`, so dropping a `Paired` in hand would leave the desktop paired and the phone not.
+  The window that remains - the answer in flight as Back hangs up - needs the desktop to wait for
+  an acknowledgement, which is a desktop change #346 did not make; the cancel sentence says how to
+  recover. A yes the phone cannot save is `PairedNotSaved`, and says so even after Back.
+- **The replay barrier.** The desktop replays every live run's frames to a phone on every new
+  connection. Each connection has a generation; its events wait in an `EventGate` from the
+  `Welcome` until the webview says it is ready for that generation (`phone_release`), and
+  `phone://connected` carries the generation and nothing else. The webview pauses its requests
+  (`pauseRequests`: they reject, never throw), starts each live run again from its `base`
+  (`rejoin` in `hosts.ts`; a resume's base is its seeded history), counts ids from the new range
+  through a **monotonic** resync (`phone/link.ts`), releases, and settles once `host_status` says
+  which hosts are alive (`settleRejoin`). Nothing marks the end of a replay - that would be a
+  second desktop change - and a refolded turn's times are its arrival times, as for any phone
+  joining mid-run.
+- **The reconnect loop** checks the desktop is still paired and still the one open before every
+  dial, re-reads its entry each time, and waits `retry_after`'s backoff cut short by a poke. **Every
+  network signal pokes**, whether or not `online` moved (a Wi-Fi to cellular handover is online
+  both sides), and calls `endpoint.network_change()`; so does every return to the foreground. A
+  close the desktop explained (`NOT_PAIRED`, `VERSION_MISMATCH`, `REMOTE_OFF`) waits for a poke only.
+- **The phone's list is a file its Rust owns** (`vibe_remote::paired`), written by temporary file
+  and rename, every read-modify-write under one lock, and never overwritten when it cannot be read.
+  `seen` and `set_relay` never bring back a desktop an unpair removed while a probe was out.
+- **The app opens locked** when its lock is on and the device has, or may have, a screen lock, and
+  when `phone.json` cannot be read; the Rust guard refuses every desktop command until
+  `phone_unlock`, `phone_session` and `phone_release` included, and refuses a settings write, so a
+  webview under the cover cannot turn the lock off for the next launch. A reconnect while locked is
+  kept by the link and held at its gate; the webview's `lockGate` makes both reads wait for the
+  unlock, and the cockpit stays mounted under the cover so the runs it folded are not lost.
+  Leaving the pairing screen, by Back or by the lock, ends the attempt: a scan that resolves
+  late pairs nothing, and `phone_pair_cancel` names its attempt, so a Back that reaches Rust
+  before `phone_pair` is waiting is kept (`PairSlot`) and the dial never happens. Only the plugin's explicit `passcodeNotSet` is *no lock*: biometrics being
+  unavailable is not, because a PIN is still a lock. The mock build opens unlocked, since no CI
+  emulator can answer a prompt. `confirmOnDevice` is the transport seam's fourth function: the
+  cockpit asks before storing a key, turning YOLO on, deleting a run and pairing or unpairing, and
+  the phone's Rust never reads a frame to decide.
+- **Plugins are driven from Rust** - biometric, notification - **except the barcode scanner**,
+  which has no Rust API. `capabilities/scan.json` grants its four permissions on phones only, and
+  `Pair.tsx` is the one module that imports it; `mobile.test.ts` pins both.
+- **Notifications are on by default, so the OS is asked at the first `phone_settings` of a
+  launch** (and when the switch is turned on), never from `phone_notify`, which shows a
+  notification only once the OS has granted it. The mock build does not ask.
+- **Notifications are offered off frames the cockpit already folds** (`cockpit/notices.ts`), by
+  type and id after `invokeOutcome`, once per key, and fired by the phone's Rust only while the app
+  is hidden with notifications on - and only while it is alive. An ask held and released during a
+  disconnect is announced once on reconnect; a run whose host ended during one is drawn lost and
+  is not announced.
+
+The measurements the device checks read are in the phone's log: `vibe-mobile: connected to <id>
+in <ms> ms`, `vibe-mobile: path to <id> is now direct|relayed after <ms> ms`, and `vibe-mobile:
+connection to <id> closed: <raw>`. `phone_desktops` carries the path and the connect time too.
 
 ## Repo map
 
@@ -2471,6 +2601,13 @@ app/remote/          what the phone and the desktop share: the pairing wire, the
 app/mobile/          the phone app: its Tauri crate, the mock desktop and its recorder, the launch checks
 app/src/transport.ts where the window's commands go - Tauri on the desktop, the paired desktop on a phone
 app/mobile-swaps.ts  the modules the phone build replaces, and nothing else
+app/remote/src/client.rs  the phone's side of both ALPNs: the dial, pairing, the control stream, why it ended
+app/remote/src/paired.rs  the phone's paired desktops: one file, one lock, never overwritten unread
+app/mobile/src-tauri/src/link.rs     the iroh Desktop: the reconnect loop, the replay barrier, probes
+app/mobile/src-tauri/src/pairing.rs  pairing's race with Back, and the code shown between its two steps
+app/mobile/src-tauri/src/device.rs   the app lock: whether there is a screen lock, and asking for it
+app/src/phone/       the phone's own screens - Desktops, Pair, the lock - and the reconnect resync
+app/src/cockpit/notices.ts  which folded frames a phone announces, once each
 app/src-tauri/src/pilot/sse.rs      the wire format both vendors share, and nothing else
 app/src-tauri/src/pilot/event.rs    PilotEvent and Usage - every count an Option, on purpose
 app/scripts/         contrast.mjs, stage-sidecar.mjs, make-icon.mjs, prune-appimage.mjs - all dependency-free

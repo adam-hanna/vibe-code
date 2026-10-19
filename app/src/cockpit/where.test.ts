@@ -1,6 +1,8 @@
 import { describe, expect, test } from 'vitest';
 import cockpit from './Cockpit.tsx?raw';
-import main from '../main.tsx?raw';
+import boot from '../boot.tsx?raw';
+import phoneApp from '../phone/PhoneApp.tsx?raw';
+import prepare from '../prepare.ts?raw';
 import { deviceKey, NOWHERE, OPEN_PANELS, readWhere, startPanels, WHERE_KEY, writableWhere } from './where';
 
 /**
@@ -121,8 +123,15 @@ describe("a device's own keys (#347)", () => {
     expect(cockpit).toMatch(/placeKey = deviceKey\(WHERE_KEY, device\);/);
     expect(cockpit).toMatch(/scaleKey = deviceKey\(SCALE_KEY, device\);/);
     expect(cockpit).toMatch(/repoKey = deviceKey\(REPO_KEY, device\);/);
-    expect(main).toMatch(/if \(SURFACE\.ownPlace\) \{[\s\S]*keepDeviceKeys\(device\);[\s\S]*\}/);
-    expect(main.indexOf('keepDeviceKeys(')).toBeLessThan(main.indexOf('createRoot('));
+    // Case 2 (#346 moved the start-up out of `main.tsx`): the keys are set in
+    // `prepareCockpit`, which both builds await before the cockpit mounts - the
+    // desktop's `boot` before `createRoot`, the phone's `PhoneApp` before it
+    // switches to the cockpit screen.
+    expect(prepare).toMatch(/if \(SURFACE\.ownPlace\) \{[\s\S]*keepDeviceKeys\(device\);[\s\S]*\}/);
+    expect(prepare.indexOf('keepDeviceKeys(')).toBeGreaterThan(prepare.indexOf('await loadMemory()'));
+    expect(boot.indexOf('await prepareCockpit()')).toBeGreaterThan(-1);
+    expect(boot.indexOf('await prepareCockpit()')).toBeLessThan(boot.indexOf('createRoot('));
+    expect(phoneApp).toMatch(/await prepareCockpit\(\);\s*setScreen\('cockpit'\);/);
   });
 
   test('each is read and written only under its device key, and a null key writes nothing', () => {

@@ -32,3 +32,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 # The pairing matching code: six digits from a SHA-256 both ends compute.
 sha2 = "0.10"
+# The phone's client (#346): its reader task, the per-call answers and the
+# dial deadlines. No `test-util`: the client's timeouts are injected instead, so
+# no test here or in the desktop's needs paused time.
+tokio = { version = "1", default-features = false, features = ["sync", "time", "macros", "rt"] }
+# Watching a connection's paths for the phone's direct/relayed log (#346); the
+# same version iroh itself uses.
+n0-future = "0.3"

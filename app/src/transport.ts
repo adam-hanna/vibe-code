@@ -16,3 +16,7 @@
 export { invoke } from '@tauri-apps/api/core';
 export { listen } from '@tauri-apps/api/event';
 export { invoke as local } from '@tauri-apps/api/core';
+
+export function confirmOnDevice(_reason: string): Promise<boolean> {
+  return Promise.resolve(true);
+}
