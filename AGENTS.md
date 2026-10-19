@@ -4372,6 +4372,18 @@ and its commits survive it.
    `develop` sat at version 1.0.1 with no `CHANGELOG.md` — which is the branch the next
    release would have been cut from.
 
+   **Merge this one with a merge commit (`gh pr merge --merge`), never a squash.** It is the
+   one PR in this repo that is not squashed. A squash copies `main`'s changes into `develop`
+   without `main`'s commits, so git finds no shared history. The next release PR then
+   conflicts in every file both branches touched, even where the content is identical. After
+   1.6.1 the back-merge (#335) was squashed, and #376 conflicted in 47 files (#379). A merge
+   commit makes `main` an ancestor of `develop`, and the next release PR merges cleanly.
+
+   If a release PR does conflict that way, check before resolving anything:
+   `git diff --stat origin/main <develop's last back-merge commit>` is empty when everything on
+   `main` is already in `develop`. Then `git merge -s ours origin/main` on the release branch
+   records the history and changes no file.
+
 Anything added to the published package must be listed in `files` in `package.json`;
 `CHANGELOG.md` was nearly shipped missing for exactly this reason.
 
