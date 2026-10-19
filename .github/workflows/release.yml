@@ -485,7 +485,9 @@ jobs:
           echo "ANDROID_KEYSTORE_FILE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
 
       # Two steps, so a failure names which half it was: rc.1's one step died
-      # with exit 1 and no message after Gradle had finished the APK.
+      # with exit 1 and no message after Gradle had finished the APK. The cause
+      # was the signing script's grep over apksigner 37's report (its comment
+      # says how); the traps are what found it.
       - name: Build the APK
         if: matrix.platform == 'android' && env.SKIP != '1'
         shell: bash

@@ -48,7 +48,10 @@ aligned="$(mktemp -d)/aligned.apk"
   --ks "$ANDROID_KEYSTORE_FILE" --ks-pass env:ANDROID_KEYSTORE_PASSWORD \
   --ks-key-alias "$ANDROID_KEY_ALIAS" --key-pass env:ANDROID_KEY_PASSWORD \
   --out "$out" "$aligned"
-# The whole report, not a grep of it: a grep that matched nothing would be a
-# second silent exit 1.
+# The whole report, not a grep of it. This was rc.1's failure: the script
+# grepped for `Signer #1 certificate`, which build-tools 35 and 36 print, and
+# the runner's 37.0.0 prints `V3.0 Signer: certificate` instead. The grep
+# matched nothing, exited 1, and under `set -e` the step died with no message
+# over a correctly signed APK.
 "${tools}apksigner" verify --print-certs "$out"
 rm -rf "$(dirname "$aligned")"

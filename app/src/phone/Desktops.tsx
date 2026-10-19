@@ -5,7 +5,7 @@ import { clock, dayOf } from '../cockpit/format';
 import { listen } from '../transport';
 import * as api from './api';
 import type { PhoneSettings } from './boot';
-import { lockWarning } from './pair';
+import { lockWarning } from './pairing';
 import { called } from './reason';
 import type { Desktops as Listed } from './reason';
 import { rowStatus } from './sentences';

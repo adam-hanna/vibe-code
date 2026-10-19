@@ -1,4 +1,4 @@
-import type { DeviceLock } from './pair';
+import type { DeviceLock } from './pairing';
 
 /** `phone_settings`'s answer (#346). */
 export interface PhoneSettings {
