@@ -215,6 +215,29 @@ properly:
 staged tree is ~92 MB of Node plus ~1.5 MB of compiled core, and both are gitignored — they
 are copies of things the repo already has.
 
+**A local Linux build bundles the AppImage unstripped, and that is what lets it build at all**
+(#324). linuxdeploy runs its own bundled `strip` over every library it copies, and that strip
+is older than what Fedora 44 ships: it stops at the first library with a `.relr.dyn` section
+(libxml2, libzstd) with `unknown type [0x13] section '.relr.dyn'`, and the build says only
+`failed to run linuxdeploy`. `app:build` is `scripts/app-build.mjs`, which sets `NO_STRIP=true`
+on Linux unless `CI` is set or `NO_STRIP` already is. The local AppImage is about 163 MB
+against CI's stripped 125 MB. It bundles this machine's libraries, so it is for testing this
+build and never for handing out: the portable one is CI's, built on Ubuntu 22.04 on purpose.
+`CI=true npm run app:build` reproduces the failure.
+
+**The update bundle can be signed and checked locally with a throwaway key**, so a bundling
+change can be checked before an rc is tagged. Keep the key out of the checkout:
+
+```bash
+npx tauri signer generate --ci -p "" -w /tmp/throwaway.key
+TAURI_SIGNING_PRIVATE_KEY="$(cat /tmp/throwaway.key)" TAURI_SIGNING_PRIVATE_KEY_PASSWORD="" \
+  npm run app:build -- --bundles appimage --config '{"bundle":{"createUpdaterArtifacts":true}}'
+```
+
+That writes `Vibe_<v>_amd64.AppImage.sig` beside the AppImage. It is a minisign signature
+over the file's BLAKE2b-512, and it verifies against `/tmp/throwaway.key.pub`. It proves the
+signing step works, never that the release key does: an installed app trusts only the real one.
+
 `npm run audit:contrast` is the design system's equivalent of `npm test`: it parses
 `tokens.css` and checks the two rules the build spec names as most likely to slip — the text
 floor across every surface, and the ramps — plus that no hex literal exists outside
@@ -2610,7 +2633,7 @@ app/src/phone/       the phone's own screens - Desktops, Pair, the lock - and th
 app/src/cockpit/notices.ts  which folded frames a phone announces, once each
 app/src-tauri/src/pilot/sse.rs      the wire format both vendors share, and nothing else
 app/src-tauri/src/pilot/event.rs    PilotEvent and Usage - every count an Option, on purpose
-app/scripts/         contrast.mjs, stage-sidecar.mjs, make-icon.mjs, prune-appimage.mjs - all dependency-free
+app/scripts/         contrast.mjs, stage-sidecar.mjs, make-icon.mjs, prune-appimage.mjs, app-build.mjs - all dependency-free
 app/scripts/smoke-appimage.sh  launching the AppImage on six distributions, and failing on a blank screen
 
 docs/                the docs site - VitePress, its own package.json, never in `files`
