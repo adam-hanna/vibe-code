@@ -5,8 +5,8 @@ import { confirmed } from '../confirm';
 import { listen, local } from '../transport';
 import * as api from './api';
 import type { PhoneSettings } from './boot';
-import { lockWarning, pairStep } from './pair';
-import type { Outcome } from './pair';
+import { lockWarning, pairStep } from './pairing';
+import type { Outcome } from './pairing';
 import { sentence } from './sentences';
 
 /**

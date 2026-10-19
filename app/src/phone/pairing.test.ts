@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest';
-import { lockWarning, pairStep } from './pair';
-import type { PairInput, PairState } from './pair';
+import { lockWarning, pairStep } from './pairing';
+import type { PairInput, PairState } from './pairing';
 import type { DesktopEntry, Reason } from './reason';
 
 /** The pairing screen's states (#346), every path, with no camera. */
