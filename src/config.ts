@@ -56,7 +56,7 @@ const SANDBOXES: readonly Sandbox[] = ['read-only', 'workspace-write', 'danger-f
  * the installed CLI's `--help` does not declare (`src/cliversions.ts`).
  */
 export const TESTED_CLI_VERSIONS: Readonly<Record<AgentProvider, string>> = {
-  claude: '2.1.294',
+  claude: '2.1.303',
   codex: '0.157.1',
 };
 

@@ -26,10 +26,10 @@ function helpText(flags: readonly string[], commands: readonly string[] = []): s
 
 type Answer = { code: number; stdout: string } | 'throw';
 
-/** Every help as the installed 2.1.294 / 0.157.1 have it, with overrides. */
+/** Every help as the installed 2.1.303 / 0.157.1 have it, with overrides. */
 function fakeExec(overrides: Record<string, Answer> = {}, calls: string[] = []): RunFn {
   const answers: Record<string, Answer> = {
-    'claude-bin --version': { code: 0, stdout: '2.1.294 (Claude Code)' },
+    'claude-bin --version': { code: 0, stdout: '2.1.303 (Claude Code)' },
     'codex-bin --version': { code: 0, stdout: 'codex-cli 0.157.1' },
   };
   for (const req of CLI_FLAG_REQUIREMENTS) {
@@ -69,8 +69,8 @@ test('help declaring every flag vibe passes refuses nothing and warns about noth
   const result = await check();
   assert.deepEqual(result.blocking, []);
   assert.deepEqual(result.warnings, []);
-  assert.deepEqual(result.versions, { claude: '2.1.294', codex: '0.157.1' });
-  assert.ok(result.confirmations.includes('claude 2.1.294 (tested 2.1.294)'));
+  assert.deepEqual(result.versions, { claude: '2.1.303', codex: '0.157.1' });
+  assert.ok(result.confirmations.includes('claude 2.1.303 (tested 2.1.303)'));
   assert.ok(result.confirmations.some((c) => c.startsWith('codex exec resume --help: all ')));
 });
 
@@ -83,9 +83,9 @@ test('a run flag missing from help that was read refuses, naming the flag, CLI a
   const [reason] = result.blocking;
   assert.match(reason ?? '', /--json-schema/);
   assert.match(reason ?? '', /claude/);
-  assert.match(reason ?? '', /Installed claude 2\.2\.0, tested with 2\.1\.294/);
+  assert.match(reason ?? '', /Installed claude 2\.2\.0, tested with 2\.1\.303/);
   // The version moved too, and that is a warning on its own, not the refusal.
-  assert.ok(result.warnings.some((w) => /newer than the tested 2\.1\.294/.test(w)));
+  assert.ok(result.warnings.some((w) => /newer than the tested 2\.1\.303/.test(w)));
 });
 
 test('a short flag is not satisfied by a long one that contains it', async () => {

@@ -678,6 +678,59 @@ describe('the gate is the payoff', () => {
   });
 });
 
+describe('who answered a gate', () => {
+  // #344: the bridge writes `phone:<name>` on every frame a phone sends, and
+  // the core records it on the gate it answered. Only a phone is drawn; no
+  // origin, `pilot` and `gates` are not a person on another device.
+  const PHONE = "phone:Adam's iPhone";
+  const held: Frame = {
+    type: 'ask',
+    id: 7,
+    context: { boundary: 'plan-approved', phase: 'planning', planRound: 0, questionRound: 0, reviewRound: 0, verifyRound: 0 },
+  };
+
+  test('a release from a phone names it, and the boundary', () => {
+    const run = fold([held, say('gate_released', { boundary: 'plan-approved', origin: PHONE })]);
+    expect(run.decidedFrom).toEqual({ how: 'continued', boundary: 'plan-approved', phone: "Adam's iPhone" });
+  });
+
+  test('a release with no origin names nobody', () => {
+    const run = fold([held, say('gate_released', { boundary: 'plan-approved' })]);
+    expect(run.decidedFrom).toBeNull();
+  });
+
+  test('a release the pilot shaped is not a phone', () => {
+    const run = fold([held, say('gate_released', { boundary: 'plan-approved', origin: 'pilot' })]);
+    expect(run.decidedFrom).toBeNull();
+  });
+
+  test('a stop from a phone names it', () => {
+    const run = fold([held, say('gate_stopped', { boundary: 'implemented', reason: 'not now', origin: PHONE })]);
+    expect(run.decidedFrom).toEqual({ how: 'stopped', boundary: 'implemented', phone: "Adam's iPhone" });
+    expect(run.ended).toEqual({ how: 'stopped', detail: 'not now' });
+  });
+
+  test('a stop with no origin names nobody', () => {
+    const run = fold([held, say('gate_stopped', { boundary: 'implemented', reason: 'r', origin: null })]);
+    expect(run.decidedFrom).toBeNull();
+  });
+
+  test('a stop the pilot or the gate matrix made is not a phone', () => {
+    expect(fold([held, say('gate_stopped', { boundary: 'b', origin: 'pilot' })]).decidedFrom).toBeNull();
+    expect(fold([held, say('gate_stopped', { boundary: 'b', origin: 'gates' })]).decidedFrom).toBeNull();
+  });
+
+  test('a later release from this window clears an earlier phone attribution', () => {
+    const run = fold([
+      held,
+      say('gate_released', { boundary: 'plan-approved', origin: PHONE }),
+      held,
+      say('gate_released', { boundary: 'implemented' }),
+    ]);
+    expect(run.decidedFrom).toBeNull();
+  });
+});
+
 describe('the output pane', () => {
   test('keeps a tail rather than a whole run', () => {
     const many = Array.from({ length: OUTPUT_KEEP + 50 }, (_, i) => say(null, null, `line ${i}`));

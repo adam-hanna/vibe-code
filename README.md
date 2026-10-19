@@ -81,6 +81,10 @@ To build it yourself (Rust and the [Tauri prerequisites](https://tauri.app/start
 cd app && npm install && npm run app:build
 ```
 
+## On your phone
+
+The phone app is a remote for the desktop app: the same runs, pilot chat and settings, kept in step both ways while the desktop does the work. It is not in any app store. Download the latest [Android `.apk`](https://github.com/adam-hanna/vibe-code/releases/latest/download/Vibe-android.apk) and open it on the phone, or the [iPhone `.ipa`](https://github.com/adam-hanna/vibe-code/releases/latest/download/Vibe-ios-unsigned.ipa), which is unsigned and installed with [AltStore](https://altstore.io), [SideStore](https://sidestore.io) or [Sideloadly](https://sideloadly.io) and your own Apple ID. Then pair it from **Settings → Remote access** on the desktop. Each release also carries versioned copies, such as `Vibe_1.7.0_android.apk`. The steps, and how to build both apps from source, are in [On your phone](https://adam-hanna.github.io/vibe-code/phone.html).
+
 ## Configuration
 
 Put a `vibe.config.json` in the repository. Flags override it. `vibe.config.example.json` is a worked example, and the [configuration reference](https://adam-hanna.github.io/vibe-code/configuration.html) lists every key. The keys most worth knowing:
@@ -121,7 +125,7 @@ When a round changes a test file or `vibe.config.json`, the reviewer is shown ea
 ## Notes and limitations
 
 - **Codex cost isn't reported.** Codex runs on a subscription and no output mode returns a price, so vibe reports tokens and never a guessed dollar figure. `budget.maxTokens` covers both agents.
-- **Tested with claude 2.1.294 and codex 0.157.1.** vibe uses whatever versions you have installed. `vibe doctor` and every run's preflight compare them with the tested ones. A different version is a warning that names the command to move to the tested one, and the run continues. vibe refuses to start only when the installed CLI's `--help` no longer declares a flag vibe passes; `--skip-probe` skips that check.
+- **Tested with claude 2.1.303 and codex 0.157.1.** vibe uses whatever versions you have installed. `vibe doctor` and every run's preflight compare them with the tested ones. A different version is a warning that names the command to move to the tested one, and the run continues. vibe refuses to start only when the installed CLI's `--help` no longer declares a flag vibe passes; `--skip-probe` skips that check.
 - **Agreement isn't proof.** A clean run means two different models agreed and your tests passed. Both can still be wrong in the same way.
 - **The full documentation is at [adam-hanna.github.io/vibe-code](https://adam-hanna.github.io/vibe-code/)**: every config key, every command, and how the loop works.
 

@@ -110,6 +110,10 @@ export function started(commands: Commands, frame: CommandStarted): Commands {
   if (frame.command === null) {
     return { ...commands, refused: frame.refused };
   }
+  // Every client hears every start now (#371), and the one that asked also
+  // folds its own answer: the second sighting of an id is the same command.
+  const startedId = frame.command.id;
+  if (commands.all.some((c) => c.id === startedId)) return commands;
   const command: Command = {
     ...frame.command,
     endedAt: null,

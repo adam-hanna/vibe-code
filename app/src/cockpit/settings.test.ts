@@ -4,7 +4,9 @@ import settings from './Settings.tsx?raw';
 import footer from './Footer.tsx?raw';
 import sidebar from './Sidebar.tsx?raw';
 import credentials from '../pilot/Credentials.tsx?raw';
-import { MAX, MIN, STEPS, readScale, writable } from './appearance';
+import { MAX, MIN, STEPS, THEMES, readScale, readTheme, resolveTheme, writable } from './appearance';
+import main from '../main.tsx?raw';
+import phone from '../remote/PhoneSettings.tsx?raw';
 import { implementArgv } from './argv';
 
 /**
@@ -60,6 +62,40 @@ describe('how big the product is drawn', () => {
     // anything else.
     expect(settings).not.toMatch(/useState.*scale/);
     expect(settings).toMatch(/onScale: \(next: number\) => void/);
+  });
+});
+
+describe('light or dark (#347)', () => {
+  test('a device nobody has told anything follows its system, and an unknown value is the system', () => {
+    expect(readTheme(null)).toBe('system');
+    for (const bad of ['', 'Light', 'sepia', '1']) expect(readTheme(bad)).toBe('system');
+    expect(readTheme('light')).toBe('light');
+    expect(readTheme('dark')).toBe('dark');
+    expect(THEMES.map((t) => t.theme)).toEqual(['system', 'light', 'dark']);
+  });
+
+  test('a choice wins over the system, and only system asks it', () => {
+    expect(resolveTheme('system', true)).toBe('light');
+    expect(resolveTheme('system', false)).toBe('dark');
+    expect(resolveTheme('dark', true)).toBe('dark');
+    expect(resolveTheme('light', false)).toBe('light');
+  });
+
+  test('it is applied as data-theme, followed live only while it is the system, and set before the first paint', () => {
+    expect(cockpit).toMatch(/document\.documentElement\.dataset\['theme'\] = drawn;/);
+    expect(cockpit).toMatch(/if \(theme !== 'system'\) return;\s*query\.addEventListener\('change', apply\);/);
+    expect(main.indexOf("dataset['theme'] = drawn")).toBeGreaterThan(-1);
+    // Case 2 (#346 moved the memory load into `prepare.ts`, behind `boot`):
+    // the system's palette is still set before anything renders or loads.
+    expect(main.indexOf("dataset['theme'] = drawn")).toBeLessThan(main.indexOf('void boot(root)'));
+  });
+
+  test('it is chosen on the desktop and on the phone, each for itself', () => {
+    expect(settings).toMatch(/THEMES\.map/);
+    expect(phone).toMatch(/THEMES\.map/);
+    expect(cockpit).toMatch(/themeKey = deviceKey\(THEME_KEY, device\);/);
+    expect(cockpit).toMatch(/if \(themeKey === null\) return;\s*try \{\s*memory\.setItem\(themeKey, next\)/);
+    expect(cockpit).not.toMatch(/memory\.setItem\(THEME_KEY/);
   });
 });
 

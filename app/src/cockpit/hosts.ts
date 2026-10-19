@@ -2,7 +2,7 @@ import type { Frame } from '../host';
 import { CONFIG_WRITE_DURING_RUN, SERVICE_HOST } from '../host';
 import { chatKey, chatMove, cleanupWrites, readChat, writable } from '../pilot/saved';
 import type { Launched } from './argv';
-import { settled } from './model';
+import { emptyRun, hostLost, settled } from './model';
 import type { Run } from './model';
 import { dirKey, nameOf, preview } from './projects';
 import type { RunName } from './projects';
@@ -33,8 +33,26 @@ import type { Viewing } from './where';
  */
 export interface LiveRun {
   handle: string;
-  /** The id the `invoke` was sent with, from `nextRequestId`. */
-  invokeId: number;
+  /**
+   * The id the `invoke` was sent with, from `nextRequestId` - or null for a run
+   * this window is watching and has not learned it for yet (`watched`).
+   */
+  invokeId: number | null;
+  /**
+   * A run this window did not start (#347): a phone's run on the desktop, the
+   * desktop's or another phone's on a phone. Every client sees every run host's
+   * frames, and the window used to drop the ones it had not launched - so a
+   * phone never saw the desktop's runs, and the desktop window never saw one a
+   * phone started, gate and all. See `watchRun`.
+   */
+  watched: boolean;
+  /**
+   * `result` and `error` frames a watched run's host sent before the window
+   * learned its invoke id. One of them may be the run's own ending, and which
+   * one cannot be told yet - a pause, an unpause and a cancel are answered with
+   * `result` frames too - so they wait here and `learnInvokes` claims it.
+   */
+  unclaimed: readonly Frame[];
   /** Gate ids already answered on this host. See `mayAnswer`. */
   answered: ReadonlySet<number>;
   /** Whether frames from this handle still reach this run. False once it has ended. */
@@ -62,6 +80,28 @@ export interface LiveRun {
   /** A stop this window asked for and the core has not answered (#253). */
   stopping: boolean;
   run: Run;
+  /**
+   * What the run started from: a resume's seeded history, or nothing. A
+   * phone's reconnect (#346) folds the desktop's replay onto this again, so the
+   * history from before a resume is not lost with the connection.
+   */
+  base?: Run;
+  /** A phone reconnected and the replay is being folded again (#346). */
+  rejoining?: Rejoining | null;
+}
+
+/**
+ * A run being refolded after a phone reconnected (#346).
+ *
+ * The desktop replays every live run host's frames to a phone that joins, on
+ * every connection. Folding them on top of what was already folded would draw
+ * every turn twice, so a reconnect starts each live run again from its `base`
+ * and keeps what it had as `prior`, in case nothing is replayed at all.
+ */
+export interface Rejoining {
+  prior: Run;
+  /** A frame has been folded since the reconnect. */
+  replayed: boolean;
 }
 
 export type LiveRuns = readonly LiveRun[];
@@ -103,10 +143,85 @@ export function launchMeta(argv: readonly string[]): { dir: string | null; asked
   return { dir: at, asked: command === 'resume' && first !== undefined && first !== '' ? first : null };
 }
 
-/** Where a frame from `host` goes: the service host's listeners, a run, or nowhere. */
-export function routeFrame(lives: LiveRuns, host: string): 'service' | 'run' | 'stale' {
+/**
+ * Where a frame from `host` goes: the service host's listeners, a run, a run to
+ * start watching, or nowhere.
+ *
+ * `watch` is a run host this window has never had an entry for (#347). A handle
+ * it has had one for and let go of - ended, dropped or pruned - is `stale`, which
+ * `retired` remembers: a late frame from a run this window already finished must
+ * not come back as a new run.
+ */
+export function routeFrame(
+  lives: LiveRuns,
+  host: string,
+  retired: ReadonlySet<string> = new Set(),
+): 'service' | 'run' | 'watch' | 'stale' {
   if (host === SERVICE_HOST) return 'service';
-  return lives.some((e) => e.live && e.handle === host) ? 'run' : 'stale';
+  if (lives.some((e) => e.live && e.handle === host)) return 'run';
+  if (lives.some((e) => e.handle === host) || retired.has(host)) return 'stale';
+  return 'watch';
+}
+
+/**
+ * Start watching a run this window did not start (#347), on its first frame.
+ *
+ * Appends an entry that routes like any other and is drawn the moment it is
+ * added, since a frame is the proof its host exists. It is never pointed at -
+ * a run somebody started on another device must not move this window - and it
+ * has no proposing conversation here, so adoption skips it. Its repository and
+ * id come from `run_started`, which the desktop's live-run buffer replays first.
+ */
+export function watchRun(lives: LiveRuns, handle: string, protocol: number | null): LiveRuns {
+  return addRun(lives, {
+    handle,
+    invokeId: null,
+    watched: true,
+    unclaimed: [],
+    answered: new Set(),
+    live: true,
+    dir: '',
+    asked: null,
+    task: null,
+    sent: null,
+    draft: null,
+    held: null,
+    adopted: 'skipped',
+    pid: null,
+    heard: true,
+    pausing: false,
+    stopping: false,
+    run: { ...emptyRun(), protocol },
+  });
+}
+
+/** Hold a watched run's `result` or `error` until its invoke id is known. */
+export function holdUnclaimed(lives: LiveRuns, handle: string, frame: Frame): LiveRuns {
+  return lives.map((e) =>
+    e.handle === handle && e.live && e.invokeId === null ? { ...e, unclaimed: [...e.unclaimed, frame] } : e,
+  );
+}
+
+/**
+ * Learn watched runs' invoke ids from `host_status`, which lists each run host
+ * with the id Rust read off its invoke (#347). Returns the frames that turn out
+ * to be a run's own ending, for the caller to apply as it would have on arrival:
+ * a `result` ends the run, an `error` fails it.
+ */
+export function learnInvokes(
+  lives: LiveRuns,
+  runs: readonly { handle: string; invokeId: number | null }[],
+): { lives: LiveRuns; endings: readonly { handle: string; frame: Frame }[] } {
+  const endings: { handle: string; frame: Frame }[] = [];
+  const next = lives.map((e) => {
+    if (!e.watched || e.invokeId !== null) return e;
+    const id = runs.find((r) => r.handle === e.handle)?.invokeId ?? null;
+    if (id === null) return e;
+    const ending = e.unclaimed.find((f) => (f.type === 'result' || f.type === 'error') && f.id === id);
+    if (ending !== undefined) endings.push({ handle: e.handle, frame: ending });
+    return { ...e, invokeId: id, unclaimed: [] };
+  });
+  return { lives: next, endings };
 }
 
 function liveAt(lives: LiveRuns, host: string): LiveRun | undefined {
@@ -130,7 +245,7 @@ function liveAt(lives: LiveRuns, host: string): LiveRun | undefined {
  */
 export function invokeOutcome(lives: LiveRuns, host: string, frame: Frame): 'completed' | 'failed' | null {
   const e = liveAt(lives, host);
-  if (e === undefined) return null;
+  if (e === undefined || e.invokeId === null) return null;
   if (frame.type === 'result' && frame.id === e.invokeId) return 'completed';
   if (frame.type === 'error' && frame.id === e.invokeId) return 'failed';
   return null;
@@ -206,9 +321,54 @@ export function updateRun(lives: LiveRuns, handle: string, step: (run: Run) => R
       heard: true,
       pausing: over || run.gate !== null ? false : e.pausing,
       stopping: over ? false : e.stopping,
+      ...(e.rejoining ? { rejoining: { ...e.rejoining, replayed: true } } : {}),
     };
   });
 }
+
+/**
+ * A phone reconnected (#346): start every live run again from its `base`, so
+ * the desktop's replay folds onto nothing rather than onto itself. What was on
+ * screen is kept as `prior`. A second reconnect before anything was replayed
+ * keeps the first `prior`, which is still the last run actually folded.
+ */
+export function rejoin(lives: LiveRuns): LiveRuns {
+  return lives.map((e) => {
+    if (!e.live) return e;
+    const prior = e.rejoining && !e.rejoining.replayed ? e.rejoining.prior : e.run;
+    return { ...e, rejoining: { prior, replayed: false }, run: { ...(e.base ?? emptyRun()), protocol: prior.protocol } };
+  });
+}
+
+/**
+ * The replay has been folded (#346): settle every run that was rejoining.
+ *
+ * - **Replayed**: the refolded run stands, whatever its host is doing now.
+ * - **Nothing replayed, host alive**: nothing was said since, so what was on
+ *   screen is still right, and comes back.
+ * - **Nothing replayed, host gone**: the run ended while the phone was away;
+ *   what was on screen comes back, marked lost with `why`. Its handle is in
+ *   `lost`, so the window ends it as it ends any lost run.
+ */
+export function settleRejoin(
+  lives: LiveRuns,
+  alive: ReadonlySet<string>,
+  at: number,
+  why: string,
+): { lives: LiveRuns; lost: readonly string[] } {
+  const lost: string[] = [];
+  const next = lives.map((e) => {
+    if (!e.rejoining) return e;
+    if (e.rejoining.replayed) return { ...e, rejoining: null };
+    if (alive.has(e.handle)) return { ...e, run: e.rejoining.prior, rejoining: null };
+    lost.push(e.handle);
+    return { ...e, run: hostLost(e.rejoining.prior, at, why), rejoining: null };
+  });
+  return { lives: next, lost };
+}
+
+/** The sentence for a run whose host ended while a phone was away (#346). */
+export const ENDED_WHILE_AWAY = "the run's host ended while this phone was disconnected";
 
 /** The run's invoke is over: nothing more is routed to it. */
 export function endRun(lives: LiveRuns, handle: string): LiveRuns {
@@ -225,6 +385,18 @@ export function markAnswered(lives: LiveRuns, handle: string, askId: number): Li
 
 export function setFlag(lives: LiveRuns, handle: string, flag: 'pausing' | 'stopping', value: boolean): LiveRuns {
   return edit(lives, handle, (e) => ({ ...e, [flag]: value }));
+}
+
+/**
+ * A run's pause and stop as its host says they now stand (#371), whichever
+ * client pressed. Never over what `updateRun` already cleared: a run that has
+ * settled, or is holding at a gate, is pausing and stopping no longer.
+ */
+export function setControls(lives: LiveRuns, handle: string, pausing: boolean, stopping: boolean): LiveRuns {
+  return edit(lives, handle, (e) => {
+    const over = settled(e.run) || e.run.reason !== null;
+    return { ...e, pausing: pausing && !over && e.run.gate === null, stopping: stopping && !over };
+  });
 }
 
 export function markAdopted(lives: LiveRuns, handle: string, adopted: 'moved' | 'skipped'): LiveRuns {

@@ -8,6 +8,7 @@ import type { Build } from '../host';
 import type { Run, Staleness } from '../cockpit/model';
 import { StalenessNote } from '../cockpit/Staleness';
 import { cn } from '@/lib/utils';
+import { SURFACE } from '../surface';
 
 /**
  * The bar along the bottom: the window's standing facts, and the one control
@@ -27,7 +28,9 @@ import { cn } from '@/lib/utils';
  * - **Spend**, absent rather than `0 tok` before anything is charged - a run
  *   that has spent nothing has not spent zero, it has not been measured.
  * - **The build stamp**, because two builds of one version are otherwise
- *   identical (#201).
+ *   identical (#201). Not on a phone, whose Diagnostics screen has it (#347).
+ * - **The connected phones**, one chip each by the paired list's name, only
+ *   while one is connected (#344).
  *
  * Every phrase for an ending comes from `format.ts`'s closed map; a code this
  * build does not know shows as the number.
@@ -48,12 +51,14 @@ export function StatusBar({
   pausing,
   stopping,
   controls,
+  onGate,
   staleness,
   onSpend,
   build,
   diagnosticsOpen,
   onDiagnostics,
   diagnostics,
+  phones,
 }: {
   /** A browser preview, with no host at all. */
   outside: boolean;
@@ -80,6 +85,14 @@ export function StatusBar({
    */
   controls: boolean;
   /**
+   * On a phone (#347), what the held gate's one control opens: the gate sheet,
+   * which draws the footer's whole gate block. A phone's bar has no room for
+   * the boundary and two buttons - they ran off its edge - and a gate is a
+   * decision worth its evidence, so it is one press away rather than two
+   * buttons with none. Absent on a desktop, which keeps its row.
+   */
+  onGate?: (() => void) | undefined;
+  /**
    * How quiet the live turn is (`7c`). Its `thinking` and `cannot tell` states
    * are drawn here rather than as a strip above the columns, which pushed the
    * whole window down each time the turn went quiet (#267).
@@ -91,6 +104,11 @@ export function StatusBar({
   onDiagnostics: (open: boolean) => void;
   /** The popover's body. */
   diagnostics: ReactNode;
+  /**
+   * The paired phones connected now, by the paired list's names (#344). One
+   * chip each while any is connected, nothing otherwise.
+   */
+  phones: readonly string[];
 }) {
   const live = run.running !== null || run.preflight !== null;
   const how = run.completed === null ? null : ending(run.completed.exit);
@@ -119,7 +137,19 @@ export function StatusBar({
         </Badge>
       )}
 
-      {project !== null && <span className="truncate text-tertiary">{project}</span>}
+      {/* A phone that can do everything this window can is a fact worth having
+          in sight while it is true (#344). */}
+      {phones.map((name) => (
+        <Badge key={name} variant="quiet" title={`${name} is connected to this desktop`}>
+          {name}
+        </Badge>
+      ))}
+
+      {/* Given up on a phone while a gate holds (#347): the bar has room for the
+          gate's control or the name, and the name was cut to its first letter. */}
+      {project !== null && !(onGate !== undefined && run.gate !== null) && (
+        <span className="truncate text-tertiary">{project}</span>
+      )}
 
       {/* Before the spacer, so it takes the spacer's room as it comes and goes
           and nothing to its right moves (#267). */}
@@ -137,6 +167,12 @@ export function StatusBar({
       ) : run.gate !== null ? (
         <span className="flex items-center gap-1.5">
           <Badge variant="accent">holding</Badge>
+          {onGate !== undefined ? (
+            <Button size="sm" variant="primary" onClick={onGate}>
+              decide
+            </Button>
+          ) : (
+          <>
           <span>at {boundary(run.gate.boundary)}</span>
           {controls && (
           <>
@@ -159,6 +195,8 @@ export function StatusBar({
           >
             <Square className="size-3" aria-hidden /> stop
           </Button>
+          </>
+          )}
           </>
           )}
         </span>
@@ -196,18 +234,37 @@ export function StatusBar({
         </span>
       ) : null}
 
+      {/* Never wrapped (#347): on a phone holding a gate the bar is full, and a
+          two-line readout pushed the bar taller than its one row. */}
       <button
         type="button"
-        className="cursor-pointer rounded-sm border border-transparent bg-transparent px-1 text-secondary hover:text-emphasis"
+        className="shrink-0 cursor-pointer whitespace-nowrap rounded-sm border border-transparent bg-transparent px-1 text-secondary hover:text-emphasis"
         onClick={onSpend}
         title="Usage for the live run"
       >
         {run.spend.tokens === null ? 'no usage reported' : `${fmtTokens(run.spend.tokens)} tok`}
       </button>
 
-      {build !== null && <span className="font-mono text-mono-sm text-tertiary">{buildStamp(build)}</span>}
+      {/* Not on a phone (#347): the stamp tells two desktop builds apart, and
+          the phone's Diagnostics screen carries it with the sentence that makes
+          it usable. The bar's room goes to the gate's control and the spend. */}
+      {build !== null && !SURFACE.compactChrome && (
+        <span className="font-mono text-mono-sm text-tertiary">{buildStamp(build)}</span>
+      )}
 
-      {!outside && (
+      {!outside && SURFACE.compactChrome && (
+        // A phone opens a screen instead (#347): the popover is wider than it.
+        <button
+          type="button"
+          className="flex size-5 cursor-pointer items-center justify-center rounded-sm border border-transparent bg-transparent text-secondary hover:text-emphasis"
+          aria-label="Diagnostics"
+          title="Diagnostics"
+          onClick={() => onDiagnostics(true)}
+        >
+          <Ellipsis className="size-4" aria-hidden />
+        </button>
+      )}
+      {!outside && !SURFACE.compactChrome && (
         <Popover open={diagnosticsOpen} onOpenChange={onDiagnostics}>
           <PopoverTrigger asChild>
             <button

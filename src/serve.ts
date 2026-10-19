@@ -1,4 +1,4 @@
-import { requestCancel } from '@src/cancel.js';
+import { cancelRequested, requestCancel } from '@src/cancel.js';
 import { main } from '@src/cli.js';
 import { commandLogDir } from '@src/commandlog.js';
 import { adoptedSnapshot, keepCommandLogs, refused as commandRefused, startCommand, stopTiedCommands, stopCommand } from '@src/commands.js';
@@ -43,7 +43,7 @@ import type { RunLoop } from '@src/cli.js';
 import type { GateContext, Host } from '@src/host.js';
 import type { Narration } from '@src/log.js';
 import type { PilotChatOptions, PilotChatResult } from '@src/pilotchat.js';
-import type { Outbound } from '@src/protocol.js';
+import type { Outbound, PilotTurnLive } from '@src/protocol.js';
 import type { RunSummary } from '@src/types.js';
 import { scoreArchive } from '@src/scorecard.js';
 import type { Scorecard } from '@src/scorecard.js';
@@ -192,8 +192,11 @@ export interface SessionDeps {
    * The one seam a test needs, and the only one: everything else here is
    * framing, and framing that had to spawn `claude` to be tested would not be
    * tested.
+   *
+   * `origin` is the invoke's readable origin, or null (#354): beside the argv
+   * rather than in it, because the argv is the CLI's contract.
    */
-  invoke?: (argv: readonly string[], loop: RunLoop) => Promise<number>;
+  invoke?: (argv: readonly string[], loop: RunLoop, origin: string | null) => Promise<number>;
   /**
    * What runs one pilot chat turn. Defaults to `pilotChat` (#193).
    *
@@ -289,11 +292,17 @@ export interface SessionDeps {
 export const INBOUND_MAX_BYTES = 64 * 1024 * 1024;
 
 export function createSession(send: Send, deps: SessionDeps = {}): Session {
-  const invoke = deps.invoke ?? ((argv, loop) => main(argv, loop));
+  const invoke = deps.invoke ?? ((argv, loop, origin) => main(argv, loop, origin));
   const chat = deps.pilot ?? pilotChat;
   const chatCodex = deps.pilotCodex ?? pilotCodex;
   /** Subscription pilot turns in flight, by request id, so `pilot_stop` can reach one. */
   const pilotTurns = new Map<number, AbortController>();
+  /**
+   * The announced turns in flight, by request id (#371): what `pilot_turns`
+   * answers a client that joins mid-turn with, and how a second turn on one
+   * conversation is refused. Only a turn whose frame named its conversation.
+   */
+  const announced = new Map<number, PilotTurnLive>();
   const archive = deps.archive ?? ((dir: string) => listRuns(dir));
   const stats = deps.stats ?? scoreArchive;
   const listModelsWith = deps.models ?? listModels;
@@ -364,6 +373,19 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
    */
   let pauseRequested = false;
 
+  /**
+   * Every client hears a pause or a stop as it now stands (#371), not only the
+   * asker - said before the asker's answer, and only when it moved, so a second
+   * pause or an unpause with nothing armed says nothing new.
+   */
+  let saidControls = { pausing: false, stopping: false };
+  const sayControls = (): void => {
+    const now = { pausing: pauseRequested, stopping: cancelRequested() !== null };
+    if (now.pausing === saidControls.pausing && now.stopping === saidControls.stopping) return;
+    saidControls = now;
+    send({ type: 'controls', ...now });
+  };
+
   const host: Host = {
     decide: (ctx: GateContext) =>
       new Promise<unknown>((resolve) => {
@@ -374,6 +396,8 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
     takePause: () => {
       const asked = pauseRequested;
       pauseRequested = false;
+      // Not said: the ask that follows is how every client learns it was taken.
+      saidControls = { ...saidControls, pausing: false };
       return asked;
     },
   };
@@ -382,9 +406,9 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
   // the same loop, called with a host attached.
   const loop: RunLoop = (state, cfg, resume) => orchestrate(state, cfg, resume, undefined, host);
 
-  const runInvoke = (id: number, argv: readonly string[]): void => {
+  const runInvoke = (id: number, argv: readonly string[], origin: string | null): void => {
     running = id;
-    void invoke(argv, loop)
+    void invoke(argv, loop, origin)
       .then((exit) => {
         send({ type: 'result', id, exit });
       })
@@ -413,6 +437,8 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
         // A pause asked for before any run starts still holds that run: this
         // clears only when a run returns.
         pauseRequested = false;
+        // Not said either: every client draws a returned run as neither.
+        saidControls = { pausing: false, stopping: false };
         settleIfDone();
       });
   };
@@ -631,6 +657,9 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
         } else {
           saveChat(dir, msg.key, msg.value);
           send({ type: 'chat_saved', id: msg.id, key: msg.key });
+          // Every client, after the file and after the reply (#354): another
+          // window's cache re-reads this key rather than saving over it.
+          send({ type: 'changed', what: 'chat', key: msg.key, id: msg.id });
         }
       } catch (err: unknown) {
         send({ type: 'error', id: msg.id, message: err instanceof Error ? err.message : String(err) });
@@ -653,6 +682,7 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
         } else {
           saveEntry(dir, msg.key, msg.value);
           send({ type: 'memory_saved', id: msg.id, key: msg.key });
+          send({ type: 'changed', what: 'memory', key: msg.key, id: msg.id });
         }
       } catch (err: unknown) {
         send({ type: 'error', id: msg.id, message: err instanceof Error ? err.message : String(err) });
@@ -780,9 +810,24 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
         });
         return;
       }
+      // What other clients are told once the file is written (#354), and only
+      // then: `wrote` is set the moment `writeConfig` returns, which is after
+      // its rename. A refusal never gets that far, so it announces nothing.
+      const changed: Outbound | null =
+        msg.patch === undefined
+          ? null
+          : {
+              type: 'changed',
+              what: 'config',
+              key: msg.scope === 'global' ? 'global' : msg.dir,
+              id: msg.id,
+              ...(msg.origin === undefined ? {} : { origin: msg.origin }),
+            };
+      let wrote = false;
       try {
         const path =
           msg.patch === undefined ? null : writeConfig(msg.dir, msg.patch, msg.scope ?? 'project').path;
+        wrote = msg.patch !== undefined;
         // The config that RESULTED, whether this was a read or a write, so a
         // form never has to assume its own save took effect.
         const loaded = readConfig(msg.dir);
@@ -807,6 +852,7 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
           pilot: resolvedAccess(access()),
           clis: { claude: cliStatus('claude'), codex: cliStatus('codex') },
         });
+        if (changed !== null) send(changed);
       } catch (err: unknown) {
         // `validate`'s own message, naming the field - which is what lets a
         // settings form say WHICH value it refused rather than that something
@@ -816,6 +862,9 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
           id: msg.id,
           message: err instanceof Error ? err.message : String(err),
         });
+        // Unless it was: a write that landed and then could not be read back
+        // has still changed the file, so other clients still have to know.
+        if (wrote && changed !== null) send(changed);
       }
       return;
     }
@@ -849,6 +898,11 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
               refused: null,
             },
       );
+      return;
+    }
+
+    if (msg.type === 'pilot_turns') {
+      send({ type: 'pilot_turns', id: msg.id, turns: [...announced.values()] });
       return;
     }
 
@@ -894,10 +948,31 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
         send({ type: 'error', id, message: err instanceof Error ? err.message : String(err) });
         return;
       }
+      // One turn per conversation (#371). Two clients showing one chat could
+      // otherwise each send a message into it at once, and two turns resuming
+      // one session would each answer without the other's messages.
+      const chatKey = msg.chat;
+      if (chatKey !== undefined) {
+        const busy = [...announced.values()].find((t) => t.chat === chatKey);
+        if (busy !== undefined) {
+          send({
+            type: 'error',
+            id,
+            message: 'a reply is already being written in this conversation - wait for it, or stop it',
+          });
+          return;
+        }
+      }
       // This turn's own off switch (#223), held until it settles either way.
       const stopper = new AbortController();
       pilotTurns.set(id, stopper);
       const turnStarted = Date.now();
+      // Said to every client (#371), so the one beside the asker draws it.
+      if (chatKey !== undefined) {
+        const asked = msg.asked ?? '';
+        announced.set(id, { id, chat: chatKey, asked, startedAt: turnStarted, text: '' });
+        send({ type: 'pilot_started', id, chat: chatKey, asked, startedAt: turnStarted });
+      }
       void (msg.agent === 'codex' ? chatCodex : chat)({
         prompt: msg.prompt,
         system: msg.system,
@@ -920,6 +995,8 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
         timeoutMs: granted.timeoutMs,
         signal: stopper.signal,
         onDelta: (text: string) => {
+          const live = announced.get(id);
+          if (live !== undefined) live.text += text;
           send({ type: 'pilot_delta', id, text });
         },
       })
@@ -958,6 +1035,7 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
         })
         .finally(() => {
           pilotTurns.delete(id);
+          announced.delete(id);
         });
       return;
     }
@@ -973,6 +1051,7 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
       // The count is on the wire because it is a different thing to tell
       // somebody: zero means the cancel arrived between turns, so the run still
       // ends but no work was discarded.
+      sayControls();
       send({ type: 'result', id: msg.id, exit: killed });
       return;
     }
@@ -983,6 +1062,7 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
       // pause was asked for. Never an error - too late is a run that is holding.
       const had = pauseRequested;
       pauseRequested = false;
+      sayControls();
       send({ type: 'result', id: msg.id, exit: had ? 0 : 1 });
       return;
     }
@@ -997,6 +1077,7 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
       // presses pause a moment before a run starts meant to hold that run, and
       // refusing it would be this seam deciding their timing was wrong. It costs
       // nothing, because `takePause` clears itself at the first boundary.
+      sayControls();
       send({ type: 'result', id: msg.id, exit: 0 });
       return;
     }
@@ -1032,7 +1113,7 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
       });
       return;
     }
-    runInvoke(msg.id, msg.argv);
+    runInvoke(msg.id, msg.argv, msg.origin ?? null);
   };
 
   const write = createLineReader(

@@ -1,4 +1,5 @@
-import { invoke } from '@tauri-apps/api/core';
+import { confirmed } from '../confirm';
+import { invoke, listen } from '../transport';
 
 /**
  * The webview's half of credential handling (#143).
@@ -43,12 +44,24 @@ export function status(): Promise<KeyStatus[]> {
   return invoke<KeyStatus[]>('key_status');
 }
 
-export function set(provider: Provider, key: string): Promise<void> {
-  return invoke('key_set', { provider, key });
+/** Asked on the device first (#346): a key stored is money somebody else can spend. */
+export async function set(provider: Provider, key: string): Promise<void> {
+  await confirmed('Store an API key');
+  await invoke('key_set', { provider, key });
 }
 
 export function clear(provider: Provider): Promise<void> {
   return invoke('key_clear', { provider });
+}
+
+/**
+ * A key was stored or forgotten, by any client (#371) - `desktop://changed`
+ * saying `keys`. It carries no value: re-read `status()`.
+ */
+export function onKeysChanged(handler: () => void): Promise<() => void> {
+  return listen<string>('desktop://changed', (event) => {
+    if (event.payload === 'keys') handler();
+  });
 }
 
 /**

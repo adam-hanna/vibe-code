@@ -42,7 +42,7 @@ import type { ReactNode } from 'react';
 import type { Pin, ProjectName, ProjectNode, RunName } from './projects';
 import type { RailRun } from './squares';
 import { draftsIn, draftTitle, settled } from './pending';
-import { memory, useMemoryFailure } from '../memory';
+import { memory, useMemoryFailure, useMemoryRevision } from '../memory';
 import type { Draft } from './pending';
 import type { ArchiveRun } from '../host';
 import { gatesWaiting } from './hosts';
@@ -733,6 +733,23 @@ export function Sidebar({
   const [deleting, setDeleting] = useState(false);
   /** Bumped after a delete, so every open project re-reads its archive. */
   const [beat, setBeat] = useState(0);
+  // Including another client's delete (#371): a run deleted on the phone leaves
+  // this list at once, and its pins and names follow through the memory.
+  useEffect(() => {
+    if (!host.inShell()) return;
+    let off: (() => void) | null = null;
+    let live = true;
+    void host
+      .onRunDeleted(() => setBeat((n) => n + 1))
+      .then((stop) => {
+        if (live) off = stop;
+        else stop();
+      });
+    return () => {
+      live = false;
+      off?.();
+    };
+  }, []);
   /**
    * What went wrong adding a project, or null.
    *
@@ -746,9 +763,12 @@ export function Sidebar({
    */
   const [problem, setProblem] = useState<string | null>(null);
 
-  // Read once, and again only when `epoch` says the lists were rewritten from
-  // outside — a project pointed somewhere else from its settings (#223). They
-  // are this window's own memory, so every other write goes through the setters.
+  // Read once, and again when `epoch` says the lists were rewritten from outside
+  // — a project pointed somewhere else from its settings (#223) — or when another
+  // client moved one of them (#371): a project added or a run renamed on the
+  // phone is on this screen at once. Every write of this window's own goes
+  // through the setters, and a re-read writes nothing.
+  const elsewhere = useMemoryRevision(PROJECTS_KEY, PINNED_KEY, NAMES_KEY, PROJECT_NAMES_KEY);
   useEffect(() => {
     try {
       setProjects(readProjects(memory.getItem(PROJECTS_KEY)));
@@ -759,7 +779,7 @@ export function Sidebar({
       // Storage can be unavailable or full. An empty sidebar is a smaller
       // failure than a window that will not render.
     }
-  }, [epoch]);
+  }, [epoch, elsewhere]);
 
   const save = useCallback((key: string, value: unknown) => {
     try {

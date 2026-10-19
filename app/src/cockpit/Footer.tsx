@@ -156,6 +156,21 @@ const FOOT = 'flex flex-none flex-col gap-2 border-t border-rule-structure bg-co
 const NOTE = 'text-body-sm leading-relaxed text-tertiary';
 /** The banner's own sentence beside the kicker. */
 const DETAIL = 'text-body-sm leading-relaxed text-emphasis';
+
+/**
+ * *Continued from <phone>* or *Stopped from <phone>* (#344): the gate's answer
+ * came from a paired phone, as the frame said. Drawn here because the footer is
+ * the one place in the column that names boundaries, and it is still on screen
+ * after the release, when the gate's own card has gone. Null for every answer
+ * not from a phone - this window's own carry no origin, and saying *from this
+ * desktop* about them would be inventing it.
+ */
+function decidedLine(run: Run, how: 'continued' | 'stopped'): string | null {
+  const d = run.decidedFrom;
+  if (d === null || d.how !== how) return null;
+  if (how === 'stopped') return `Stopped from ${d.phone}.`;
+  return d.boundary === null ? `Continued from ${d.phone}.` : `Continued from ${d.phone} at ${boundary(d.boundary)}.`;
+}
 /**
  * A block of what the gate is asking, ruled off on the left with the accent so
  * the shared answer and the boundary-specific detail read as one block when
@@ -497,6 +512,7 @@ export function Footer({
             {run.ended.detail}
           </div>
         )}
+        {decidedLine(run, 'stopped') !== null && <div className={NOTE}>{decidedLine(run, 'stopped')}</div>}
 
         {run.reason !== null && <div className={WHY}>{run.reason.message}</div>}
         {/* **A finished plan-only run is the one ending with work left to do**,
@@ -648,6 +664,7 @@ export function Footer({
           </Badge>
           <span className={DETAIL}>{run.ended.detail}</span>
         </div>
+        {decidedLine(run, 'stopped') !== null && <div className={NOTE}>{decidedLine(run, 'stopped')}</div>}
         {run.ended.how === 'stopped' && (
           <div className={NOTE}>
             The run is resumable — the reason is in NEEDS-INPUT.md and `vibe resume` picks it up.
@@ -770,6 +787,7 @@ export function Footer({
         )}
       </div>
       {!canControl && <span className={NOTE}>No turn is open.</span>}
+      {decidedLine(run, 'continued') !== null && <span className={NOTE}>{decidedLine(run, 'continued')}</span>}
     </div>
   );
 }

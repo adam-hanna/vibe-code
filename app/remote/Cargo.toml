@@ -1,0 +1,41 @@
+[package]
+name = "vibe-remote"
+version = "0.1.0"
+description = "What the vibe desktop app and the vibe phone app share about a remote connection"
+authors = ["Adam Hanna"]
+edition = "2021"
+# iroh 1.3 and iroh-base 1.3 declare 1.91, as in the desktop crate.
+rust-version = "1.91"
+publish = false
+
+# A path dependency of both apps rather than a workspace member (#345). A
+# workspace rooted at `app/` would move the desktop's `target/` to `app/target`,
+# and `release.yml` names `app/src-tauri/target/release/...` in seven places.
+# So each app resolves this crate in its own lockfile, and the desktop's gate
+# tests it with `cargo test -p vibe-remote`. That is also why there are no
+# dev-dependencies here: cargo refuses to test a non-member that has any.
+
+[dependencies]
+# The device key and the endpoint id (#341). `key` is the ed25519 types.
+iroh-base = { version = "1.3", default-features = false, features = ["key"] }
+# The endpoint both apps build (#342). Default features off so `portmapper`
+# never asks a home router to forward a port; `tls-ring` so no C toolchain is
+# needed for aws-lc on Windows. The phone dials with the same features.
+iroh = { version = "1.3", default-features = false, features = ["tls-ring", "fast-apple-datapath"] }
+# A phone on the same network finds the desktop with no internet at all: 0.175s
+# with no relay on #339.
+iroh-mdns-address-lookup = "0.6"
+serde = { version = "1", features = ["derive"] }
+# The body of every framed message. `raw_value` so an event's payload is
+# carried as the bytes the desktop serialised (#343); Tauri already turns it on
+# in both apps' builds.
+serde_json = { version = "1", features = ["raw_value"] }
+# The pairing matching code: six digits from a SHA-256 both ends compute.
+sha2 = "0.10"
+# The phone's client (#346): its reader task, the per-call answers and the
+# dial deadlines. No `test-util`: the client's timeouts are injected instead, so
+# no test here or in the desktop's needs paused time.
+tokio = { version = "1", default-features = false, features = ["sync", "time", "macros", "rt"] }
+# Watching a connection's paths for the phone's direct/relayed log (#346); the
+# same version iroh itself uses.
+n0-future = "0.3"

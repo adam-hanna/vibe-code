@@ -69,14 +69,20 @@ node scripts/record-cli-fixtures.mjs --force   # re-record a version that alread
 introduced them, which could not record fixtures from inside a sandboxed turn. There is no
 other way past the check.
 
-There is **no linter and no formatter**. There are three workflows. `pages.yml` deploys the
-docs site from `main`. `ci.yml` runs on every push and pull request into `develop` and `main`:
-the core gate (`npm run typecheck && npm test`), the app gate (typecheck, vitest,
-`audit:contrast`) and the Rust tests, all on Ubuntu 22.04 with Node 22. `release.yml` builds the
-desktop bundles on a `v*` tag into a draft GitHub release (#239). What CI does **not** run: a
-linter or formatter, the tests on macOS or Windows, and `npm publish`. **`npm run typecheck &&
-npm test` before every commit is still the rule**, and it is still on you to run it: CI only
-reports after you push. A test that fails only on CI is a finding about the test or the code,
+There is **no linter and no formatter**. There are four workflows. `pages.yml` deploys the
+docs site from `main`. `ci.yml` runs on every push and pull request into `main`, and by hand
+(`workflow_dispatch`): the core gate (`npm run typecheck && npm test`), the app gate
+(typecheck, vitest, `audit:contrast`) and the Rust tests, all on Ubuntu 22.04 with Node 22.
+`mobile.yml` builds the phone app and launches it on an Android emulator and an iOS simulator,
+on a pull request into `main` that touches it, and by hand. `release.yml` builds the desktop
+bundles and the phone apps on a `v*` tag into a draft GitHub release (#239, #348). What CI does **not** run: a linter or
+formatter, the tests on macOS or Windows, `npm publish` - and **anything on `develop`**.
+Actions minutes are a budget, so at the owner's decision a merge into `develop` runs nothing:
+**the gates are run locally before every merge into `develop`**, and CI runs in full on the
+release PR into `main`. So **`npm run typecheck && npm test`, and the app's and the Rust gates
+when you touch them, before every commit is the rule**, and nothing else will catch a miss
+until the release PR. `gh workflow run ci.yml --ref <branch>` runs CI on a branch when a
+change needs a clean machine sooner. A test that fails only on CI is a finding about the test or the code,
 never something to retry past or skip. Node 20+ (`engines`).
 
 **A release carries two names for each installer and the files an installed app updates
@@ -89,6 +95,20 @@ moves per release; the names are written once, in `release.yml`'s matrix, and
 off and the workflow switches it on, so a local `npm run app:build` never needs the key. **That
 key cannot be replaced**: a release signed with a new one is refused by every installed copy,
 whose only way forward is a manual reinstall.
+
+**The phone apps are on the same release, and there is no store** (#348, at the owner's
+decision: *"Lets not release in the app store"*). The `mobile` job builds an APK signed with the
+`ANDROID_KEYSTORE` secrets and an **unsigned** `.ipa` (`tauri ios build --no-sign`, tauri-cli
+2.11), each under a versioned name and a stable one, `Vibe-android.apk` and
+`Vibe-ios-unsigned.ipa`, attested like the installers and listed in `SHA256SUMS`. A person
+installs the APK by hand and signs the `.ipa` with their own Apple ID through AltStore, SideStore
+or Sideloadly; `docs/phone.md` says how, and how to build both from source.
+`app/mobile/scripts/sign-apk.sh` is the one signing step, by hand or in CI. **The Android key
+cannot be replaced either**: Android refuses an update signed by another key, so a new one means
+every phone uninstalls the app, and loses its pairing, before it can update. It lives outside
+every checkout (`~/.android/vibe-release.jks` on the owner's machine, with a backup) and in the
+four repository secrets, and is never printed. Without the secrets the job builds no APK and
+says so, as a fork's release has no updater files.
 
 ### The docs site — `docs/`
 
@@ -124,6 +144,7 @@ npm install
 npm run typecheck      # tsc --noEmit, same strictness as the core
 npm run build          # typecheck, then vite build
 npm run dev            # vite on :1420 — the webview alone, no host
+npm run dev:mobile:browser # the phone build on :1421 in a browser tab, answered by the recorded mock desktop - use device mode
 npm run audit:contrast # the design system's own gate
 npm run app:test       # vitest + cargo test — both sides
 npm run test:web       # vitest — the cockpit's reducer
@@ -131,6 +152,10 @@ npm run test:rust      # cargo test — the shell
 npm run stage:sidecar  # copy `dist/src` + a node runtime into the bundle
 npm run app:build      # the whole thing: vite, staging, cargo, installer
 ```
+
+**`dev:mobile:browser` does not reload `app/mobile/`.** Vite's watcher ignores that directory,
+so an edit to `mobile/browser-mock.ts` takes effect only after the server is restarted. Its
+`?live` query plays a desktop run held at a gate, for working on the run screens.
 
 **The app has its own `package.json` and its own gate.** `npm run typecheck && npm test` at
 the root still covers the core and does not see `app/`; run the app's commands as well when
@@ -196,6 +221,18 @@ floor across every surface, and the ramps — plus that no hex literal exists ou
 `tokens.css`. It takes no dependencies and it should stay that way. The hex check **walks
 `src/` rather than naming files**; the named list missed `cockpit.css` the day it appeared,
 which is the failure mode of any allow-list somebody has to remember to extend.
+
+**There are two palettes, and every colour check runs on both** (#347). The dark one is
+`:root`; the light one is `:root[data-theme='light']` and sets colour tokens only, VS Code's
+Light Modern beside the Dark Modern the dark values came from. `appearance.ts` resolves the
+choice - light, dark or the system's, per device like the type scale - and the cockpit sets
+`data-theme` on the root (`main.tsx` sets the system's before the first paint). Check 0
+fails when the light block leaves a dark colour unset, and the severity ramp and the diff
+rows are measured as contrast against the panel, which holds on either ground where
+luminance does not. **`cn` has to be told the app's font sizes** (`FONT_SIZES` in
+`lib/utils.ts`, §11): tailwind-merge read `text-label` as a colour and silently dropped the
+`text-on-accent` before it, which was invisible on the dark palette and dark-on-blue on the
+light one.
 
 **Its last two sections are a different kind of check and are there for a reason vitest
 cannot cover.** §9 and §10 are both about a rule broken by the **absence** of a declaration —
@@ -1230,6 +1267,16 @@ they are waiting on. Four things in it are worth carrying:
   `CREATE_NO_WINDOW` is the wrong flag there is why `windowsHide` is the right one here. Worth
   remembering as a shape: **a detached parent means every console child must hide its own
   window, because there is no console to inherit.**
+- **An interactive shell started in the background stops its whole process group** (#357).
+  The login-shell probe (`shellenv.rs`, #272) runs `$SHELL -l -i`, and bash with `-i`, in the
+  background of a terminal, sends `SIGTTIN` to its own group and waits for `fg`. An app
+  started from a terminal shares that group with every host and run, so the first probe
+  froze all of it: every process in state `T`, no CPU, nothing logged, and the probe's own
+  timeout stopped with it. zsh does not do this, which is why it ran for an hour on a zsh
+  account and froze when a test started `/bin/sh`. The probe now runs under `setsid()`, with
+  no terminal at all. The shape to keep: **a child that may act interactive gets a session
+  of its own**; when an app freezes with no CPU, check `ps -o stat` for `T` before suspecting
+  a deadlock.
 - **Prompts became configuration, and the reasoning that is being reversed is recorded.** The
   settings screen said they were *"deliberately not configuration: they are the product's
   behaviour, and a per-project override would mean two runs of the same version could not be
@@ -1887,6 +1934,66 @@ Five things about them are load-bearing:
   travels whole so a pane can say *this was never written* rather than *this could not be
   read*.
 
+**Every write is announced, because a second client's stale cache would overwrite it**
+(#354). `memory_save`, `chat_save` and a `config` patch each make the service host send
+`changed` - what, key, the write's own id, and its `origin` when it had one - once the file is
+on disk and after the write's reply. A read, a refusal and a failed write send nothing, and
+`delete_run`, `answer_questions` and command output are not announced, since the panes re-read
+those when opened. The frame carries no value: `memory.ts` and the chat store re-read with the
+reads they already use (`app/src/changed.ts` holds the decisions), the writer ignores an id it
+allocated, a key with a write of its own debounced or in flight keeps its local value, and a
+store reconciles what was announced while it was loading. **Two writes to one key race and the
+last one wins**, a start-up migration included; what is guaranteed is that the cache agrees
+with the disk, which is what stops a stale save. A config write's origin travels on `changed`
+and is never written - `vibe.config.json` is committed - while an invoke's is recorded once as
+`run_origin`, by `gate_released`'s carve-out, so a run with none is byte-identical.
+
+**And what is on screen follows it, both ways** (#371). #354 kept the caches right and nothing
+read them again: every reader took its value once, so a project added on the phone, a message
+sent from it or a model picked on it reached the desktop's cache and not its screen until
+somebody navigated away and back. The owner's line: *"EVERYTHING needs to be in sync and
+updated bidirectionally in real time."* Four rules carry it:
+
+- **A store says which keys moved, and only on a change of value.** `memory.ts` and the chat
+  store count each key another client changed (`useMemoryRevision`, `useChatRevision`), and
+  `useFollowedMemory` is `useState(read)` that reads again when its key moves. A re-read
+  writes nothing, so a client's own write coming back moves nothing and nothing loops. The
+  drafts are re-read through their one writer, unsaved.
+- **The conversation on screen is restored again when another client saved it**, never over a
+  turn this pane is streaming. The pilot's vendor, model and effort are one pick in memory
+  (`pilot/pick.ts`), shared by every client, as they were within one window.
+- **A pilot turn is announced** (`pilot_started`, naming the chat and what was sent), so a
+  second client showing that conversation draws it as it streams and can stop it
+  (`pilot/elsewhere.ts`); it is drawn and never kept, since the asker saves it. `pilot_turns`
+  answers a client that opens mid-turn. **One conversation takes one turn at a time**: the
+  host refuses a second, because two turns resuming one session would each answer blind to the
+  other. Not a protocol bump, by the rule above `PROTOCOL_VERSION`: a host that never
+  announces leaves a window drawing what it drew before. **An API-key turn is announced by
+  Rust**, the same way on its own road: `pilot_send` takes an `announce`, emits an `announced`
+  pilot event before the thread starts, keeps the text so far for `pilot_turns` (a new command,
+  answering only what every client was already sent) and refuses a second
+  turn in one conversation. The id comes back after the announcement has gone out, so the
+  asker knows its own turn by `asker`, a token of its window, rather than by id. The two
+  roads' ids are two counters, so a drawn turn folds only what came down its own road, and
+  is stopped back down it.
+- **Settings, commands, deletions and answers follow too.** A config save bumps the cockpit's
+  own read, the composer's and the Settings screen's; a field somebody is typing in keeps its
+  text (`useTyped`), and a refusal always puts back what is in force. A `command_started`
+  reaches every client and folds once per id, and `run_deleted` and `questions_answered` make
+  the sidebar and the Questions pane read again. What stays per screen: unsent text, unsaved
+  edits, scroll, and what each device has open (`deviceKey`, at the owner's decision).
+- **And a new setting cannot be forgotten, because each place a change lives has a closed
+  list.** Asked as *"What happens if we add a new setting or a new tab?"* A tab needs nothing:
+  the phone runs this `src`. What can be missed is who hears a change, so `sync-guard.test.ts`
+  fails on a `vibe.` key not in `MEMORY_KEYS` (shared or per device), on a device key not read
+  through `deviceKey`, on a component reading a shared key without following it, and on an
+  inbound frame not classified as a read or by the frame every client hears it on. In Rust,
+  `COMMAND_REACH` in `control.rs` does the same for every allowed command. Writing them found
+  three gaps, now closed: a key stored or forgotten, and remote access changed or a phone
+  revoked, are announced as `desktop://changed` (`keys` or `remote`) and re-read; and a pause
+  or stop is announced as `controls`, said before the asker's answer and only when it moved.
+  A config key needs nothing: a save is `changed`, and the settings re-read it.
+
 **The window predicts no filename, and `artifacts` is why that was possible** (#223). Four
 tabs — Plans, Plan critique, Code review and Code — draw a run's own artifacts, and the
 dangerous shape they could have taken is composing `plan-${round}.json` from a round number
@@ -2156,6 +2263,222 @@ worktree is inside it, so `--restricted` already allowed the read — what was m
 reason to look. The prompt says it **only when the two differ**, since a sentence about working in
 the repository would be noise on every run that has no worktree, which is all of them by default.
 
+**A phone is another window, over iroh, and it is being built in 1.7.0** (#338–#349). The
+design is `docs/plans/2026-10-12-mobile-remote-engineering.md`, the product decisions are
+its sibling `-product.md`, and the measurements are on #339. Until the code lands, these
+are the rules the code is held to:
+
+- **The phone's webview is `app/src`, and its `invoke` and `listen` go over the
+  connection** to the same Tauri command functions the desktop window calls. The cockpit
+  never knows which side it is on, so there is one cockpit, not two. Only the modules a
+  phone cannot run are swapped, under `vite build --mode mobile` (#345).
+- **Full parity, and the list is still closed.** A phone may call every command the
+  window may, and the allowed list in `app/remote/` is pinned against `generate_handler!`,
+  so a new command is a decision about remote access made on purpose.
+- **Addressed by key, never by IP.** The published record is relay-only (iroh's default
+  `AddrFilter::relay_only`, checked against the live record), so no desktop's IP address
+  is ever published.
+- **Every client has its own range of request ids**, handed out per connection, because
+  every client sees every answer. Gate ids stay shared, and the first answer wins.
+- **A phone's frames are stamped by the desktop**: the bridge overwrites `origin` with
+  the paired phone's name, so a phone cannot claim to be the desktop. It is the one field
+  the bridge writes.
+- **Remote access off means nothing at all**: no endpoint, no relay connection, no
+  published record, no listening socket. Its settings are a Rust-owned file, not vibe's
+  config, because Rust reads them before any window exists and no project file may reach
+  them.
+
+**The bridge is `app/src-tauri/src/remote/bridge.rs`, and the hub beside it is the one seam
+every event leaves through** (#343). The wire is `app/remote/src/control.rs`. The design
+named `app.listen_any` for the fan-out, and it was not used: in Tauri 2.11 a Rust listener
+is not called in emit order (a contended emit is parked in a pending queue and drained
+after a later one), so a phone could fold one host's frames in another order than the
+window. So every emit goes through `remote::hub`, which keeps a run host's frame, queues it
+for every phone and emits it to the window **under one lock**. Four things travel with it:
+
+- **The live-run buffer is one list in emission order**, not one per host, so a phone that
+  joins mid-run replays cross-host order too. It always runs, whether or not remote access
+  is on, and a host's frames go when its exit is emitted, which is after the reap.
+- **A run start is stamped as well as a `host_send`**, because since #246 the invoke
+  travels as `host_start`'s `line`.
+- **A revoke or an `Unpair` aborts every task the bridge started for that connection.**
+  Work a call had already started (a run, a pilot turn) goes on, exactly as when the window
+  that started it goes away.
+- **`remote://pair-ended` is forwarded beside `remote://pair-request`**, though the issue's
+  event list named only the second: it is what closes the *Allow?* prompt, so without it a
+  phone's copy would stay up after the desktop answered. A test fails on any event name the
+  desktop's sources emit that is neither in `REMOTE_EVENTS` nor in `DESKTOP_ONLY_EVENTS`.
+- **An Unpair ends the phone's access at once**: nothing read after it runs, and a call read
+  after the connection was closed is dropped. A control stream that cannot be written closes
+  the connection.
+
+**The switch is `remote.json`, and `remote_set` is the one command that changes it** (#344).
+The file sits beside the paired list (`remote/settings.rs`): `enabled`, `startAtLogin`,
+`keepAwake` and `relay`. Rust reads it in `setup`, before any window or host exists. A missing
+file is the defaults. A file that cannot be read is **off, with the sentence**, and is never
+overwritten, which is `store.rs`'s rule. No key of it is in vibe's config. Six things travel
+with it:
+
+- **One reconcile, under one async lock.** `reconcile_locked` makes the endpoint match the
+  settings. It stops an old endpoint **completely** before it binds a new one, so a relay
+  change never leaves two. Off turns `NoKey` and `Failed` into `Off` as well as stopping an
+  endpoint that is up. The window's `remote_set` answers once that has happened. **Every
+  `remote_set` writes its patch under that lock** (`patch_locked`), so a patch and the change
+  it decides are one step: written before the lock, a phone's *off* could be acted on by the
+  window's reconcile first, closing the phone before its answer.
+- **A phone's closing change answers first.** Turning access off from a phone closes that
+  phone's own connection. So the phone's call takes the lock before it answers. It answers
+  with the decided state. The stop then waits on `Written` until the peer has acknowledged
+  the answer, or the connection closed, or 3s passed. Nothing else can stop or start the
+  endpoint in between.
+- **The connection's own guard is the only source of `remote://connections`.** `Announced`
+  is held across the bridge for a paired phone, so a connect and a disconnect are each one
+  event, however the connection ends. Nothing emits after a stop. The event carries
+  nothing. A client listens first, then reads `remote_status`, and again on each event, drawing only
+  the newest read (`followStatus` in the window). No
+  timer polls.
+- **Start at login is a plugin behind a trait.** `autostart.rs` holds the plugin behind a
+  trait, and no test reaches the plugin. The plugin launches the app with `--autostart`.
+  `main` is `visible: false`, and `shows_window(argv)` is the one rule `setup` and the
+  single-instance callback apply. Without the argument the window is shown. The switch
+  shows what the OS says, not what the file says. The plugin is pinned to 2.5, because 2.6
+  needs tauri 2.12. 2.5.1 already points the Linux entry at `$APPIMAGE`.
+- **Keep awake is decided under the host lock and done on its own thread.**
+  `HostProcess::decide_awake` runs where `spawn` inserts and where `reap` and `stop` remove.
+  It sends `Take` or `Release` to `awake.rs`'s thread, which owns the `keepawake` guard. It
+  holds idle and system sleep, never the display. A stalled D-Bus never blocks a spawn, and
+  a failed take is a log line and a sentence. It never stops a run.
+- **Attribution in the window is gates only, and only a phone.** `reduce` folds
+  `gate_released`/`gate_stopped`'s `origin` into `Run.decidedFrom`. The footer then says
+  *Continued from* or *Stopped from* the phone. `remote/origin.ts` is the app's one spelling
+  of `phone:`, and a test reads it out of `bridge.rs`.
+
+**The phone app is `app/mobile/`, and it is a client only** (#345). Its own Tauri crate
+and `package.json`, built from the same `app/src`; no Node host, no agent CLI, nothing
+that runs a turn. Four things carry it:
+
+- **One seam, `app/src/transport.ts`.** Every module that reaches Rust imports `invoke`
+  and `listen` from it. The phone build swaps in `transport.mobile.ts`, which wraps each
+  desktop command as a `remote_call` naming it; events are re-emitted by the phone's Rust
+  under the desktop's own names, so `listen` is unchanged. The phone checks nothing
+  against an allowed list: the desktop's is the one that decides. `local` reaches the
+  phone's own commands (`phone_identity`, `phone_open_release_page`).
+- **The swaps are a list, `app/mobile-swaps.ts`**: the transport, the folder chooser
+  (`pick.mobile.tsx` browses the desktop over the `fs` frame, inside the pilot's roots),
+  `surface.ts` (no keyboard chords, no palette), and `boot.tsx` (the paired desktops and
+  the lock in front of the cockpit, #346). `mobile.test.ts` fails on a
+  `*.mobile.ts` the list does not name, and on a swap missing an export of what it
+  replaces.
+- **The phone's key follows the desktop's rules**, which moved into
+  `vibe_remote::identity`: made only when the store says there is none, never written
+  over one it could not read. Android keeps it encrypted by a Keystore AES key; iOS in
+  the Keychain, `AfterFirstUnlockThisDeviceOnly`, so it is in no backup.
+- **A mock desktop is how the cockpit is seen on a simulator.** `--features
+  mock-desktop` answers from `src-tauri/fixtures/desktop.json`, which
+  `scripts/record-mock-desktop.mjs` records from the real host over a run the loop
+  harness makes with fake agents. Re-record after a protocol change. No release build
+  turns it on.
+
+```bash
+cd app/mobile && npm install
+npm run test:rust                                          # the phone crate's tests
+npx tauri android init --ci                                # gen/android - generated, not committed
+npx tauri android build --apk --target aarch64 --debug --features mock-desktop
+node scripts/record-mock-desktop.mjs                       # after `npm run build` at the root
+```
+
+Gradle 8.14 does not run on JDK 25, so point `JAVA_HOME` at a 21. On iOS, iroh's network
+watcher and DNS resolver need Apple's SystemConfiguration framework, which Tauri's generated
+Xcode project does not link unless `bundle.iOS.frameworks` names it: without it the link
+fails on fifty `_SC*` symbols. `gen/` is generated
+by `tauri <platform> init` on each machine and in CI, because iOS's needs macOS to make.
+`.github/workflows/mobile.yml` launches both mock builds - an Android emulator and an iOS
+simulator - and fails unless the cockpit read the recorded run. It runs on a pull request into
+`main`, or by hand with `gh workflow run mobile.yml --ref <branch>`, never on `develop`.
+
+**The phone pairs, connects and reconnects through `vibe_remote::client`** (#346). It is in the
+shared crate, so the desktop crate's tests run the **real** pairing handler and bridge against
+the **real** client in one process: they are child modules of `handshake.rs`'s and `bridge.rs`'s
+private `mod tests` (`mod tests { mod client }`), because a sibling file cannot reach those
+helpers, and `vibe-remote` has no tokio runtime of its own to test with. A phone finds a test
+desktop by id through iroh's in-memory lookup (`phone_finding`), the stand-in for n0 and mDNS.
+The phone's `Desktop` is `app/mobile/src-tauri/src/link.rs`, a thin wrapper over it. Ten things
+travel with it:
+
+- **`REMOTE_OFF` (3) is the one desktop change.** Both roads to *off* close every bridged phone
+  with it before the endpoint stops: the window's at once, a phone's own `remote_set` only after
+  its `Return` has arrived (`Written` names the asker, which is closed first, by id). A relay
+  change closes with no code, since the endpoint comes straight back under the same id.
+- **Every ending has a sentence, and there is no "dropped".** The three codes read as themselves;
+  anything else - code 0, an unknown code, a dial nobody answered - goes through `classify`, which
+  reads what the phone can see at that moment. `online` is the OS's word, sent by the webview from
+  `navigator.onLine`, **never** `Endpoint::addr`, which is what the phone advertises.
+  `RelaysUnreachable` needs a path that was not direct, the desktop's relay known and one of the
+  phone's own, and that relay (or every relay) failed; everything else is `Unreachable`. A desktop
+  on a relay of its own may be off or its relay may be down, and nothing the phone can observe
+  separates the two, so *can't reach* is the honest sentence for both.
+- **One dial for every caller**: the stored relay hint under `Timeouts::hint`, then the id alone
+  through lookup under a budget of its own. Connect and probe use `dial`, unpair `unpair_dial`,
+  and **pairing none**: the desktop bounds an attempt by its code's own life, and a second, shorter
+  clock on the phone would end one the desktop still meant to finish. The timeouts are injected,
+  so no test needs tokio's `test-util`. Every interval is a named choice in `client.rs`, and none
+  is a measurement; the device checks on #346 are what will say whether they were right.
+- **Pairing is two steps so the code can be shown between them.** `pair` reads the phone's list
+  first (an unreadable one dials nothing and burns no code), sends the secret and returns a
+  `Challenged` once the desktop's *Allow?* is up; `phone://pair-code` carries the six digits with
+  the screen's own `attempt` number. Then `read_result` and `commit`, split so **an answer the phone
+  has already read beats Back** (`pair_flow`'s biased select): the desktop stores a phone before it
+  sends `Paired`, so dropping a `Paired` in hand would leave the desktop paired and the phone not.
+  The window that remains - the answer in flight as Back hangs up - needs the desktop to wait for
+  an acknowledgement, which is a desktop change #346 did not make; the cancel sentence says how to
+  recover. A yes the phone cannot save is `PairedNotSaved`, and says so even after Back.
+- **The replay barrier.** The desktop replays every live run's frames to a phone on every new
+  connection. Each connection has a generation; its events wait in an `EventGate` from the
+  `Welcome` until the webview says it is ready for that generation (`phone_release`), and
+  `phone://connected` carries the generation and nothing else. The webview pauses its requests
+  (`pauseRequests`: they reject, never throw), starts each live run again from its `base`
+  (`rejoin` in `hosts.ts`; a resume's base is its seeded history), counts ids from the new range
+  through a **monotonic** resync (`phone/link.ts`), releases, and settles once `host_status` says
+  which hosts are alive (`settleRejoin`). Nothing marks the end of a replay - that would be a
+  second desktop change - and a refolded turn's times are its arrival times, as for any phone
+  joining mid-run.
+- **The reconnect loop** checks the desktop is still paired and still the one open before every
+  dial, re-reads its entry each time, and waits `retry_after`'s backoff cut short by a poke. **Every
+  network signal pokes**, whether or not `online` moved (a Wi-Fi to cellular handover is online
+  both sides), and calls `endpoint.network_change()`; so does every return to the foreground. A
+  close the desktop explained (`NOT_PAIRED`, `VERSION_MISMATCH`, `REMOTE_OFF`) waits for a poke only.
+- **The phone's list is a file its Rust owns** (`vibe_remote::paired`), written by temporary file
+  and rename, every read-modify-write under one lock, and never overwritten when it cannot be read.
+  `seen` and `set_relay` never bring back a desktop an unpair removed while a probe was out.
+- **The app opens locked** when its lock is on and the device has, or may have, a screen lock, and
+  when `phone.json` cannot be read; the Rust guard refuses every desktop command until
+  `phone_unlock`, `phone_session` and `phone_release` included, and refuses a settings write, so a
+  webview under the cover cannot turn the lock off for the next launch. A reconnect while locked is
+  kept by the link and held at its gate; the webview's `lockGate` makes both reads wait for the
+  unlock, and the cockpit stays mounted under the cover so the runs it folded are not lost.
+  Leaving the pairing screen, by Back or by the lock, ends the attempt: a scan that resolves
+  late pairs nothing, and `phone_pair_cancel` names its attempt, so a Back that reaches Rust
+  before `phone_pair` is waiting is kept (`PairSlot`) and the dial never happens. Only the plugin's explicit `passcodeNotSet` is *no lock*: biometrics being
+  unavailable is not, because a PIN is still a lock. The mock build opens unlocked, since no CI
+  emulator can answer a prompt. `confirmOnDevice` is the transport seam's fourth function: the
+  cockpit asks before storing a key, turning YOLO on, deleting a run and pairing or unpairing, and
+  the phone's Rust never reads a frame to decide.
+- **Plugins are driven from Rust** - biometric, notification - **except the barcode scanner**,
+  which has no Rust API. `capabilities/scan.json` grants its four permissions on phones only, and
+  `Pair.tsx` is the one module that imports it; `mobile.test.ts` pins both.
+- **Notifications are on by default, so the OS is asked at the first `phone_settings` of a
+  launch** (and when the switch is turned on), never from `phone_notify`, which shows a
+  notification only once the OS has granted it. The mock build does not ask.
+- **Notifications are offered off frames the cockpit already folds** (`cockpit/notices.ts`), by
+  type and id after `invokeOutcome`, once per key, and fired by the phone's Rust only while the app
+  is hidden with notifications on - and only while it is alive. An ask held and released during a
+  disconnect is announced once on reconnect; a run whose host ended during one is drawn lost and
+  is not announced.
+
+The measurements the device checks read are in the phone's log: `vibe-mobile: connected to <id>
+in <ms> ms`, `vibe-mobile: path to <id> is now direct|relayed after <ms> ms`, and `vibe-mobile:
+connection to <id> closed: <raw>`. `phone_desktops` carries the path and the connect time too.
+
 ## Repo map
 
 ```
@@ -2268,6 +2591,23 @@ app/src-tauri/src/reaper.rs  making a killed app take the host with it
 app/src-tauri/src/keys.rs    the OS keychain, and the read the window cannot reach
 app/src-tauri/src/pilot/     one of the app's two network clients - two adapters, one vocabulary
 app/src-tauri/src/update.rs  the other: checking for a newer app, and installing it when asked
+app/src-tauri/src/remote/    a phone dialling this desktop: the device key, pairing, the paired list, the iroh endpoint
+app/src-tauri/src/remote/bridge.rs  a paired phone's control stream: its calls, run through the window's own command bodies
+app/src-tauri/src/remote/hub.rs     the one seam every event leaves through, to the window and the phones, and the live-run buffer
+app/src-tauri/src/remote/settings.rs  remote.json: the switch, start at login, keep awake and the relay - Rust's file, never vibe's config
+app/src-tauri/src/autostart.rs       start at login behind a trait, and whether a launch shows the window
+app/src-tauri/src/awake.rs           keep awake: decided under the host lock, the OS calls on a thread of its own
+app/remote/          what the phone and the desktop share: the pairing wire, the control wire, the framing, the ALPNs, the key rules, how to reach n0 - a path dependency of both, tested with `-p vibe-remote`
+app/mobile/          the phone app: its Tauri crate, the mock desktop and its recorder, the launch checks
+app/src/transport.ts where the window's commands go - Tauri on the desktop, the paired desktop on a phone
+app/mobile-swaps.ts  the modules the phone build replaces, and nothing else
+app/remote/src/client.rs  the phone's side of both ALPNs: the dial, pairing, the control stream, why it ended
+app/remote/src/paired.rs  the phone's paired desktops: one file, one lock, never overwritten unread
+app/mobile/src-tauri/src/link.rs     the iroh Desktop: the reconnect loop, the replay barrier, probes
+app/mobile/src-tauri/src/pairing.rs  pairing's race with Back, and the code shown between its two steps
+app/mobile/src-tauri/src/device.rs   the app lock: whether there is a screen lock, and asking for it
+app/src/phone/       the phone's own screens - Desktops, Pair, the lock - and the reconnect resync
+app/src/cockpit/notices.ts  which folded frames a phone announces, once each
 app/src-tauri/src/pilot/sse.rs      the wire format both vendors share, and nothing else
 app/src-tauri/src/pilot/event.rs    PilotEvent and Usage - every count an Option, on purpose
 app/scripts/         contrast.mjs, stage-sidecar.mjs, make-icon.mjs, prune-appimage.mjs - all dependency-free
@@ -2275,11 +2615,13 @@ app/scripts/smoke-appimage.sh  launching the AppImage on six distributions, and 
 
 docs/                the docs site - VitePress, its own package.json, never in `files`
 docs/.vitepress/config.mts  the site's config: BASE (the one place the path is written), sidebar, search
+docs/phone.md        installing the phone apps without a store, pairing them, and building them from source
 docs/images/         screenshots, shared by README.md and the site
 docs/plans/          internal design notes, excluded from the site
 .github/workflows/pages.yml    builds docs/ from main and deploys it to Pages
-.github/workflows/ci.yml       the core, app and Rust gates on push and PR into develop and main
-.github/workflows/release.yml  the desktop bundles on a v* tag, into one draft release
+.github/workflows/ci.yml       the core, app and Rust gates on push and PR into main, and by hand
+.github/workflows/mobile.yml   the phone app's tests and its emulator and simulator launches, on PR into main
+.github/workflows/release.yml  the desktop bundles and the phone apps on a v* tag, into one draft release
 .github/actions/linux-deps/    the Linux packages a Tauri build needs, listed once
 ```
 
@@ -2838,6 +3180,15 @@ key never crosses the IPC boundary. The CSP agrees from the other side, since `c
 Not `vibe.config.json`: that is a project file meant to be committed, and `validateConfig`
 reports bad values *by name*, which is the one thing that must never happen to a secret.
 
+**The device key is a third keychain entry, and no command reaches it** (#341). One ed25519
+secret per install, under the same service as the vendor keys and the account
+`remote-identity`; its public half is the endpoint id a phone dials. No command reads it,
+deletes it or names it - `remote_status` reports the public id only - and its reader,
+`remote::identity::read`, is `pub(crate)` like `keys::read`. `key_set`, `key_clear` and
+`key_status` refuse it, because `Provider` is still the two vendors. **A keychain that cannot
+be read refuses pairing rather than making a new key**: a new key is a new endpoint id, and
+would silently orphan every paired phone. `keys.test.ts` pins all of it.
+
 **A pilot turn can also be a child process, and that is not a hole in the rule
 below — it is the rule** (#193). `src/pilotchat.ts` spawns the same `claude` the
 loop spawns, so the pilot can run on the subscription the user already pays for
@@ -3198,7 +3549,11 @@ repo" means.
 
 **All the network code lives in `app/` and none of it in `src/`.** There are two clients, both
 in Rust: the pilot's vendor adapters below, and the updater (`src-tauri/src/update.rs`, #299),
-which fetches one public file and, when a person asks, the bundle it names. The core keeps
+which fetches one public file and, when a person asks, the bundle it names. A third piece is
+coming, and it is the first **inbound** one: the iroh endpoint a phone dials
+(`src-tauri/src/remote/endpoint.rs`, #342). It starts only while the switch in `remote.json`
+is on (#344), and only once a device key exists; with it off, or with a file that cannot be
+read, nothing binds and nothing is published. Its rules are in the phone section above. The core keeps
 *"every external call is a child process"* exactly, and the published package gains no HTTP
 dependency and no credential handling. If this ever moves into `src/` "because the CLI might
 want it too", that sentence stops being true of everything shipped — and it is a sentence
@@ -3835,8 +4190,10 @@ throwaway script against `dist/`, with the results in the PR body.
 
 ## Branches, commits and pull requests
 
-**`main` is the default branch and only ever receives release merges. `develop` is where
-work integrates.** Branch off `develop`, PR back into `develop`.
+**`develop` is the default branch and where work integrates. `main` only ever receives
+release merges.** Branch off `develop`, PR back into `develop`. `develop` became the default
+on 2026-10-12, after 1.6.1; until then it was `main`, which is why every PR before that says
+`Refs #N` and the release PRs did the closing.
 
 ```
 feat/<issue>-<slug>     new capability          feat/22-deferred-only-rounds
@@ -3854,13 +4211,15 @@ cherry-picked onto #36. If the work genuinely depends on unmerged work, wait, or
 
 ### Closing issues automatically
 
-**GitHub only auto-closes on a merge into the *default* branch, which here is `main`.** A PR
-into `develop` with `Closes #12` in its body closes nothing, ever. So:
+**GitHub only auto-closes on a merge into the *default* branch, which here is `develop`.**
+A PR into `main` with `Closes #12` in its body closes nothing, ever. So:
 
-- **Per-issue PRs (into `develop`) use `Refs #12`.** It cross-links without making a promise
-  the merge cannot keep.
-- **The release PR (into `main`) does the closing**, and lists every issue the release
-  contains.
+- **Per-issue PRs (into `develop`) use `Closes #12`.** The issue closes when the fix merges,
+  which is before it ships; the issue's **milestone** is what says which release it went out
+  in, so set one. Use `Refs #12` for a PR that only touches an issue without finishing it.
+- **The release PR (into `main`) closes nothing.** It still lists every issue the release
+  contains, with `Refs`, so the release has one place naming them; check that each one is
+  already closed, and close any a per-issue PR left open.
 
 **Repeat the keyword before every number.** GitHub parses `Closes #1, #2, #3` as closing
 `#1` and nothing else — the release of 1.1.0 named sixteen issues and closed zero, and all
@@ -3985,7 +4344,8 @@ and its commits survive it.
    existing run.
 3. Add the `CHANGELOG.md` section — grouped Added / Fixed / Internal / Upgrading, every entry
    linking its PR and issue.
-4. PR into `main`, with the `closes` keyword repeated per issue (see above).
+4. PR into `main`, listing every issue the release contains with `Refs #N` (see above). The
+   merge closes nothing, so check the milestone has no open issues left.
 5. Re-measure the agent CLIs this release was tested against: `claude --version` and
    `codex --version`. Bump `TESTED_CLI_VERSIONS` in `src/config.ts` to what they print, and
    re-record the fixtures with `node scripts/record-cli-fixtures.mjs` (#298). Commit both.
@@ -3996,8 +4356,10 @@ and its commits survive it.
    `gh attestation verify Vibe-macos-arm64.dmg --repo adam-hanna/vibe-code` and
    `sha256sum -c SHA256SUMS --ignore-missing`. An attestation is stored against a file's digest,
    not against the release, so it verifies while the release is still a draft.
-9. **Wait for `release.yml` on the tag, install the draft on at least one machine, then publish
-   the draft release.** The workflow builds the Windows, macOS (Apple Silicon) and Linux bundles
+9. **Wait for `release.yml` on the tag, install the draft on at least one machine and both
+   phone apps on a phone, then publish the draft release.** The APK from the draft must install
+   *over* the previous release's (same key, higher `versionCode`), and the `.ipa` must sign and
+   open through AltStore or Sideloadly; then pair each with the desktop. The workflow builds the Windows, macOS (Apple Silicon) and Linux bundles
    into one draft and never publishes it. A tag that is not `package.json`'s version still
    builds, with a warning, and the bundles carry `package.json`'s version - so a throwaway
    `v<version>-rc.N` tag is how to try the workflow, and it yields a draft pre-release. A tag

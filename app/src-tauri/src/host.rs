@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Manager};
 
 use crate::reaper::Reaper;
 
@@ -210,6 +210,12 @@ pub struct RunHost {
     pub pid: u32,
     pub uptime_secs: u64,
     pub uncontained: Option<String>,
+    /// The id of the invoke this host serves, as `send` read it off the invoke
+    /// line - the one field Rust learns from an inbound line - or null before
+    /// it was written. Every client sees every run host's frames, and a client
+    /// that did not start a run needs this to tell its ending from a pause's
+    /// answer, since both are `result` frames (#347). Relayed, not decided.
+    pub invoke_id: Option<serde_json::Value>,
 }
 
 /// The handle of the one long-lived host that is not a run (#246): reads,
@@ -258,15 +264,18 @@ pub trait Relay: Send + Sync {
 
 struct TauriRelay(AppHandle);
 
+/// Every event leaves through `remote::hub`, which hands the same bytes, in the
+/// same order, to the window and to every connected phone, and keeps a run
+/// host's frames for a phone that joins later (#343).
 impl Relay for TauriRelay {
     fn frame(&self, host: &str, frame: serde_json::Value) {
-        let _ = self.0.emit(FRAME_EVENT, Relayed { host: host.into(), frame });
+        crate::remote::hub::emit_frame(&self.0, host, &Relayed { host: host.into(), frame });
     }
     fn log(&self, host: &str, line: String) {
-        let _ = self.0.emit(LOG_EVENT, Logged { host: host.into(), line });
+        crate::remote::hub::emit(&self.0, LOG_EVENT, &Logged { host: host.into(), line });
     }
     fn exit(&self, host: &str, code: Option<i32>) {
-        let _ = self.0.emit(EXIT_EVENT, Ended { host: host.into(), code });
+        crate::remote::hub::emit_exit(&self.0, host, &Ended { host: host.into(), code });
     }
 }
 
@@ -314,6 +323,18 @@ struct Hosts {
     /// freeze and a start cannot interleave: a run either exists when the update
     /// asks (and is confirmed and stopped) or is refused.
     runs_frozen: AtomicBool,
+    /// Keep awake (#344): the inhibitor's thread, and the decision state - the
+    /// setting and whether a take has been decided - read and written only
+    /// with the `hosts` lock held, always taken after it.
+    awake: crate::awake::Awake,
+    awake_state: Mutex<AwakeState>,
+}
+
+/// The keep-awake setting and what has been decided, behind `awake_state`.
+#[derive(Default)]
+struct AwakeState {
+    on: bool,
+    held: bool,
 }
 
 impl Default for HostProcess {
@@ -324,6 +345,14 @@ impl Default for HostProcess {
 
 impl HostProcess {
     fn with(grace: Duration, keys: fn(crate::keys::Provider) -> Option<String>) -> Self {
+        Self::with_awake(grace, keys, crate::awake::Awake::os())
+    }
+
+    fn with_awake(
+        grace: Duration,
+        keys: fn(crate::keys::Provider) -> Option<String>,
+        awake: crate::awake::Awake,
+    ) -> Self {
         Self {
             inner: Arc::new(Hosts {
                 hosts: Mutex::default(),
@@ -335,6 +364,8 @@ impl HostProcess {
                 keys,
                 quit_pending: AtomicBool::new(false),
                 runs_frozen: AtomicBool::new(false),
+                awake,
+                awake_state: Mutex::default(),
             }),
         }
     }
@@ -524,6 +555,35 @@ fn run_start_refusal(handle: &str, has_service: bool) -> Result<(), String> {
 impl HostProcess {
     /// Whether any run host is in the set. A lock that cannot be read counts as
     /// yes, so a quit asks rather than assuming there is nothing to lose.
+    /// Decide take or release for keep awake (#344), with the `hosts` lock
+    /// held by the caller. **No OS call is made here**: the decision is a
+    /// message to the inhibitor's own thread, so a stalled D-Bus never holds up
+    /// a spawn. All it reads about runs is how many run hosts are alive.
+    fn decide_awake(&self, hosts: &HashMap<String, Running>) {
+        let mut state = self.inner.awake_state.lock().unwrap_or_else(|p| p.into_inner());
+        let runs = hosts.keys().filter(|h| h.as_str() != SERVICE).count();
+        if let Some(msg) = crate::awake::step(state.on, runs, state.held) {
+            state.held = msg == crate::awake::Msg::Take;
+            self.inner.awake.send(msg);
+        }
+    }
+
+    /// The keep-awake setting, from `remote.json` at launch and from
+    /// `remote_set`. Turning it off mid-run releases at once.
+    pub fn set_keep_awake(&self, on: bool) {
+        let guard = match self.inner.hosts.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        self.inner.awake_state.lock().unwrap_or_else(|p| p.into_inner()).on = on;
+        self.decide_awake(&guard);
+    }
+
+    /// What the settings section says about keep awake.
+    pub fn awake_report(&self) -> crate::awake::AwakeReport {
+        self.inner.awake.report()
+    }
+
     pub fn has_run_hosts(&self) -> bool {
         match self.inner.hosts.lock() {
             Ok(guard) => guard.keys().any(|h| h != SERVICE),
@@ -745,6 +805,9 @@ impl HostProcess {
                 invoke_id: None,
             },
         );
+        // Under the same lock that admitted it, so a take is decided in the
+        // order hosts come and go (#344).
+        self.decide_awake(&guard);
         drop(guard);
 
         // stdout: the protocol, forwarded a line at a time and uninterpreted.
@@ -861,6 +924,7 @@ impl HostProcess {
                 // it - rather than leaving a live host nobody can see.
                 if let Ok(Some(status)) = running.child.try_wait() {
                     guard.remove(handle);
+                    self.decide_awake(&guard);
                     return status.code();
                 }
             }
@@ -1000,6 +1064,7 @@ impl HostProcess {
                         pid: r.pid,
                         uptime_secs: r.started.elapsed().as_secs(),
                         uncontained: r.uncontained.clone(),
+                        invoke_id: r.invoke_id.clone(),
                     })
                     .collect();
                 runs.sort_by(|a, b| a.handle.cmp(&b.handle));
@@ -1045,8 +1110,17 @@ impl HostProcess {
         // early on one would leave every host running with nobody supervising
         // it - the second writer this exists to prevent. So it is drained anyway.
         let mut taken: Vec<(String, Running)> = match self.inner.hosts.lock() {
-            Ok(mut guard) => guard.drain().collect(),
-            Err(poisoned) => poisoned.into_inner().drain().collect(),
+            Ok(mut guard) => {
+                let taken = guard.drain().collect();
+                self.decide_awake(&guard);
+                taken
+            }
+            Err(poisoned) => {
+                let mut guard = poisoned.into_inner();
+                let taken = guard.drain().collect();
+                self.decide_awake(&guard);
+                taken
+            }
         };
         for (_, running) in taken.iter_mut() {
             drop(running.stdin.take());
@@ -1106,12 +1180,17 @@ pub fn launch(app: &AppHandle) -> Result<u32, String> {
 /// command, because `keys.test.ts` pins the list.
 #[tauri::command]
 pub fn host_start(app: AppHandle, handle: Option<String>, line: Option<String>) -> Result<u32, String> {
+    start_host(&app, handle, line)
+}
+
+/// `host_start`'s body, shared with a phone's call through the bridge (#343).
+pub(crate) fn start_host(app: &AppHandle, handle: Option<String>, line: Option<String>) -> Result<u32, String> {
     match handle {
         None => {
             start_refusal(SERVICE, line.as_deref())?;
-            launch(&app)
+            launch(app)
         }
-        Some(handle) => app.state::<HostProcess>().start(&app, &handle, line.as_deref()),
+        Some(handle) => app.state::<HostProcess>().start(app, &handle, line.as_deref()),
     }
 }
 
@@ -1139,10 +1218,15 @@ pub fn host_status(state: tauri::State<'_, HostProcess>) -> Status {
 /// question, rather than a second door.
 #[tauri::command]
 pub fn app_quit(app: AppHandle, quit: bool) {
+    quit_app(&app, quit);
+}
+
+/// `app_quit`'s body, shared with a phone's call through the bridge (#343).
+pub(crate) fn quit_app(app: &AppHandle, quit: bool) {
     let hosts = app.state::<HostProcess>();
     hosts.clear_quit();
     if quit {
-        hosts.quit(&app);
+        hosts.quit(app);
     }
 }
 
@@ -1737,12 +1821,134 @@ mod tests {
 
     #[test]
     fn a_run_host_listed_in_status_serialises_the_window_s_spelling() {
-        let run = RunHost { handle: "run-1".into(), pid: 7, uptime_secs: 3, uncontained: None };
+        // `invokeId` joined the list in #347; every key this checked is kept.
+        let run = RunHost {
+            handle: "run-1".into(),
+            pid: 7,
+            uptime_secs: 3,
+            uncontained: None,
+            invoke_id: Some(serde_json::json!(1)),
+        };
         let json = serde_json::to_value(&run).unwrap();
         let object = json.as_object().unwrap();
-        for key in ["handle", "pid", "uptimeSecs", "uncontained"] {
+        for key in ["handle", "pid", "uptimeSecs", "uncontained", "invokeId"] {
             assert!(object.contains_key(key), "RunHost no longer sends {key}");
         }
         assert!(!object.contains_key("uptime_secs"));
+        assert!(!object.contains_key("invoke_id"));
+    }
+
+    #[test]
+    fn status_names_the_invoke_each_run_host_serves() {
+        // A window that did not start a run tells its ending from a pause's
+        // answer by this id (#347), so it must be the id on the invoke line.
+        let collect = Collect::new();
+        let hosts = hosts(&collect);
+        service(&hosts, &collect);
+        start(&hosts, &collect, "run-12", Some(&invoke(12)), ECHO).unwrap();
+        let status = hosts.status();
+        let run = status.runs.iter().find(|r| r.handle == "run-12").expect("the run host is listed");
+        assert_eq!(run.invoke_id, Some(serde_json::json!(12)));
+        hosts.stop();
+    }
+
+    /// Keep awake (#344), against real run hosts and a recording inhibitor.
+    fn awake_hosts(collect: &Arc<Collect>, rec: &crate::awake::tests::Recorder) -> HostProcess {
+        let hosts = HostProcess::with_awake(
+            Duration::from_millis(300),
+            |_| None,
+            crate::awake::Awake::new(Box::new(rec.clone())),
+        );
+        *collect.hosts.lock().unwrap() = Some(hosts.clone());
+        hosts
+    }
+
+    fn finish_run(hosts: &HostProcess, collect: &Arc<Collect>, handle: &str, invoke: u64) {
+        hosts.send(handle, &format!(r#"{{"type":"finish","target":{invoke}}}"#)).unwrap();
+        collect.wait("the run host's exit", |s| collect_exit(s, handle));
+    }
+
+    fn invoke(id: u64) -> String {
+        format!(r#"{{"type":"invoke","id":{id},"argv":[]}}"#)
+    }
+
+    #[test]
+    fn keep_awake_is_taken_on_the_first_run_host_and_released_on_the_last_reap() {
+        let collect = Collect::new();
+        let rec = crate::awake::tests::Recorder::default();
+        let hosts = awake_hosts(&collect, &rec);
+        hosts.set_keep_awake(true);
+        start(&hosts, &collect, SERVICE, None, ECHO).unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(rec.names(), Vec::<&str>::new(), "the service host is not a run");
+
+        start(&hosts, &collect, "run-1", Some(&invoke(1)), ECHO).unwrap();
+        assert_eq!(rec.wait_for(1), ["take"]);
+        start(&hosts, &collect, "run-2", Some(&invoke(2)), ECHO).unwrap();
+        finish_run(&hosts, &collect, "run-1", 1);
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(rec.names(), ["take"], "a run host is still alive");
+        finish_run(&hosts, &collect, "run-2", 2);
+        assert_eq!(rec.wait_for(2), ["take", "release"]);
+
+        // Every call on the inhibitor's own thread, never the deciding one.
+        let me = std::thread::current().id();
+        assert!(rec.calls.lock().unwrap().iter().all(|(_, t)| *t != me));
+        hosts.stop();
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(rec.names(), ["take", "release"]);
+    }
+
+    #[test]
+    fn keep_awake_off_never_takes() {
+        let collect = Collect::new();
+        let rec = crate::awake::tests::Recorder::default();
+        let hosts = awake_hosts(&collect, &rec);
+        start(&hosts, &collect, SERVICE, None, ECHO).unwrap();
+        start(&hosts, &collect, "run-1", Some(&invoke(1)), ECHO).unwrap();
+        finish_run(&hosts, &collect, "run-1", 1);
+        hosts.stop();
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(rec.names(), Vec::<&str>::new());
+    }
+
+    #[test]
+    fn turning_keep_awake_off_mid_run_releases_and_the_reap_adds_nothing() {
+        let collect = Collect::new();
+        let rec = crate::awake::tests::Recorder::default();
+        let hosts = awake_hosts(&collect, &rec);
+        hosts.set_keep_awake(true);
+        start(&hosts, &collect, SERVICE, None, ECHO).unwrap();
+        start(&hosts, &collect, "run-1", Some(&invoke(1)), ECHO).unwrap();
+        assert_eq!(rec.wait_for(1), ["take"]);
+        hosts.set_keep_awake(false);
+        assert_eq!(rec.wait_for(2), ["take", "release"]);
+        finish_run(&hosts, &collect, "run-1", 1);
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(rec.names(), ["take", "release"]);
+        // Turned on again with no run going: nothing to hold.
+        hosts.set_keep_awake(true);
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(rec.names(), ["take", "release"]);
+        hosts.stop();
+    }
+
+    #[test]
+    fn a_failed_take_is_reported_and_the_run_still_starts() {
+        let collect = Collect::new();
+        let rec = crate::awake::tests::Recorder { fail: true, ..Default::default() };
+        let hosts = awake_hosts(&collect, &rec);
+        hosts.set_keep_awake(true);
+        start(&hosts, &collect, SERVICE, None, ECHO).unwrap();
+        start(&hosts, &collect, "run-1", Some(&invoke(1)), ECHO).expect("a run is never stopped by keep awake");
+        rec.wait_for(1);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while hosts.awake_report().error.is_none() {
+            assert!(Instant::now() < deadline, "the failure was never reported");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(!hosts.awake_report().held);
+        assert_eq!(hosts.status().runs.len(), 1);
+        hosts.stop();
     }
 }

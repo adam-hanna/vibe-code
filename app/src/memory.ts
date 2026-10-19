@@ -1,5 +1,7 @@
-import { useSyncExternalStore } from 'react';
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import type { Dispatch, SetStateAction } from 'react';
 import * as host from './host';
+import { reread } from './changed';
 
 /**
  * What the window remembers between launches (#223): files the host writes,
@@ -36,6 +38,40 @@ import * as host from './host';
 /** The window's namespace, minus the conversations, which have a store of their own. */
 const PREFIX = 'vibe.';
 const CHAT_PREFIX = 'vibe.chat.';
+/**
+ * Every key the window remembers, and whose it is (#371).
+ *
+ * **`shared`** is one value for every client of a desktop - the phone included -
+ * and every component that reads one follows it (`useFollowedMemory` or
+ * `useMemoryRevision`), so a change on one screen is on the other at once.
+ * **`device`** is this screen's own, kept under `deviceKey` so a phone never
+ * moves the desktop's: where the window is pointed, how big the text is, the
+ * theme and the last repository named - at the owner's decision.
+ *
+ * A list rather than a convention, so a new setting is a decision about which
+ * it is: `sync-guard.test.ts` fails on a `vibe.` key the list does not name, on
+ * a device key not read through `deviceKey`, and on a component that reads a
+ * shared key without following it.
+ */
+export const MEMORY_KEYS: Readonly<Record<string, 'shared' | 'device'>> = {
+  'vibe.projects': 'shared',
+  'vibe.pinned': 'shared',
+  'vibe.runnames': 'shared',
+  'vibe.projectnames': 'shared',
+  'vibe.drafts': 'shared',
+  'vibe.promptdrafts': 'shared',
+  'vibe.pilot.pick': 'shared',
+  'vibe.pilot.ledger': 'shared',
+  'vibe.pilot.limits': 'shared',
+  'vibe.pilot.watchGates': 'shared',
+  'vibe.update.skipped': 'shared',
+  'vibe.update.check': 'shared',
+  'vibe.where': 'device',
+  'vibe.typescale': 'device',
+  'vibe.theme': 'device',
+  'vibe.repo': 'device',
+};
+
 /** A setting is small and rewritten whole, so a burst of changes is one write. */
 const DEBOUNCE_MS = 200;
 /** The host is spawned before the window loads; these cover it still starting. */
@@ -46,6 +82,14 @@ type Mode = 'loading' | 'hosted' | 'local';
 
 const cache = new Map<string, string>();
 const pending = new Map<string, { timer: ReturnType<typeof setTimeout>; value: string | null }>();
+/**
+ * Writes sent and not yet confirmed, by key (#354). `pending` lets go of a key
+ * the moment it is sent, and until the host confirms it that write is still
+ * about to land - so a re-read must treat it exactly like a debounced one.
+ */
+const inflight = new Map<string, number>();
+/** Keys another client wrote while this window was still loading (#354). */
+const dirty = new Set<string>();
 let mode: Mode = 'loading';
 let failure: string | null = null;
 let loading: Promise<void> | null = null;
@@ -113,6 +157,7 @@ export function loadMemory(): Promise<void> {
     }
     if (entries === null) {
       mode = 'local';
+      dirty.clear();
       setFailure(`this window's settings could not be read from the app's files, so changes this session stay in this window only: ${last}`);
       return;
     }
@@ -134,6 +179,21 @@ export function loadMemory(): Promise<void> {
       } catch {
         cache.set(key, value);
         stuck.push(key);
+      }
+    }
+    // Another client may have written since the snapshot above (#354). Each
+    // such key is read again until none are left, and only then does the
+    // window go live, in the same turn, so no announcement falls in between.
+    // A migration racing one of them is two writes to one key, and the last
+    // wins; what this guarantees is that the cache says which one did.
+    while (dirty.size > 0) {
+      const keys = [...dirty];
+      dirty.clear();
+      try {
+        await refresh(keys);
+      } catch {
+        // Kept as the snapshot left it, the rule for any failed re-read.
+        break;
       }
     }
     mode = 'hosted';
@@ -158,14 +218,114 @@ function flushOne(key: string): void {
   if (held === undefined) return;
   clearTimeout(held.timer);
   pending.delete(key);
+  inflight.set(key, (inflight.get(key) ?? 0) + 1);
   host
     .saveMemory(key, held.value)
+    .finally(() => {
+      const left = (inflight.get(key) ?? 1) - 1;
+      if (left > 0) inflight.set(key, left);
+      else inflight.delete(key);
+    })
     .then(() => {
       if (failure !== null && pending.size === 0 && mode === 'hosted') setFailure(null);
     })
     .catch((err: unknown) =>
       setFailure(`a setting is not being saved: ${err instanceof Error ? err.message : String(err)}`),
     );
+}
+
+/**
+ * Read the host again and replace the named keys in the cache (#354), except a
+ * key with a write of this window's own still to land. Decided when the read
+ * answers, since a local write may have started while it was out.
+ */
+async function refresh(keys: readonly string[]): Promise<void> {
+  const entries = await host.memory();
+  const moved: string[] = [];
+  for (const key of keys) {
+    const was = cache.get(key) ?? null;
+    const next = reread(key, entries, pending.has(key) || inflight.has(key));
+    if (next.kind === 'set') cache.set(key, next.value);
+    else if (next.kind === 'remove') cache.delete(key);
+    if ((cache.get(key) ?? null) !== was) moved.push(key);
+  }
+  announce(moved);
+}
+
+/**
+ * Which keys another client has moved, and how often (#371). The cache alone
+ * was half of #354: every reader takes its value once, at mount, so a refreshed
+ * key changed nothing on screen - a project added on the phone did not appear
+ * on the desktop until something unrelated re-read the list. A reader that
+ * follows a key takes `useMemoryRevision(key)` and reads again when it moves.
+ *
+ * Only a change of value counts, so this window's own write coming back as an
+ * announcement moves nothing, and a reader re-reading a key never feeds a loop.
+ */
+const revisions = new Map<string, number>();
+const revisionListeners = new Set<() => void>();
+
+function announce(keys: readonly string[]): void {
+  if (keys.length === 0) return;
+  for (const key of keys) revisions.set(key, (revisions.get(key) ?? 0) + 1);
+  for (const l of revisionListeners) l();
+}
+
+function subscribeRevisions(listener: () => void): () => void {
+  revisionListeners.add(listener);
+  return () => revisionListeners.delete(listener);
+}
+
+/** How many times another client has moved any of these keys: a dependency, not a count to show. */
+export function memoryRevision(...keys: readonly string[]): number {
+  let sum = 0;
+  for (const key of keys) sum += revisions.get(key) ?? 0;
+  return sum;
+}
+
+/** The same, for a component that has to read again when one of them moves. */
+export function useMemoryRevision(...keys: readonly string[]): number {
+  return useSyncExternalStore(subscribeRevisions, () => memoryRevision(...keys));
+}
+
+/**
+ * `useState(read)` that reads again whenever another client moves one of `keys`
+ * (#371) - the shape most readers of the window's memory already had, made to
+ * follow. Setting it is this window's own act and saves nothing by itself: each
+ * caller keeps its own write, and a re-read never writes.
+ */
+export function useFollowedMemory<T>(keys: string | readonly string[], read: () => T): [T, Dispatch<SetStateAction<T>>] {
+  const list = typeof keys === 'string' ? [keys] : keys;
+  const revision = useMemoryRevision(...list);
+  const [value, setValue] = useState(read);
+  const seen = useRef(revision);
+  const reader = useRef(read);
+  reader.current = read;
+  useEffect(() => {
+    if (seen.current === revision) return;
+    seen.current = revision;
+    setValue(reader.current());
+  }, [revision]);
+  return [value, setValue];
+}
+
+/**
+ * Another client wrote this key (#354). While loading it is remembered and read
+ * again before the window goes live; once hosted it is read again now. A read
+ * that fails keeps what the cache holds.
+ */
+export async function memoryChanged(key: string): Promise<void> {
+  if (!isMemoryKey(key)) return;
+  if (mode === 'loading') {
+    dirty.add(key);
+    return;
+  }
+  if (mode !== 'hosted') return;
+  try {
+    await refresh([key]);
+  } catch {
+    // The cache stays as it was; the next announcement reads again.
+  }
 }
 
 /** Send every write still waiting out its debounce. Called as the page goes away. */

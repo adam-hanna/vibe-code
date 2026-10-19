@@ -1,4 +1,10 @@
-# The repository's tests, on every push and pull request into develop and main.
+# The repository's tests, on every push and pull request into main, and by hand.
+#
+# Not on develop, at the owner's decision: Actions minutes are a budget, and
+# every merge into develop spent one run of all three jobs. The gates are run
+# locally before a merge into develop, and this runs in full on the release PR
+# into main and on main itself. `workflow_dispatch` runs it on any branch when
+# a change needs a clean machine before then.
 #
 # The three jobs are the same three gates `vibe` runs on its own changes: the
 # core (`npm run typecheck && npm test`), the app (typecheck, vitest and the
@@ -10,9 +16,10 @@ name: CI
 
 on:
   push:
-    branches: [develop, main]
+    branches: [main]
   pull_request:
-    branches: [develop, main]
+    branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read

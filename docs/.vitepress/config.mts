@@ -24,6 +24,7 @@ export default defineConfig({
         items: [
           { text: 'Getting started', link: '/getting-started' },
           { text: 'The desktop app', link: '/app' },
+          { text: 'On your phone', link: '/phone' },
           { text: 'How the loop works', link: '/how-it-works' },
         ],
       },

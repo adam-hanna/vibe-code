@@ -1,5 +1,6 @@
 import type { Level, Narration } from '@src/log.js';
 import type { GateContext } from '@src/host.js';
+import { readOrigin } from '@src/host.js';
 import type { ArtifactRead, Effort, RunArtifact, RunSummary } from '@src/types.js';
 import { EFFORTS } from '@src/types.js';
 import type { PromptBlock } from '@src/prompts.js';
@@ -9,6 +10,15 @@ import type { ModelListings } from '@src/models.js';
 import type { Scorecard } from '@src/scorecard.js';
 
 /** Where one CLI is, as `config` reports it (#223). */
+/** A pilot turn in flight, as `pilot_turns` reports it (#371). */
+export interface PilotTurnLive {
+  id: number;
+  chat: string;
+  asked: string;
+  startedAt: number;
+  text: string;
+}
+
 export interface CliStatus {
   configured: string | null;
   via: 'settings' | 'env' | 'search';
@@ -55,8 +65,12 @@ export interface CliStatus {
  *
  * Adding a new `type` is not a bump: an unrecognised frame is ignored by a
  * reader and refused by this one, and both of those are already the contract.
+ *
+ * 2 (#354) only added `changed`, which that rule says is not a bump - and it
+ * was bumped anyway, because a window now ACTS on `changed` to keep its caches
+ * right, and a host that never sends one should show as the mismatch it is.
  */
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
 
 /** What the loop's process says. */
 export type Outbound =
@@ -74,6 +88,15 @@ export type Outbound =
   | { type: 'ask'; id: number; context: GateContext }
   /** A request finished. `exit` is the exit code the same command would have returned. */
   | { type: 'result'; id: number; exit: number }
+  /**
+   * A run's pause and stop as they now stand, after a `pause`, an `unpause` or
+   * a `cancel` (#371). The asker learns it from its own `result`; every other
+   * client showing the run learned nothing, so a pause pressed on the phone
+   * left the desktop's button offering a pause that was already armed. Sent to
+   * everyone, and it is the state rather than the request, so a client that
+   * hears it twice draws it once.
+   */
+  | { type: 'controls'; pausing: boolean; stopping: boolean }
   /**
    * A request could not be run at all.
    *
@@ -123,6 +146,21 @@ export type Outbound =
     }
   /** A fragment of a pilot reply, in order (#193). */
   | { type: 'pilot_delta'; id: number; text: string }
+  /**
+   * A pilot turn began, said to every client (#371). `chat` names the
+   * conversation it continues and `asked` what was sent, as the asker's pane
+   * shows it, so a second client showing that conversation draws the message,
+   * the thinking and the reply as its deltas arrive, and keeps its own composer
+   * shut until the turn ends. Only a turn whose frame named its conversation is
+   * announced; an older window sends none and is announced by nothing.
+   */
+  | { type: 'pilot_started'; id: number; chat: string; asked: string; startedAt: number }
+  /**
+   * The pilot turns in flight now, answering `pilot_turns` (#371): for a client
+   * that joins while one is running, which heard no `pilot_started`. `text` is
+   * what the turn has said so far.
+   */
+  | { type: 'pilot_turns'; id: number; turns: readonly PilotTurnLive[] }
   /**
    * A pilot turn that was stopped from the window (#223), answering `pilot_stop`.
    * Its own frame rather than an `error`, because a turn somebody stopped is not
@@ -360,6 +398,23 @@ export type Outbound =
   /** One of those was written or removed, answering `memory_save`. */
   | { type: 'memory_saved'; id: number; key: string }
   /**
+   * A write landed, said to every client (#354).
+   *
+   * Sent after the write is on disk and after the write's own reply, never
+   * before: a signal that can arrive before the thing it signals is not a
+   * signal. Only `memory_save`, `chat_save` and a `config` patch emit it; a
+   * read, a refusal and a failed write emit nothing.
+   *
+   * **It carries no value.** A client holding a cache re-reads with the read it
+   * already uses, so there is one road to a value and not two. `key` is the key
+   * written, or for config `'global'` or the project directory exactly as the
+   * write named it. `id` is the write's own request id, which is how the client
+   * that sent it knows to ignore it. `origin` is the write's readable origin,
+   * when it had one, and lives nowhere else: a config file is committed and
+   * must not gain a field for who saved it.
+   */
+  | { type: 'changed'; what: 'memory' | 'chat' | 'config'; key: string; id: number; origin?: string }
+  /**
    * The commands a previous host left on disk, answering `commands_past`
    * (#223, `src/commandlog.ts`). Oldest first; none of them is running.
    */
@@ -406,7 +461,17 @@ export type Inbound =
    * bump: the GUI's job is a form to an argv, which is a pure function it can
    * test on its own side.
    */
-  | { type: 'invoke'; id: number; argv: readonly string[] }
+  | {
+      type: 'invoke';
+      id: number;
+      argv: readonly string[];
+      /**
+       * Who asked for this run, when a client says (#354). Read by
+       * `readOrigin`, dropped when unreadable, and deliberately NOT a flag:
+       * argv is the CLI's contract, and a phone's label is not part of it.
+       */
+      origin?: string;
+    }
   /** The decision for the `ask` carrying this `id`. Shape checked by `readDecision`. */
   | { type: 'answer'; id: number; decision: unknown }
   /**
@@ -548,7 +613,18 @@ export type Inbound =
        * before the Codex pilot sent.
        */
       agent?: 'claude' | 'codex';
+      /**
+       * The conversation the turn continues - the window's chat key - and what
+       * was sent, as the pane shows it (#371). Both or neither. With them the
+       * host announces the turn to every client and refuses a second turn on
+       * the same conversation while one is running, since two turns resuming
+       * one session would each answer without the other's messages.
+       */
+      chat?: string;
+      asked?: string;
     }
+  /** The pilot turns in flight now (#371): a read, for a client that has just joined. */
+  | { type: 'pilot_turns'; id: number }
   /**
    * Ask what runs the archive holds (#223, `1b`).
    *
@@ -595,6 +671,11 @@ export type Inbound =
        * which always answers with both.
        */
       scope?: 'project' | 'global';
+      /**
+       * Who saved this patch (#354). Carried on the `changed` frame only and
+       * never written anywhere: `vibe.config.json` is committed.
+       */
+      origin?: string;
     }
   /**
    * Read the diff a run has produced (#223, `1d`).
@@ -787,7 +868,13 @@ export function decode(line: string): Decoded {
       if (!argv.every((a): a is string => typeof a === 'string')) {
         return { ok: false, id, reason: 'invoke argv held something that was not a string' };
       }
-      return { ok: true, message: { type: 'invoke', id, argv } };
+      // A label on the request, never a reason to refuse it (#354): the same
+      // `readOrigin` a gate answer goes through, with the same rules.
+      const origin = readOrigin(parsed);
+      return {
+        ok: true,
+        message: origin === null ? { type: 'invoke', id, argv } : { type: 'invoke', id, argv, origin },
+      };
     }
     case 'answer':
       return { ok: true, message: { type: 'answer', id, decision: parsed['decision'] } };
@@ -817,6 +904,8 @@ export function decode(line: string): Decoded {
       }
       return { ok: true, message: { type: 'command', id, dir, program, args } };
     }
+    case 'pilot_turns':
+      return { ok: true, message: { type: 'pilot_turns', id } };
     case 'pilot_stop': {
       const turn = parsed['turn'];
       if (typeof turn !== 'number' || !Number.isInteger(turn)) {
@@ -866,6 +955,16 @@ export function decode(line: string): Decoded {
       if (agent !== undefined && agent !== 'claude' && agent !== 'codex') {
         return { ok: false, id, reason: 'pilot named an agent that was not "claude" or "codex"' };
       }
+      // Both or neither, and a string each (#371): a turn announced without
+      // saying what was sent would draw a reply under nothing.
+      const chat = parsed['chat'];
+      const asked = parsed['asked'];
+      if ((chat === undefined) !== (asked === undefined)) {
+        return { ok: false, id, reason: 'pilot named its conversation without what was sent, or the other way round' };
+      }
+      if (chat !== undefined && (typeof chat !== 'string' || chat === '' || typeof asked !== 'string')) {
+        return { ok: false, id, reason: 'pilot carried a conversation or message that was not text' };
+      }
       // Absent is the CLI's default; present must be one the CLIs take (#296).
       const effort = parsed['effort'];
       if (effort !== undefined && !(EFFORTS as readonly unknown[]).includes(effort)) {
@@ -884,6 +983,7 @@ export function decode(line: string): Decoded {
           resume,
           ...(agent === undefined ? {} : { agent }),
           ...(effort === undefined ? {} : { effort: effort as Effort }),
+          ...(chat === undefined ? {} : { chat: chat as string, asked: asked as string }),
         },
       };
     }
@@ -1069,11 +1169,14 @@ export function decode(line: string): Decoded {
       // that fell back to the project would write the wrong file and say it had
       // worked.
       const scope = parsed['scope'];
-      if (scope === undefined) return { ok: true, message: { type: 'config', id, dir, patch } };
+      // Only on a write: a read changes nothing, so it has nobody to attribute.
+      const origin = readOrigin(parsed);
+      const labelled = origin === null ? {} : { origin };
+      if (scope === undefined) return { ok: true, message: { type: 'config', id, dir, patch, ...labelled } };
       if (scope !== 'project' && scope !== 'global') {
         return { ok: false, id, reason: 'config carried a scope that was not "project" or "global"' };
       }
-      return { ok: true, message: { type: 'config', id, dir, patch, scope } };
+      return { ok: true, message: { type: 'config', id, dir, patch, scope, ...labelled } };
     }
     case 'cancel': {
       // Optional, and refused rather than coerced when present but unusable.

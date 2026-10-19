@@ -1,7 +1,11 @@
-import { invoke } from '@tauri-apps/api/core';
-import { listen } from '@tauri-apps/api/event';
+import { invoke, listen, local } from './transport';
+import { confirmed } from './confirm';
 import type { PilotAccess } from './pilot/access';
 import type { Outcome, UpdateInfo, UpdateProgress } from './shell/update';
+import { requestIds } from './changed';
+import { tap } from './phone/tap';
+import type { Tap } from './phone/tap';
+import type { RequestIds } from './changed';
 
 /**
  * The webview's end of the wire.
@@ -17,7 +21,7 @@ import type { Outcome, UpdateInfo, UpdateProgress } from './shell/update';
  */
 
 /** Kept in step with `PROTOCOL_VERSION` in `src/protocol.ts`. */
-export const EXPECTED_PROTOCOL = 1;
+export const EXPECTED_PROTOCOL = 2;
 
 export type Level = 'heading' | 'step' | 'info' | 'detail' | 'ok' | 'warn' | 'error';
 
@@ -56,6 +60,17 @@ export interface Result {
   exit: number;
 }
 
+/**
+ * A run's pause and stop as they now stand (#371), after any client's `pause`,
+ * `unpause` or `cancel` - so every client showing the run draws the same
+ * buttons, and not only the one that pressed.
+ */
+export interface Controls {
+  type: 'controls';
+  pausing: boolean;
+  stopping: boolean;
+}
+
 export interface HostError {
   type: 'error';
   id: number | null;
@@ -67,6 +82,26 @@ export interface PilotDelta {
   type: 'pilot_delta';
   id: number;
   text: string;
+}
+
+/**
+ * A pilot turn began, said to every client (#371): the conversation it
+ * continues and what was sent, so a second client showing that conversation can
+ * draw it as it runs. See `src/protocol.ts`.
+ */
+export interface PilotStarted {
+  type: 'pilot_started';
+  id: number;
+  chat: string;
+  asked: string;
+  startedAt: number;
+}
+
+/** The pilot turns in flight, for a client that has just joined (#371). */
+export interface PilotTurnsFrame {
+  type: 'pilot_turns';
+  id: number;
+  turns: readonly { id: number; chat: string; asked: string; startedAt: number; text: string }[];
 }
 
 /**
@@ -392,6 +427,18 @@ export interface MemorySavedFrame {
 }
 
 /**
+ * A write landed, said to every client (#354). No value: a cache re-reads.
+ * `id` is the write's own request id, so the writer can ignore its own.
+ */
+export interface ChangedFrame {
+  type: 'changed';
+  what: 'memory' | 'chat' | 'config';
+  key: string;
+  id: number;
+  origin?: string;
+}
+
+/**
  * A command an earlier launch ran, read back from its log (#223,
  * `src/commandlog.ts`). `lost` is a host that went away while it was running.
  */
@@ -532,11 +579,14 @@ export type Frame =
   | Narration
   | Ask
   | Result
+  | Controls
   | HostError
   | CommandStarted
   | CommandOutput
   | CommandEnded
   | PilotDelta
+  | PilotStarted
+  | PilotTurnsFrame
   | PilotReply
   | PilotStopped
   | FsFrame
@@ -555,7 +605,8 @@ export type Frame =
   | PastCommandsFrame
   | ModelsFrame
   | ReplayFrame
-  | QuestionsAnswered;
+  | QuestionsAnswered
+  | ChangedFrame;
 
 /**
  * Whether a value is a frame this version recognises.
@@ -574,11 +625,16 @@ export function isFrame(v: unknown): v is Frame {
     type === 'narration' ||
     type === 'ask' ||
     type === 'result' ||
+    // A run's pause and stop (#371), which the cockpit sets on the run's entry
+    // and the reducer has no use for.
+    type === 'controls' ||
     type === 'error' ||
     // The pilot's two, which the cockpit's reducer ignores and the pilot pane
     // reads. Recognised here or they would be reported as unknown frames and
     // land in the diagnostics list instead of in the conversation (#193).
     type === 'pilot_delta' ||
+    type === 'pilot_started' ||
+    type === 'pilot_turns' ||
     type === 'pilot_reply' ||
     type === 'pilot_stopped' ||
     // The pilot's reads (#223), answered for the pane and nothing else.
@@ -612,6 +668,9 @@ export function isFrame(v: unknown): v is Frame {
     // the cockpit mounts and the reducer has no use for.
     type === 'memory' ||
     type === 'memory_saved' ||
+    // Another client's write (#354), read by the caches and the settings
+    // screen through `onChanged`; the reducer has no use for it.
+    type === 'changed' ||
     // A past run's narration, ignored by THIS reducer for a sharper version of
     // the same reason: it describes a run this process is NOT narrating, and
     // folding it into the live run is exactly the confusion it exists to end.
@@ -668,6 +727,47 @@ export interface Handlers {
   log(host: string, line: string): void;
   /** A host ended. `code` is null where it was signalled and has none. */
   exit(host: string, code: number | null): void;
+  /**
+   * A phone reconnected to its desktop (#346), and connection `generation`'s
+   * replay is about to be folded: start the live runs again. Never on the
+   * desktop, where there is no connection to lose.
+   */
+  rejoined?(generation: number): void;
+  /** Generation `generation`'s replay has been released and folded: settle. */
+  settle?(generation: number): void;
+}
+
+/**
+ * What a phone does when its connection comes back (#346), installed by the
+ * phone build before the cockpit connects. `connected` resolves true only when
+ * that generation was applied and is still the newest; `listening` runs once
+ * the cockpit's listeners are up, so held events have somewhere to go.
+ */
+export interface LinkHooks {
+  connected(generation: number): Promise<boolean>;
+  listening(): Promise<void>;
+}
+
+const HOST_EVENTS = ['host://frame', 'host://log', 'host://exit'] as const;
+type HostEvent = (typeof HOST_EVENTS)[number];
+let early: Tap<HostEvent> | null = null;
+
+/**
+ * A phone's events, caught from now until the cockpit connects (#346), so the
+ * connection can be released before the window's memory is read: that read is
+ * answered by an event the release lets through. See `phone/tap.ts`. Called
+ * once, before the release; the desktop never calls it.
+ */
+export async function catchEarly(): Promise<void> {
+  if (early !== null) return;
+  const caught = tap<HostEvent>();
+  early = caught;
+  await Promise.all(HOST_EVENTS.map((name) => listen<unknown>(name, (event) => caught.push(name, event.payload))));
+}
+
+let linkHooks: LinkHooks | null = null;
+export function setLinkHooks(hooks: LinkHooks | null): void {
+  linkHooks = hooks;
 }
 
 /**
@@ -691,6 +791,12 @@ export interface RunHost {
   pid: number;
   uptimeSecs: number;
   uncontained: string | null;
+  /**
+   * The id of the invoke this host serves, as Rust read it off the invoke line,
+   * or null before that line was written. A window that did not start the run
+   * learns from it which `result` is the run's ending (#347).
+   */
+  invokeId: number | null;
 }
 
 /**
@@ -741,27 +847,54 @@ export function inShell(): boolean {
  * `status()` is where it is picked up instead.
  */
 export async function connect(handlers: Handlers): Promise<() => void> {
+  const take = (kind: HostEvent, got: unknown): void => {
+    switch (kind) {
+      case 'host://frame':
+        // Shown rather than dropped: a relay that stopped enveloping is exactly
+        // the disagreement somebody needs to be able to see.
+        if (!isEnvelope(got)) return handlers.unknown('?', got);
+        if (isFrame(got['frame'])) handlers.frame(got.host, got['frame']);
+        else handlers.unknown(got.host, got['frame']);
+        return;
+      case 'host://log':
+        if (isEnvelope(got)) handlers.log(got.host, String(got['line']));
+        else handlers.unknown('?', got);
+        return;
+      case 'host://exit': {
+        if (!isEnvelope(got)) return handlers.unknown('?', got);
+        const code: unknown = got['code'];
+        handlers.exit(got.host, typeof code === 'number' ? code : null);
+        return;
+      }
+    }
+  };
+  // A phone that caught its desktop's events while the memory was read hands
+  // them over here, in order, through its one listener (`phone/tap.ts`).
+  const caught = early;
   const stops = await Promise.all([
-    listen<unknown>('host://frame', (event) => {
+    ...(caught !== null
+      ? [Promise.resolve(caught.attach(take))]
+      : HOST_EVENTS.map((name) => listen<unknown>(name, (event) => take(name, event.payload)))),
+    // A phone's reconnect (#346). Nothing is sent from here until the new
+    // connection's request range is known: an id from the old range would be
+    // read by the desktop as somebody else's.
+    listen<unknown>('phone://connected', (event) => {
       const got: unknown = event.payload;
-      // Shown rather than dropped: a relay that stopped enveloping is exactly
-      // the disagreement somebody needs to be able to see.
-      if (!isEnvelope(got)) return handlers.unknown('?', got);
-      if (isFrame(got['frame'])) handlers.frame(got.host, got['frame']);
-      else handlers.unknown(got.host, got['frame']);
-    }),
-    listen<unknown>('host://log', (event) => {
-      const got: unknown = event.payload;
-      if (isEnvelope(got)) handlers.log(got.host, String(got['line']));
-      else handlers.unknown('?', got);
-    }),
-    listen<unknown>('host://exit', (event) => {
-      const got: unknown = event.payload;
-      if (!isEnvelope(got)) return handlers.unknown('?', got);
-      const code: unknown = got['code'];
-      handlers.exit(got.host, typeof code === 'number' ? code : null);
+      const generation =
+        typeof got === 'object' && got !== null ? (got as { generation?: unknown }).generation : undefined;
+      if (typeof generation !== 'number') return handlers.unknown('phone', got);
+      pauseRequests();
+      handlers.rejoined?.(generation);
+      void (linkHooks?.connected(generation) ?? Promise.resolve(false))
+        .then((applied) => {
+          if (applied) handlers.settle?.(generation);
+        })
+        .catch((err: unknown) => handlers.log('phone', `could not resync after a reconnect: ${String(err)}`));
     }),
   ]);
+  if (linkHooks !== null) {
+    await linkHooks.listening().catch((err: unknown) => handlers.log('phone', `could not resync: ${String(err)}`));
+  }
   return () => {
     for (const stop of stops) stop();
   };
@@ -787,6 +920,7 @@ export function start(): Promise<number> {
  * host behind whenever the second failed.
  */
 export function startRunHost(handle: string, request: object): Promise<number> {
+  if (paused) return Promise.reject(new Error(RECONNECTING));
   return invoke<number>('host_start', { handle, line: JSON.stringify(request) });
 }
 
@@ -802,6 +936,7 @@ export function status(): Promise<Status> {
  * understand.
  */
 export function send(request: object, handle: string = SERVICE_HOST): Promise<void> {
+  if (paused) return Promise.reject(new Error(RECONNECTING));
   return invoke('host_send', { handle, line: JSON.stringify(request) });
 }
 
@@ -868,11 +1003,12 @@ function listenService(handler: (frame: Frame) => void): Promise<() => void> {
  * relay cannot, because it does not know whose id it is.
  */
 export async function onPilotFrame(
-  handler: (frame: PilotDelta | PilotReply | PilotStopped | HostError) => void,
+  handler: (frame: PilotDelta | PilotStarted | PilotReply | PilotStopped | HostError) => void,
 ): Promise<() => void> {
   return listenService((frame) => {
     if (
       frame.type === 'pilot_delta' ||
+      frame.type === 'pilot_started' ||
       frame.type === 'pilot_reply' ||
       frame.type === 'pilot_stopped' ||
       frame.type === 'error'
@@ -1081,16 +1217,34 @@ export function updateCheck(): Promise<UpdateInfo | null> {
  * by the same conservative reading the tray's Quit uses - and the window calls
  * again with `confirmed` once a person has said yes.
  */
-export function updateInstall(confirmed: boolean): Promise<Outcome> {
-  return invoke<Outcome>('update_install', { page: false, confirmed });
+export async function updateInstall(confirmed: boolean): Promise<Outcome> {
+  return here(await invoke<Answered>('update_install', { page: false, confirmed }));
 }
 
 /**
  * Open the release page in the system's browser (#299): the `.deb`'s Download
  * and the notes link. The URL is a constant in Rust; the window never names one.
  */
-export function openReleasePage(): Promise<Outcome> {
-  return invoke<Outcome>('update_install', { page: true, confirmed: false });
+export async function openReleasePage(): Promise<Outcome> {
+  return here(await invoke<Answered>('update_install', { page: true, confirmed: false }));
+}
+
+/**
+ * What `update_install` answers. A phone is told `openOnPhone` where the desktop
+ * would have opened its own browser (#343), because a page opened on the
+ * desktop is no use to somebody holding the phone.
+ */
+type Answered = Outcome | 'openOnPhone';
+
+/**
+ * Open the release page on this device when that is what was asked, and answer
+ * as the desktop would have. The URL is the phone's own constant - the same
+ * one, from the shared crate - so no page a connection named is ever opened.
+ */
+async function here(answer: Answered): Promise<Outcome> {
+  if (answer !== 'openOnPhone') return answer;
+  await local('phone_open_release_page');
+  return 'opened';
 }
 
 /** Download and install progress, as Rust measures it (#299). */
@@ -1333,6 +1487,8 @@ export async function answerQuestions(
  * be answering neither.
  */
 export async function deleteRun(dir: string, runId: string): Promise<string> {
+  // Asked on the device first (#346): it cannot be undone.
+  await confirmed('Delete a run');
   const id = nextRequestId();
   const frame = await ask<RunDeleted>(
     { type: 'delete_run', id, dir, runId },
@@ -1393,10 +1549,27 @@ export async function stopCommand(commandId: string): Promise<void> {
  * reads pilot frames, and neither has to know about commands.
  */
 export async function onCommandFrame(
-  handler: (frame: CommandOutput | CommandEnded) => void,
+  handler: (frame: CommandStarted | CommandOutput | CommandEnded) => void,
 ): Promise<() => void> {
   return listenService((frame) => {
-    if (frame.type === 'command_output' || frame.type === 'command_ended') handler(frame);
+    // A start every client hears (#371), so a command run from the phone is a
+    // card here too. A refusal started nothing and is the asker's alone.
+    if (frame.type === 'command_started' && frame.command !== null) handler(frame);
+    else if (frame.type === 'command_output' || frame.type === 'command_ended') handler(frame);
+  });
+}
+
+/** Answers written into a run's NEEDS-INPUT.md, by any client (#371). */
+export async function onQuestionsAnswered(handler: (frame: QuestionsAnswered) => void): Promise<() => void> {
+  return listenService((frame) => {
+    if (frame.type === 'questions_answered') handler(frame);
+  });
+}
+
+/** A run deleted, by any client (#371): the archive lists that hold it are stale. */
+export async function onRunDeleted(handler: (frame: RunDeleted) => void): Promise<() => void> {
+  return listenService((frame) => {
+    if (frame.type === 'run_deleted') handler(frame);
   });
 }
 
@@ -1420,6 +1593,13 @@ export interface PilotTurn {
   resume: boolean;
   /** `--effort` / `model_reasoning_effort`, or absent for the CLI's default (#296). */
   effort?: string;
+  /**
+   * The conversation this turn continues - its chat key - and what was sent,
+   * as the pane shows it (#371). With them every client is told the turn has
+   * begun, and the host refuses a second turn on the same conversation.
+   */
+  chat?: string;
+  asked?: string;
 }
 
 /**
@@ -1440,8 +1620,62 @@ export async function pilotTurn(turn: PilotTurn): Promise<number> {
   return id;
 }
 
-/** Ids the app allocates for its own requests. Gate ids come from the host. */
-let nextId = 0;
+/** The pilot turns running now, as the host holds them (#371). */
+export async function pilotTurnsNow(): Promise<PilotTurnsFrame['turns']> {
+  const id = nextRequestId();
+  const frame = await ask<PilotTurnsFrame>({ type: 'pilot_turns', id }, id, 'pilot_turns', 'the host did not say which pilot turns are running');
+  return frame.turns;
+}
+
+/**
+ * Ids the app allocates for its own requests. Gate ids come from the host, and
+ * are shared on purpose: whichever client answers a gate first answers it for
+ * all, and the host refuses a second answer.
+ *
+ * The desktop window counts from 1. A phone counts from its connection's
+ * `idBase` (#343), so no two clients ever allocate the same id.
+ */
+let ids: RequestIds = requestIds(0);
 export function nextRequestId(): number {
-  return (nextId += 1);
+  return ids.next();
+}
+
+/**
+ * Count this client's ids from `base` from now on: a phone calls it with the
+ * `idBase` its connection's `Welcome` carried. The desktop window never does.
+ */
+export function startRequestIds(base: number): void {
+  ids = requestIds(base);
+  paused = false;
+}
+
+/**
+ * Hold every request line until the next `startRequestIds` (#346): a phone has
+ * reconnected and its new range is not known yet. A request made meanwhile is
+ * refused with a rejected promise - never a throw, since `pause`, `cancel` and
+ * the rest are called from handlers that do not catch - and nothing is sent.
+ */
+let paused = false;
+export function pauseRequests(): void {
+  paused = true;
+}
+
+/** What a request made while paused is refused with. */
+export const RECONNECTING = 'this phone is reconnecting to the desktop; try again in a moment';
+
+/** Whether this client sent the request with this id (#354). */
+export function allocatedHere(id: number): boolean {
+  return ids.own(id);
+}
+
+/**
+ * Another client's writes, as the service host announces them (#354).
+ *
+ * A `changed` carrying an id this window allocated is its own write coming
+ * back, and is not passed on: this window's cache already holds what it wrote.
+ */
+export function onChanged(handler: (frame: ChangedFrame) => void): Promise<() => void> {
+  return listenService((frame) => {
+    if (frame.type === 'changed' && !allocatedHere(frame.id)) handler(frame);
+  });
 }

@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { Badge } from '@/ui/badge';
 import { Button } from '@/ui/button';
@@ -9,19 +9,35 @@ import { KeychainFailure, Vendor } from '../pilot/Credentials';
 import type { PilotLimits } from '../pilot/ledger';
 import { Confirm } from './Confirm';
 import { Section } from './Disclosure';
-import { STEPS } from './appearance';
+import { STEPS, THEMES, type Theme } from './appearance';
 import { pickDirectory } from './pick';
 import { projectName } from './projects';
 import { capOf } from './hosts';
+import { showsConfig } from '../changed';
 import { DRAFTS_KEY, draftsFor, readDrafts, removeDraft, saveDraft } from './drafts';
 import type { Draft } from './drafts';
 import type { KeyStatus } from '../pilot/keys';
 import type { ConfigFrame, PromptsFrame } from '../host';
-import { memory } from '../memory';
+import { memory, useMemoryRevision } from '../memory';
 import { CLI_DEFAULT, loadCliModels, optionsFor, useModels, whyNot } from './models';
 import { backToCommand, convert, gatesPatch, pastedEscapes, readGates, ready, toRow } from './gateform';
 import type { Gate, GateRow } from './gateform';
 import type { Listing } from './models';
+import { RemoteAccess } from '../remote/RemoteAccess';
+import { SURFACE } from '../surface';
+import { confirmed } from '../confirm';
+
+/**
+ * A table as a phone draws it (#347): each row a block, its cells flowing and
+ * wrapping inside it. The tables here are a name, a control and a sentence
+ * about it, and at a desktop's width they are columns; at a phone's they pushed
+ * the screen sideways and squeezed every sentence to a word a line. So the name
+ * takes its own line, the controls share the next, and the sentence (`S.why`)
+ * takes the line under them. A column heading that names a control the control
+ * cannot say itself is drawn beside it from `data-label`.
+ */
+const STACKED =
+  'block w-full text-body-sm text-secondary [&_thead]:hidden [&_tbody]:block [&_tr]:flex [&_tr]:flex-wrap [&_tr]:items-center [&_tr]:gap-x-4 [&_tr]:gap-y-2 [&_tr]:border-b [&_tr]:border-rule-inner [&_tr]:py-3 [&_td]:block [&_td:first-child]:basis-full [&_td:empty]:hidden [&_td[data-label]]:before:mr-2 [&_td[data-label]]:before:text-label [&_td[data-label]]:before:uppercase [&_td[data-label]]:before:tracking-label [&_td[data-label]]:before:text-tertiary [&_td[data-label]]:before:content-[attr(data-label)]';
 
 /**
  * The settings screen's recurring styles, named once (the UI rework). Every
@@ -31,16 +47,19 @@ import type { Listing } from './models';
 const S = {
   note: 'm-0 max-w-[78ch] text-body-sm text-tertiary',
   row: 'flex flex-wrap items-center gap-3 text-body-sm text-secondary',
-  label: 'text-body-sm text-primary',
+  label: 'inline-flex flex-wrap items-baseline gap-x-2 text-body-sm text-primary',
   h: 'm-0 font-bold text-label uppercase tracking-label text-tertiary',
   block: 'flex flex-col gap-2',
   inline: 'ml-2 inline-flex items-center gap-2',
   unit: 'text-body-sm text-tertiary',
   factname: 'text-label uppercase tracking-label text-tertiary',
-  why: 'max-w-[68ch] text-tertiary',
-  fact: 'grid grid-cols-[9rem_1fr] gap-3 border-t border-rule-inner py-3 text-body-sm text-secondary',
+  why: 'max-w-[68ch] basis-full text-tertiary',
+  fact: cn(
+    'grid gap-3 border-t border-rule-inner py-3 text-body-sm text-secondary',
+    SURFACE.compactChrome ? 'grid-cols-1 gap-1' : 'grid-cols-[9rem_1fr]',
+  ),
   promptrow: 'mt-3 flex flex-wrap items-center gap-3',
-  matrix: 'border-collapse text-body-sm text-secondary [&_th]:border-b [&_th]:border-rule-inner [&_th]:px-3 [&_th]:py-2 [&_th]:text-left [&_th]:text-label [&_th]:uppercase [&_th]:tracking-label [&_th]:text-tertiary [&_td]:border-b [&_td]:border-rule-inner [&_td]:px-3 [&_td]:py-2',
+  matrix: SURFACE.compactChrome ? STACKED : 'border-collapse text-body-sm text-secondary [&_th]:border-b [&_th]:border-rule-inner [&_th]:px-3 [&_th]:py-2 [&_th]:text-left [&_th]:text-label [&_th]:uppercase [&_th]:tracking-label [&_th]:text-tertiary [&_td]:border-b [&_td]:border-rule-inner [&_td]:px-3 [&_td]:py-2',
   again: 'cursor-pointer rounded-sm border border-accent-border bg-transparent px-2 py-1 text-label uppercase tracking-label text-accent-on-tint hover:bg-accent-tint disabled:cursor-not-allowed disabled:opacity-50',
   text: 'w-full rounded-sm border border-rule-control bg-card p-2 font-mono text-mono-sm text-primary outline-none focus-visible:ring-1 focus-visible:ring-accent-border disabled:border-dashed disabled:text-tertiary',
   h4: 'mt-5 mb-2 text-body-sm font-semibold uppercase tracking-kicker text-secondary',
@@ -216,7 +235,7 @@ function GateList({
                     <div className={S.hint}>saved once it has a name and a command</div>
                   )}
                 </td>
-                <td>
+                <td data-label="required">
                   <select
                     aria-label={`gate ${String(i + 1)} required`}
                     value={row.required ? 'yes' : 'no'}
@@ -227,7 +246,7 @@ function GateList({
                     <option value="no">no</option>
                   </select>
                 </td>
-                <td>
+                <td data-label="runs">
                   <input
                     aria-label={`gate ${String(i + 1)} runs`}
                     className={S.num}
@@ -238,7 +257,7 @@ function GateList({
                     onChange={(e) => edit(row.key, { runs: e.target.value })}
                   />
                 </td>
-                <td>
+                <td data-label="minutes">
                   <input
                     aria-label={`gate ${String(i + 1)} minutes`}
                     className={S.num}
@@ -403,6 +422,44 @@ function Key({ name }: { name: string }) {
   return <code className={S.key}>{name}</code>;
 }
 
+/**
+ * A field's text: seeded from the value in force, and seeded again when that
+ * value moves or a save is refused (#371). Another client saving the same
+ * setting moves it, and the field follows - unless somebody is typing in it
+ * here, whose text is kept. They leave it and their text is compared with the
+ * value now in force, so what they typed is what is saved. A refusal always
+ * puts back what is in force, focused or not, since that is what it is for.
+ */
+function useTyped(inForce: string): {
+  typed: string;
+  setTyped: (next: string) => void;
+  focus: { onFocus: () => void };
+  left: () => void;
+} {
+  const [typed, setTyped] = useState(inForce);
+  const refusals = useContext(Refusals);
+  const editing = useRef(false);
+  const refused = useRef(refusals);
+  useEffect(() => {
+    const byRefusal = refused.current !== refusals;
+    refused.current = refusals;
+    if (editing.current && !byRefusal) return;
+    setTyped(inForce);
+  }, [inForce, refusals]);
+  return {
+    typed,
+    setTyped,
+    focus: {
+      onFocus: () => {
+        editing.current = true;
+      },
+    },
+    left: () => {
+      editing.current = false;
+    },
+  };
+}
+
 function NumberField({
   id,
   value,
@@ -414,15 +471,12 @@ function NumberField({
   disabled: boolean;
   onSave: (next: number) => void;
 }) {
-  const [typed, setTyped] = useState(value === undefined ? '' : String(value));
-  const refusals = useContext(Refusals);
   // Re-seeded when the saved value changes, and when a save is refused, so the
   // field shows what is actually in force rather than what was typed at it.
-  useEffect(() => {
-    setTyped(value === undefined ? '' : String(value));
-  }, [value, refusals]);
+  const { typed, setTyped, focus, left } = useTyped(value === undefined ? '' : String(value));
 
   const commit = (): void => {
+    left();
     const n = Number(typed);
     if (typed.trim() === '' || !Number.isFinite(n) || n < 0) {
       setTyped(value === undefined ? '' : String(value));
@@ -438,6 +492,7 @@ function NumberField({
       value={typed}
       disabled={disabled}
       inputMode="numeric"
+      {...focus}
       onChange={(e) => setTyped(e.target.value)}
       onBlur={commit}
       onKeyDown={(e) => {
@@ -471,11 +526,7 @@ function TextField({
   disabled: boolean;
   onSave: (next: string) => void;
 }) {
-  const [typed, setTyped] = useState(value ?? '');
-  const refusals = useContext(Refusals);
-  useEffect(() => {
-    setTyped(value ?? '');
-  }, [value, refusals]);
+  const { typed, setTyped, focus, left } = useTyped(value ?? '');
 
   return (
     <input
@@ -485,8 +536,10 @@ function TextField({
       disabled={disabled}
       placeholder={placeholder}
       spellCheck={false}
+      {...focus}
       onChange={(e) => setTyped(e.target.value)}
       onBlur={() => {
+        left();
         if (typed.trim() !== (value ?? '').trim()) onSave(typed.trim());
       }}
       onKeyDown={(e) => {
@@ -525,11 +578,7 @@ function ProseField({
   disabled: boolean;
   onSave: (next: string) => void;
 }) {
-  const [typed, setTyped] = useState(value);
-  const refusals = useContext(Refusals);
-  useEffect(() => {
-    setTyped(value);
-  }, [value, refusals]);
+  const { typed, setTyped, focus, left } = useTyped(value);
   return (
     <textarea
       id={id}
@@ -538,8 +587,10 @@ function ProseField({
       value={typed}
       disabled={disabled}
       placeholder={placeholder}
+      {...focus}
       onChange={(e) => setTyped(e.target.value)}
       onBlur={() => {
+        left();
         if (typed !== value) onSave(typed);
       }}
       onKeyDown={(e) => {
@@ -563,11 +614,7 @@ function ListField({
   onSave: (next: string[]) => void;
 }) {
   const joined = value.join('\n');
-  const [typed, setTyped] = useState(joined);
-  const refusals = useContext(Refusals);
-  useEffect(() => {
-    setTyped(joined);
-  }, [joined, refusals]);
+  const { typed, setTyped, focus, left } = useTyped(joined);
   return (
     <textarea
       id={id}
@@ -577,8 +624,10 @@ function ListField({
       disabled={disabled}
       placeholder={placeholder}
       spellCheck={false}
+      {...focus}
       onChange={(e) => setTyped(e.target.value)}
       onBlur={() => {
+        left();
         const next = typed
           .split(/\r?\n/)
           .map((line) => line.trim())
@@ -959,6 +1008,8 @@ export function Settings({
   dir,
   scale,
   onScale,
+  theme,
+  onTheme,
   checkUpdates,
   onCheckUpdates,
   statuses,
@@ -967,6 +1018,8 @@ export function Settings({
   limits,
   onLimits,
   onSaved,
+  remoteProblem = null,
+  onRemoteProblemSeen,
 }: {
   /**
    * Which file this screen edits (#223), decided by the door it was opened
@@ -983,6 +1036,9 @@ export function Settings({
   /** How big the product is drawn. Window state — see `appearance.ts`. */
   scale: number;
   onScale: (next: number) => void;
+  /** Light, dark or the system's (#347). Window state, like the scale. */
+  theme: Theme;
+  onTheme: (next: Theme) => void;
   /**
    * Whether the app checks for a newer version of itself (#299). Window state,
    * owned by `Cockpit` like the scale: the check runs there, and this screen
@@ -1013,6 +1069,13 @@ export function Settings({
   onLimits: (next: PilotLimits) => void;
   /** Told after every save that took, so the window's own reads can follow. */
   onSaved?: (() => void) | undefined;
+  /**
+   * A pairing that was allowed and could not be saved, in Rust's words (#341).
+   * Owned by `Cockpit`, because the prompt that learns it is mounted there and
+   * closes on the same answer; this screen is where the reason is read.
+   */
+  remoteProblem?: string | null;
+  onRemoteProblemSeen?: (() => void) | undefined;
 }) {
   const [frame, setFrame] = useState<ConfigFrame | null>(null);
   // Asked of the CLIs once per window, and again on request (#223).
@@ -1033,6 +1096,8 @@ export function Settings({
    * gives for the project list.
    */
   const [drafts, setDrafts] = useState<readonly Draft[]>([]);
+  // And again when another client saved a version (#371).
+  const library = useMemoryRevision(DRAFTS_KEY);
   useEffect(() => {
     try {
       setDrafts(readDrafts(memory.getItem(DRAFTS_KEY)));
@@ -1040,7 +1105,7 @@ export function Settings({
       // Storage can be unavailable. An empty library is a smaller failure than
       // a settings screen that will not render.
     }
-  }, []);
+  }, [library]);
   const keep = useCallback((key: string, value: unknown) => {
     try {
       memory.setItem(key, JSON.stringify(value));
@@ -1067,6 +1132,27 @@ export function Settings({
   }, [dir]);
 
   useEffect(load, [load]);
+
+  // Another client saved the file this screen shows (#354): ask for it again,
+  // so the next save here starts from what is on disk. A field already drawn
+  // keeps what it took; only the frame is refreshed.
+  useEffect(() => {
+    if (!host.inShell()) return;
+    let off: (() => void) | null = null;
+    let live = true;
+    void host
+      .onChanged((c) => {
+        if (c.what === 'config' && showsConfig(c.key, scope, dir)) load();
+      })
+      .then((stop) => {
+        if (live) off = stop;
+        else stop();
+      });
+    return () => {
+      live = false;
+      off?.();
+    };
+  }, [load, scope, dir]);
 
   const write = useCallback(
     (patch: Record<string, unknown>, to: 'project' | 'global') => {
@@ -1189,7 +1275,7 @@ export function Settings({
 
   return (
     <Refusals.Provider value={refusals}>
-    <div className={cn(PANE, "w-full max-w-5xl gap-5 [&_code]:font-mono [&_code]:text-mono-sm [&_code]:text-secondary")}>
+    <div className={cn(PANE, "w-full max-w-5xl gap-5 [&_code]:font-mono [&_code]:text-mono-sm [&_code]:text-secondary", SURFACE.compactChrome && 'px-4 [&_select]:max-w-full [&_code]:break-words')}>
       {/* **Which file, said here** (#223). Chosen by the door this screen was
           opened from, so the heading and the line under it are what tell the two
           apart — nothing else on the screen looks different. */}
@@ -1199,7 +1285,9 @@ export function Settings({
       <p className={S.note}>
         {scope === 'project'
           ? 'This repository’s own settings, in its vibe.config.json. Anything left alone here comes from your settings for all projects, and failing that from vibe’s own default, which is marked. The test command and the worktree are only ever set here.'
-          : 'Your settings for every project on this machine. How each vendor is reached, the CLIs and the pilot’s permissions are only ever set here; for the rest, a project that sets a key in its own file wins.'}
+          : SURFACE.compactChrome
+            ? 'Your settings for every project on the desktop this phone is connected to — they are its files, and a change here is a change there. How each vendor is reached, the CLIs and the pilot’s permissions are only ever set here; for the rest, a project that sets a key in its own file wins.'
+            : 'Your settings for every project on this machine. How each vendor is reached, the CLIs and the pilot’s permissions are only ever set here; for the rest, a project that sets a key in its own file wins.'}
       </p>
       {scope === 'project' && onRelocate !== undefined && <WhereItIs dir={dir} onRelocate={onRelocate} />}
       {carry !== null && (
@@ -1269,11 +1357,16 @@ export function Settings({
         <p className={S.note}>
           How each vendor is reached, where the CLIs are, what the pilot may do without asking and
           how this window is drawn are this machine&apos;s, for every project — they are under
-          Settings at the foot of the left bar.
+          {SURFACE.compactChrome
+            ? ' Settings at the top of the sidebar.'
+            : ' Settings at the foot of the left bar.'}
         </p>
       ) : (
         <>
           {/* ---- this window ------------------------------------------------- */}
+          {/* On a phone the text size is the phone's own (#347), so it is set
+              under This phone, not among the desktop's settings. */}
+          {!SURFACE.compactChrome && (
           <section className={S.block}>
             <h3 className={S.h}>how this is drawn</h3>
             <p className={S.note}>
@@ -1301,10 +1394,21 @@ export function Settings({
                 were and break the relationships that make a page readable. */}
             <p className={S.note}>
               Every size moves together, so the proportions the design chose survive being scaled.
-              Nothing else about the look is configurable: there is one palette, and it is the one the
-              contrast gate is measured against.
+            </p>
+            <div className={S.scale}>
+              {THEMES.map((t) => (
+                <label key={t.theme} className={S.radio}>
+                  <input type="radio" name="theme" checked={theme === t.theme} onChange={() => onTheme(t.theme)} />
+                  <span>{t.label}</span>
+                </label>
+              ))}
+            </div>
+            <p className={S.note}>
+              Light or dark, or whichever the system is set to. Both palettes are the ones the contrast
+              gate is measured against; nothing else about the look is configurable.
             </p>
           </section>
+          )}
 
           {/* Whether this app asks for a newer version of itself (#299): the one
               network request the app makes on its own, so it is said in full
@@ -1317,16 +1421,43 @@ export function Settings({
                 checked={checkUpdates}
                 onChange={(e) => onCheckUpdates(e.target.checked)}
               />
-              <span>Check for a new version of the app</span>
+              <span>
+                {SURFACE.compactChrome
+                  ? 'Check for a new version of the desktop app'
+                  : 'Check for a new version of the app'}
+              </span>
             </label>
-            <p className={S.note}>
-              At launch and every six hours, the app makes one plain HTTPS request for a public file
-              on GitHub that names the latest release. Nothing identifying you or this machine is
-              sent. When a newer version exists, an arrow appears above Settings at the foot of the
-              left bar. Off means no request at all. Like the text size, this is this window&apos;s
-              setting, on this machine.
-            </p>
+            {/* On a phone this is the desktop's check, asked over the connection -
+                the phone app is updated by its store - and the switch is the
+                desktop's too: it is kept in the desktop's memory, which the phone
+                shares, so it says so rather than claiming to be this device's. */}
+            {SURFACE.compactChrome ? (
+              <p className={S.note}>
+                Whether the desktop app this phone is connected to looks for a newer version of
+                itself: at launch and every six hours it makes one plain HTTPS request for a public
+                file on GitHub that names the latest release, and nothing identifying you or either
+                device is sent. When one exists, an arrow appears beside Settings at the top of the
+                sidebar. This is the desktop&apos;s switch, so turning it off here turns it off there
+                too. The phone app itself is updated by its app store.
+              </p>
+            ) : (
+              <p className={S.note}>
+                At launch and every six hours, the app makes one plain HTTPS request for a public file
+                on GitHub that names the latest release. Nothing identifying you or this machine is
+                sent. When a newer version exists, an arrow appears above Settings at the foot of the
+                left bar. Off means no request at all. Like the text size, this is this window&apos;s
+                setting, on this machine.
+              </p>
+            )}
           </section>
+
+          {/* The phone has no tray, so this is where the desktop app is quit
+              from there (#345). Never drawn on the desktop, which has Quit. */}
+          {!SURFACE.tray && <QuitDesktop />}
+
+          {/* Remote access (#341, #344): always drawn - the switch, keep awake,
+              and, while it is on, start at login, the relay and pairing. */}
+          <RemoteAccess problem={remoteProblem} onProblemSeen={() => onRemoteProblemSeen?.()} />
 
           {/* ---- how each vendor is reached (#223) ---------------------------- */}
           <section className={S.block}>
@@ -1560,7 +1691,10 @@ export function Settings({
                 confirm="turn YOLO on"
                 onConfirm={() => {
                   setAskYolo(false);
-                  write({ pilot: { yolo: true } }, 'global');
+                  // Asked on the device too (#346); a refusal leaves it off.
+                  void confirmed('Turn YOLO on')
+                    .then(() => write({ pilot: { yolo: true } }, 'global'))
+                    .catch(() => undefined);
                 }}
                 onCancel={() => setAskYolo(false)}
               />
@@ -2135,11 +2269,20 @@ export function Settings({
                         disabled={busy}
                         onChange={() => save({ gates: { [boundary]: mode } })}
                       />
-                      <span>{MODE_NOTE[mode] ?? mode}</span>
+                      <span>{SURFACE.compactChrome ? mode : (MODE_NOTE[mode] ?? mode)}</span>
                     </label>
                   </td>
                 ))}
-                <td />
+                {/* A phone names the three modes on one line and says what the
+                    chosen one does under it (#347): each of the three sentences
+                    on every row was two screens for six boundaries. */}
+                {SURFACE.compactChrome ? (
+                  <td className={S.why}>
+                    {MODE_NOTE[gates[boundary] ?? ''] ?? gates[boundary]}
+                  </td>
+                ) : (
+                  <td />
+                )}
               </tr>
             ))}
             {/* The two with no row, named with their own reasons. `mergeSection`
@@ -2390,5 +2533,52 @@ export function Settings({
 
     </div>
     </Refusals.Provider>
+  );
+}
+
+/**
+ * Quitting the desktop app, from a phone (#345).
+ *
+ * It is the tray's Quit, behind the product spec's confirmation: once the app
+ * on the desktop has stopped, nothing answers this phone until somebody starts
+ * it there again. A run going on the desktop is stopped by it the way the tray's
+ * Quit stops one, and can be resumed.
+ */
+function QuitDesktop() {
+  const [asking, setAsking] = useState(false);
+  const [problem, setProblem] = useState<string | null>(null);
+  return (
+    <section className={S.block}>
+      <h3 className={S.h}>quit the desktop app</h3>
+      <p className={S.note}>
+        Stops Vibe on the desktop this phone is connected to. The phone cannot reconnect until somebody
+        starts it again on the desktop.
+      </p>
+      <div>
+        <Button variant="loss" onClick={() => setAsking(true)}>
+          quit the desktop app
+        </Button>
+      </div>
+      {asking && (
+        <Confirm
+          kicker="quit"
+          title="Quit Vibe on the desktop?"
+          lead="This phone cannot reconnect until somebody starts Vibe on the desktop again. A run going there stops where it is and can be resumed."
+          facts={[]}
+          confirm="quit the desktop app"
+          problem={problem}
+          onConfirm={() => {
+            host.appQuit().then(
+              () => setAsking(false),
+              (e: unknown) => setProblem(e instanceof Error ? e.message : String(e)),
+            );
+          }}
+          onCancel={() => {
+            setAsking(false);
+            setProblem(null);
+          }}
+        />
+      )}
+    </section>
   );
 }

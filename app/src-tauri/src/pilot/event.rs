@@ -77,6 +77,18 @@ impl Usage {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PilotEvent {
+    /// A turn has begun in a conversation, said to every client before the
+    /// request goes out (#371), so a client that did not ask can draw it.
+    /// Emitted by `send_turn`, never by an adapter.
+    Announced {
+        turn: u64,
+        provider: Provider,
+        chat: String,
+        asked: String,
+        asker: String,
+        /// Milliseconds since the epoch, when it was asked for.
+        started_at: u64,
+    },
     /// The request was accepted and the stream has begun.
     Started {
         turn: u64,

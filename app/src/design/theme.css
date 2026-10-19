@@ -149,10 +149,15 @@
 
 /* ================================================================ the page
  * `:root` is dark to the platform as well as to the eye, so a native control the
- * app does not style (a select, a radio) draws its dark variant.
+ * app does not style (a select, a radio) draws its dark variant - and light
+ * under the light palette (#347). The cockpit also sets it inline beside
+ * `data-theme`; these are the same answer for a page that has not run yet.
  */
 :root {
   color-scheme: dark;
+}
+:root[data-theme='light'] {
+  color-scheme: light;
 }
 
 @layer base {
@@ -162,6 +167,33 @@
     color: var(--text-primary);
     font: var(--type-body);
     -webkit-font-smoothing: antialiased;
+  }
+
+  /* The cockpit is as tall as the page, and the page is the window. Named so a
+   * phone can make the page smaller than the window, which `h-screen` (100vh)
+   * would ignore. */
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  /* A phone draws edge to edge - Android 15 enforces it whatever the app asks -
+   * so the page ran under the status bar and the navigation bar and drew the
+   * tab row beneath the clock (#346). The WebView reports both bars as the
+   * safe-area insets (measured on a Galaxy Z Fold5, WebView 154: 33px and
+   * 48px), so the page is the window minus them. The transform makes the body
+   * the containing block for every fixed descendant, so a sheet, a scrim or a
+   * dialog portalled into the body is bounded by it too, not by the window.
+   * The bars themselves show the page's ground, which the canvas takes from
+   * `html`. `data-surface` is set by `boot.mobile.tsx` only. */
+  :root[data-surface='phone'] body {
+    position: fixed;
+    inset: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px)
+      env(safe-area-inset-left, 0px);
+    height: auto;
+    overflow: hidden;
+    transform: translateZ(0);
   }
 
   /* A desktop app, not a document: text selection is opt-in, so a drag on a pane

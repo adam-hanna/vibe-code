@@ -487,8 +487,8 @@ export function today(ledger: Ledger, at: Date): DayTotal | null {
  * ceiling is briefly generous - against a default of *no ceiling at all*, which
  * is what almost every user is running.
  */
-const LEDGER_KEY = 'vibe.pilot.ledger';
-const LIMITS_KEY = 'vibe.pilot.limits';
+export const LEDGER_KEY = 'vibe.pilot.ledger';
+export const LIMITS_KEY = 'vibe.pilot.limits';
 
 /** What the books are kept in: `localStorage`'s two methods, nothing more. */
 export type LedgerStore = Pick<Storage, 'getItem' | 'setItem'>;

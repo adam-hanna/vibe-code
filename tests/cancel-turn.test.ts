@@ -175,7 +175,11 @@ test('the session acts at once and reports how many children it killed', () => {
   const session = createSession((m) => void sent.push(m), { invoke: () => Promise.resolve(0) });
   session.receive(line({ type: 'cancel', id: 9, reason: 'wrong branch' }));
 
-  assert.deepEqual(sent, [{ type: 'result', id: 9, exit: 0 }]);
+  // Every client hears the stop first (#371); the asker's answer is still at once.
+  assert.deepEqual(sent, [
+    { type: 'controls', pausing: false, stopping: true },
+    { type: 'result', id: 9, exit: 0 },
+  ]);
   assert.equal(cancelRequested(), 'wrong branch');
   clearCancel();
 });
