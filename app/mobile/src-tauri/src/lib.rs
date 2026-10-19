@@ -367,7 +367,7 @@ pub fn run() {
             #[cfg(feature = "mock-desktop")]
             let desktop: Box<dyn Desktop> = {
                 let _ = (key, &dir);
-                Box::new(mock::Recorded::new(app.handle().clone()))
+                Box::new(mock::Recorded::new(app.handle().clone(), identity.clone().ok()))
             };
             #[cfg(not(feature = "mock-desktop"))]
             let desktop: Box<dyn Desktop> = match (key, &dir) {
