@@ -75,7 +75,7 @@ docs site from `main`. `ci.yml` runs on every push and pull request into `main`,
 (typecheck, vitest, `audit:contrast`) and the Rust tests, all on Ubuntu 22.04 with Node 22.
 `mobile.yml` builds the phone app and launches it on an Android emulator and an iOS simulator,
 on a pull request into `main` that touches it, and by hand. `release.yml` builds the desktop
-bundles on a `v*` tag into a draft GitHub release (#239). What CI does **not** run: a linter or
+bundles and the phone apps on a `v*` tag into a draft GitHub release (#239, #348). What CI does **not** run: a linter or
 formatter, the tests on macOS or Windows, `npm publish` - and **anything on `develop`**.
 Actions minutes are a budget, so at the owner's decision a merge into `develop` runs nothing:
 **the gates are run locally before every merge into `develop`**, and CI runs in full on the
@@ -95,6 +95,20 @@ moves per release; the names are written once, in `release.yml`'s matrix, and
 off and the workflow switches it on, so a local `npm run app:build` never needs the key. **That
 key cannot be replaced**: a release signed with a new one is refused by every installed copy,
 whose only way forward is a manual reinstall.
+
+**The phone apps are on the same release, and there is no store** (#348, at the owner's
+decision: *"Lets not release in the app store"*). The `mobile` job builds an APK signed with the
+`ANDROID_KEYSTORE` secrets and an **unsigned** `.ipa` (`tauri ios build --no-sign`, tauri-cli
+2.11), each under a versioned name and a stable one, `Vibe-android.apk` and
+`Vibe-ios-unsigned.ipa`, attested like the installers and listed in `SHA256SUMS`. A person
+installs the APK by hand and signs the `.ipa` with their own Apple ID through AltStore, SideStore
+or Sideloadly; `docs/phone.md` says how, and how to build both from source.
+`app/mobile/scripts/sign-apk.sh` is the one signing step, by hand or in CI. **The Android key
+cannot be replaced either**: Android refuses an update signed by another key, so a new one means
+every phone uninstalls the app, and loses its pairing, before it can update. It lives outside
+every checkout (`~/.android/vibe-release.jks` on the owner's machine, with a backup) and in the
+four repository secrets, and is never printed. Without the secrets the job builds no APK and
+says so, as a fork's release has no updater files.
 
 ### The docs site — `docs/`
 
@@ -2601,12 +2615,13 @@ app/scripts/smoke-appimage.sh  launching the AppImage on six distributions, and 
 
 docs/                the docs site - VitePress, its own package.json, never in `files`
 docs/.vitepress/config.mts  the site's config: BASE (the one place the path is written), sidebar, search
+docs/phone.md        installing the phone apps without a store, pairing them, and building them from source
 docs/images/         screenshots, shared by README.md and the site
 docs/plans/          internal design notes, excluded from the site
 .github/workflows/pages.yml    builds docs/ from main and deploys it to Pages
 .github/workflows/ci.yml       the core, app and Rust gates on push and PR into main, and by hand
 .github/workflows/mobile.yml   the phone app's tests and its emulator and simulator launches, on PR into main
-.github/workflows/release.yml  the desktop bundles on a v* tag, into one draft release
+.github/workflows/release.yml  the desktop bundles and the phone apps on a v* tag, into one draft release
 .github/actions/linux-deps/    the Linux packages a Tauri build needs, listed once
 ```
 
@@ -4341,8 +4356,10 @@ and its commits survive it.
    `gh attestation verify Vibe-macos-arm64.dmg --repo adam-hanna/vibe-code` and
    `sha256sum -c SHA256SUMS --ignore-missing`. An attestation is stored against a file's digest,
    not against the release, so it verifies while the release is still a draft.
-9. **Wait for `release.yml` on the tag, install the draft on at least one machine, then publish
-   the draft release.** The workflow builds the Windows, macOS (Apple Silicon) and Linux bundles
+9. **Wait for `release.yml` on the tag, install the draft on at least one machine and both
+   phone apps on a phone, then publish the draft release.** The APK from the draft must install
+   *over* the previous release's (same key, higher `versionCode`), and the `.ipa` must sign and
+   open through AltStore or Sideloadly; then pair each with the desktop. The workflow builds the Windows, macOS (Apple Silicon) and Linux bundles
    into one draft and never publishes it. A tag that is not `package.json`'s version still
    builds, with a warning, and the bundles carry `package.json`'s version - so a throwaway
    `v<version>-rc.N` tag is how to try the workflow, and it yields a draft pre-release. A tag

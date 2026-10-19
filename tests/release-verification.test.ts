@@ -43,9 +43,9 @@ function job(name: string): string {
   return [lines[start], ...(end === -1 ? rest : rest.slice(0, end))].join('\n');
 }
 
-// `build` makes and uploads the installers; `updater` is the final job, which
-// writes latest.json and then SHA256SUMS.
-for (const name of ['build', 'updater']) {
+// `build` makes and uploads the installers, `mobile` the phone apps (#348);
+// `updater` is the final job, which writes latest.json and then SHA256SUMS.
+for (const name of ['build', 'mobile', 'updater']) {
   test(`the ${name} job attests what it uploads`, () => {
     assert.ok(job(name).includes(ATTEST), `the ${name} job has no ${ATTEST} step`);
   });
