@@ -14,6 +14,11 @@
 # an APK over one signed by another, so a new key means every phone has to
 # uninstall the app - and lose its pairing - before it can take an update.
 set -euo pipefail
+# Under `set -e` a failing command ends the script with nothing said: rc.1's
+# signing step died with exit 1 and no message at all. Every failure now says
+# which line it was. The trap prints the command, never a password: those are
+# read by apksigner from the environment (`env:` below), never passed as words.
+trap 'echo "sign-apk: line $LINENO exited $?: $BASH_COMMAND" >&2' ERR
 
 in="${1:?usage: sign-apk.sh <unsigned.apk> <signed.apk>}"
 out="${2:?usage: sign-apk.sh <unsigned.apk> <signed.apk>}"
@@ -22,16 +27,28 @@ for v in ANDROID_KEYSTORE_FILE ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDRO
 done
 
 sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$HOME/Android/Sdk}}"
-# The newest build-tools, by version order rather than by directory order.
-tools=$(ls -1d "$sdk"/build-tools/*/ 2>/dev/null | sort -V | tail -1)
-if [ -z "$tools" ]; then echo "sign-apk: no build-tools under $sdk" >&2; exit 1; fi
+# The newest build-tools that has both tools, by version order rather than by
+# directory order. A glob and a test per entry, not `ls | sort`: under
+# `pipefail` one entry `ls` cannot read (a dangling link, say) fails the whole
+# lookup, and `set -e` ends the script without a word.
+tools=""
+for d in "$sdk"/build-tools/*/; do
+  [ -x "${d}zipalign" ] && [ -x "${d}apksigner" ] || continue
+  if [ -z "$tools" ] || [ "$(printf '%s\n%s\n' "$tools" "$d" | sort -V | tail -n 1)" = "$d" ]; then
+    tools="$d"
+  fi
+done
+if [ -z "$tools" ]; then echo "sign-apk: no build-tools with zipalign and apksigner under $sdk" >&2; exit 1; fi
+echo "sign-apk: using ${tools%/}"
 
 aligned="$(mktemp -d)/aligned.apk"
-"$tools/zipalign" -p -f 4 "$in" "$aligned"
+"${tools}zipalign" -p -f 4 "$in" "$aligned"
 # `env:` names the variable, so no password is ever on a command line.
-"$tools/apksigner" sign \
+"${tools}apksigner" sign \
   --ks "$ANDROID_KEYSTORE_FILE" --ks-pass env:ANDROID_KEYSTORE_PASSWORD \
   --ks-key-alias "$ANDROID_KEY_ALIAS" --key-pass env:ANDROID_KEY_PASSWORD \
   --out "$out" "$aligned"
-"$tools/apksigner" verify --print-certs "$out" | grep -E 'Signer #1 certificate (DN|SHA-256)'
+# The whole report, not a grep of it: a grep that matched nothing would be a
+# second silent exit 1.
+"${tools}apksigner" verify --print-certs "$out"
 rm -rf "$(dirname "$aligned")"

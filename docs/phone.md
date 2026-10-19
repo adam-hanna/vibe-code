@@ -48,6 +48,16 @@ Apple lets nothing onto an iPhone without an Apple signature, so the release shi
 
 The phone reaches the desktop by its key, directly when it can and through a relay when it cannot, and never by its IP address. The desktop does not need a port opened. To stop a phone, remove it from the list in **Settings → Remote access**, or turn remote access off.
 
+## More than one desktop
+
+A phone can be paired with as many desktops as you like, and is open on one at a time.
+
+- **To pair another**, go back to the **Desktops** screen (the **Desktops** button at the top of the cockpit) and press **Pair a desktop**, then follow the steps above on the new desktop.
+- **To switch**, go back to **Desktops** and press **Open** on the one you want. The phone closes its connection to the desktop it was on and connects to the new one.
+- **Each row says whether that desktop can be reached** and when it was last seen. **Rename** changes the name on this phone only, and **Unpair** forgets the desktop and tells it to forget this phone. A desktop that is off or out of reach cannot be told, so remove the phone in its **Settings → Remote access** as well.
+
+The phone shows the runs, gates and pilot chat of the desktop it is open on. The others keep running as usual and show on the phone when you open them.
+
 ## Building it yourself
 
 You need the desktop app's build setup first: Node 22, Rust and the [Tauri prerequisites](https://tauri.app/start/prerequisites/). Then, from a checkout:

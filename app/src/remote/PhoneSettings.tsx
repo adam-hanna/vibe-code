@@ -21,10 +21,8 @@ import { local } from '../transport';
  *   bug report or a comparison rather than for reading.
  * - **The desktop it is connected to**: whether it is, and the build it runs.
  *
- * The rest the product spec lists here - app lock, notifications, and the
- * paired desktops as a list with a way to forget one - arrive with pairing.
- * Nothing is drawn for them: a switch that does nothing would be a promise this
- * build does not keep.
+ * The app lock, notifications and the paired desktops are not here: they are on
+ * the phone's Desktops screen (#346), which every desktop's cockpit returns to.
  */
 /**
  * This phone's id, asked of its own Rust: the id, the phone's sentence for why
@@ -136,8 +134,8 @@ export function PhoneSettings({
         </div>
         {!connected && failure !== null && <p className="m-0 text-body-sm text-loss">{failure}</p>}
         <p className={NOTE}>
-          The desktop this phone reaches. Pairing another, and forgetting one, are not in this build
-          yet.
+          The desktop this phone is open on. To pair another, switch to one or unpair one, go back
+          to Desktops.
         </p>
       </section>
     </div>
