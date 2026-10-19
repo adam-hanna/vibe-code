@@ -18,7 +18,8 @@ import type { Backend } from './backend';
 import { DEFAULT_EFFORT, EFFORTS, effortOff, effortToSend, withEffort } from './effort';
 import { systemPrompt } from './brief';
 import { readEmitted, unique, visible } from './emit';
-import { useFollow } from './follow';
+import { useFollow } from '../follow';
+import { JumpToEnd } from '../JumpToEnd';
 import { autoRun, NO_ACCESS } from './access';
 import { archiveContent, declare, settleCall } from './tools';
 import { chatKey, readChat, replyKey, sameExchange, worthSaving, writable } from './saved';
@@ -2108,7 +2109,7 @@ ${frame.text}`, turn, origin.current))) {
           the first bug report about it arrived as a screenshot of text nobody
           could select. */}
       {/* Follows the bottom while you leave it there, and stops the instant you
-          scroll up — see `follow.ts` for why that state belongs to the reader
+          scroll up — see `follow.ts` (in `app/src`) for why that state belongs to the reader
           and not to the pane. */}
       <div
         className="flex min-h-0 flex-1 select-text flex-col gap-4 overflow-y-auto px-6 py-5"
@@ -2200,6 +2201,7 @@ ${frame.text}`, turn, origin.current))) {
         {/* One indicator, after every card: this pane's turn or the other
             client's, never both, since the composer is shut while either runs. */}
         {working !== null && <TurnWorking reply={working} now={now} />}
+        <JumpToEnd shown={!log.following} onJump={log.jump} />
       </div>
 
       {/* A conversation that is not being saved says so (#223). Swallowing this
