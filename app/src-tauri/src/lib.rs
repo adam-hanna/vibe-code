@@ -190,7 +190,7 @@ pub fn run() {
             match applog::open(app.handle()) {
                 Some(path) => applog::app(&format!(
                     "vibe-desktop {} starting; log at {}",
-                    env!("CARGO_PKG_VERSION"),
+                    env!("VIBE_APP_VERSION"),
                     path.display()
                 )),
                 // Said the only way left. Nothing else changes: the app runs
