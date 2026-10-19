@@ -515,8 +515,10 @@ jobs:
           set -euo pipefail
           npx tauri ios init --ci
           npx tauri ios build --target aarch64 --no-sign --ci
-          shopt -s nullglob globstar
-          ipas=(src-tauri/gen/apple/build/**/*.ipa)
+          # find, not a ** glob: macOS's bash 3.2 has no globstar.
+          ipas=()
+          while IFS= read -r f; do ipas+=("$f"); done \
+            < <(find src-tauri/gen/apple/build -name '*.ipa' -type f)
           if [ ${#ipas[@]} -ne 1 ]; then
             echo "::error::the iOS build made ${#ipas[@]} .ipa files; expected one."
             exit 1
