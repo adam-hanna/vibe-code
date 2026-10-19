@@ -17,6 +17,13 @@
 //! - The `phone_*` side (#346): one paired desktop, the current one, which
 //!   opens at once as generation 1 with the request range above the window's.
 //!   Pairing and unpairing are refused: there is no desktop to pair with.
+//! - **The recorded place is this phone's too.** The recording holds the
+//!   desktop window's `vibe.where`, and since #347 a phone reads its place
+//!   from `vibe.where.phone.<its endpoint id>` instead, so a mock build
+//!   opened on no run and never asked for the recorded one. The endpoint id
+//!   is made fresh on every install, so it cannot be recorded: the `memory`
+//!   answer carries the recorded place under this phone's key as well
+//!   (`for_phone`). Nothing else in the memory is device-scoped.
 
 use serde_json::{json, Map, Value};
 use tauri::{AppHandle, Emitter};
@@ -31,13 +38,38 @@ const SERVICE: &str = "service";
 pub struct Recorded {
     app: AppHandle,
     fixture: Value,
+    /// This phone's endpoint id, when it has a key.
+    phone: Option<String>,
 }
 
 impl Recorded {
-    pub fn new(app: AppHandle) -> Self {
+    pub fn new(app: AppHandle, phone: Option<String>) -> Self {
         let fixture = serde_json::from_str(RECORDED).expect("the recorded desktop is JSON");
-        Recorded { app, fixture }
+        Recorded { app, fixture, phone }
     }
+}
+
+/// The desktop's place key, as `WHERE_KEY` in `app/src/cockpit/where.ts` has it.
+const WHERE_KEY: &str = "vibe.where";
+
+/// A `memory` answer with the desktop's place also under `phone`'s own key,
+/// as `deviceKey` spells it. Any other frame, or a phone with no id, or a
+/// memory that already holds the phone's key, comes back unchanged. Pure.
+pub fn for_phone(mut frame: Value, phone: Option<&str>) -> Value {
+    let Some(phone) = phone.filter(|p| !p.trim().is_empty()) else { return frame };
+    if frame.get("type").and_then(Value::as_str) != Some("memory") {
+        return frame;
+    }
+    let own = format!("{WHERE_KEY}.phone.{phone}");
+    let Some(entries) = frame.get_mut("entries").and_then(Value::as_array_mut) else { return frame };
+    if entries.iter().any(|e| e.get("key").and_then(Value::as_str) == Some(own.as_str())) {
+        return frame;
+    }
+    let place = entries.iter().find(|e| e.get("key").and_then(Value::as_str) == Some(WHERE_KEY)).and_then(|e| e.get("value")).cloned();
+    if let Some(value) = place {
+        entries.push(json!({ "key": own, "value": value }));
+    }
+    frame
 }
 
 /// The recorded answer to one request line, with the request's id, or an
@@ -98,7 +130,7 @@ impl Desktop for Recorded {
                 "host_status" => Ok(status(&self.fixture)),
                 "host_send" => {
                     let line = args.get("line").and_then(Value::as_str).unwrap_or("");
-                    let frame = answer(&self.fixture, line);
+                    let frame = for_phone(answer(&self.fixture, line), self.phone.as_deref());
                     log::info!(
                         "mock desktop: answered {} with {}",
                         serde_json::from_str::<Value>(line).ok().and_then(|r| r.get("type").cloned()).unwrap_or(Value::Null),
@@ -188,6 +220,19 @@ mod tests {
         assert_eq!(got["id"], 3);
         let missing = answer(&fixture(), r#"{"type":"artifact","id":4,"name":"nope.md"}"#);
         assert_eq!(missing["type"], "error");
+    }
+
+    #[test]
+    fn the_recorded_place_is_also_under_the_phone_s_own_key() {
+        let memory = answer(&fixture(), r#"{"type":"memory","id":5}"#);
+        let desktop = memory["entries"].as_array().unwrap().iter().find(|e| e["key"] == WHERE_KEY).unwrap()["value"].clone();
+        let got = for_phone(memory.clone(), Some("abc"));
+        let own = got["entries"].as_array().unwrap().iter().find(|e| e["key"] == "vibe.where.phone.abc").expect("the phone's key");
+        assert_eq!(own["value"], desktop, "the same place the desktop recorded");
+        assert_eq!(for_phone(memory.clone(), None), memory, "a phone with no id keeps no key");
+        assert_eq!(for_phone(got.clone(), Some("abc")), got, "an existing key is not added twice");
+        let other = answer(&fixture(), r#"{"type":"chats","id":6}"#);
+        assert_eq!(for_phone(other.clone(), Some("abc")), other, "only the memory read");
     }
 
     #[test]
