@@ -147,7 +147,7 @@ pub fn build_stamp() -> Build {
     let commit = env!("VIBE_BUILD_COMMIT");
     let at = env!("VIBE_BUILD_AT");
     Build {
-        version: env!("CARGO_PKG_VERSION").to_string(),
+        version: env!("VIBE_APP_VERSION").to_string(),
         commit: if commit.is_empty() {
             None
         } else {
@@ -1411,7 +1411,10 @@ mod tests {
         // with no git produces `None` here, never `"unknown"` and never `""` -
         // both of which a window would happily print beside the real fields.
         let build = build_stamp();
-        assert_eq!(build.version, env!("CARGO_PKG_VERSION"));
+        // The app's version is package.json's, never the crate's (#336).
+        let package: serde_json::Value =
+            serde_json::from_str(include_str!("../../../package.json")).expect("package.json is JSON");
+        assert_eq!(build.version, package["version"].as_str().expect("package.json has a version"));
         if let Some(commit) = &build.commit {
             assert!(!commit.is_empty(), "an empty commit must be None, not Some");
             assert!(

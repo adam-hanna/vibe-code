@@ -1,7 +1,12 @@
 # The phone app (#345): its Rust tests, and a launch on an Android emulator and
 # an iOS simulator with the mock desktop, on every pull request into main that
-# touches it, and by hand. Not on develop, for ci.yml's reason: the macOS runner
-# is the most expensive minute this repository spends.
+# touches it, on every `v*` tag, and by hand. Not on develop, for ci.yml's
+# reason: the macOS runner is the most expensive minute this repository spends.
+#
+# On a tag because release.yml builds the phone apps and never launches them,
+# so an rc could be green while the phone opened on nothing (#378): #372 broke
+# this check on develop, and nobody saw it for five days and three rc tags,
+# until the release PR. A tag is when we want to know, and it is one run per rc.
 #
 # The launches are the issue's done-when: the app builds for each platform,
 # starts, and draws the cockpit from frames - measured from the app's own log
@@ -20,6 +25,8 @@ on:
       - app/vite.config.ts
       - app/mobile-swaps.ts
       - .github/workflows/mobile.yml
+  push:
+    tags: ['v*']
   workflow_dispatch:
 
 permissions:

@@ -241,9 +241,15 @@ export type Outbound =
   | {
       type: 'config';
       id: number;
-      dir: string;
+      /**
+       * The project this answers for, or null for a global read that named none
+       * (#385). With no project, `effective`, `raw` and `path` are null too:
+       * there is no file to have read, and `{}` would claim one that says
+       * nothing, which is a different fact. Every global field is still sent.
+       */
+      dir: string | null;
       effective: unknown;
-      raw: Record<string, unknown>;
+      raw: Record<string, unknown> | null;
       path: string | null;
       /**
        * The settings for every project, as written, and where they live (#223).
@@ -663,12 +669,20 @@ export type Inbound =
   | {
       type: 'config';
       id: number;
-      dir: string;
+      /**
+       * The project, or null for the settings for all projects with no project
+       * in front of them (#385). Null only beside `scope: 'global'`: the decoder
+       * refuses an absent or empty `dir` on anything else, because a project
+       * read or write with no directory has no file to read or write.
+       */
+      dir: string | null;
       patch?: Record<string, unknown>;
       /**
        * Which file a patch is written to (#223). Absent is the project, which is
-       * what every window before the global layer sent. Meaningless on a read,
-       * which always answers with both.
+       * what every window before the global layer sent. On a read it changes
+       * nothing about the answer, which carries both whenever there is a
+       * project - but `global` is what lets a read name no project at all
+       * (#385), which is the state of an install that has never added one.
        */
       scope?: 'project' | 'global';
       /**
@@ -1153,30 +1167,41 @@ export function decode(line: string): Decoded {
       };
     }
     case 'config': {
-      const dir = parsed['dir'];
-      if (typeof dir !== 'string' || dir === '') {
+      // Refused rather than defaulted when present and unknown: a misspelt scope
+      // that fell back to the project would write the wrong file and say it had
+      // worked. Checked on a read too now that a read can name one (#385).
+      const named = parsed['scope'];
+      if (named !== undefined && named !== 'project' && named !== 'global') {
+        return { ok: false, id, reason: 'config carried a scope that was not "project" or "global"' };
+      }
+      const scope: 'project' | 'global' | undefined = named;
+      const given = parsed['dir'];
+      // **No project is a state, and only the global scope can be in it**
+      // (#385). An install that has never added a repository opened Settings for
+      // all projects, sent `dir: ''`, and was refused here - so the one screen a
+      // new install reaches for first, to store a key or pair a phone, drew this
+      // sentence and nothing settable. The global view never needed a project.
+      // A project read or write still does, and is still refused: it has no
+      // file to read or write. A `dir` of the wrong type is refused either way,
+      // since it is a malformed frame rather than an absent project.
+      const absent = given === undefined || given === '';
+      if (absent ? scope !== 'global' : typeof given !== 'string') {
         return { ok: false, id, reason: 'config carried no dir' };
       }
+      const dir = typeof given === 'string' && given !== '' ? given : null;
+      const scoped = scope === undefined ? {} : { scope };
       const patch = parsed['patch'];
       // Absent is a read. Present-but-not-an-object is refused rather than
       // treated as one: a `patch: null` that read as "no patch" would answer a
       // save with the unchanged config and look like it had worked.
-      if (patch === undefined) return { ok: true, message: { type: 'config', id, dir } };
+      if (patch === undefined) return { ok: true, message: { type: 'config', id, dir, ...scoped } };
       if (!isRecord(patch)) {
         return { ok: false, id, reason: 'config carried a patch that was not an object' };
       }
-      // Refused rather than defaulted when present and unknown: a misspelt scope
-      // that fell back to the project would write the wrong file and say it had
-      // worked.
-      const scope = parsed['scope'];
       // Only on a write: a read changes nothing, so it has nobody to attribute.
       const origin = readOrigin(parsed);
       const labelled = origin === null ? {} : { origin };
-      if (scope === undefined) return { ok: true, message: { type: 'config', id, dir, patch, ...labelled } };
-      if (scope !== 'project' && scope !== 'global') {
-        return { ok: false, id, reason: 'config carried a scope that was not "project" or "global"' };
-      }
-      return { ok: true, message: { type: 'config', id, dir, patch, scope, ...labelled } };
+      return { ok: true, message: { type: 'config', id, dir, patch, ...scoped, ...labelled } };
     }
     case 'cancel': {
       // Optional, and refused rather than coerced when present but unusable.

@@ -7,6 +7,31 @@ for a change that breaks an existing config or an existing run.
 Each entry links the pull request that made it and, where there is one, the issue it
 closes.
 
+## 1.7.1 - 2026-10-20
+
+Seven pull requests since 1.7.0, all fixes. **Nothing here breaks an existing config:** no key was added, renamed or removed, and `PROTOCOL_VERSION` is still 2.
+
+### Fixed
+
+- **The app shows its own version.** The status bar, the diagnostics and the log read the Rust crate's `0.1.0`. They now read the version from `package.json`, the same place the installers and the updater take it from.
+  (#336, [#380](https://github.com/adam-hanna/vibe-code/pull/380))
+- **Settings for all projects opens on an install with no project.** The window asked the host for the configuration of an empty directory, and the host refused it, so a fresh install could not store a key or switch on remote access. A global read no longer needs a project, the project view says *add a project first*, and the parts of the screen that never read `vibe.config.json` draw without it.
+  (#385, [#386](https://github.com/adam-hanna/vibe-code/pull/386))
+- **Scrolling up while a reply streams stays where you put it.** The pilot chat and the run output decided from the scroll position alone whether to follow the end, and a streaming chunk could land between a scroll and its event and pull the view back. They now stop following on the intent to scroll up (a wheel, a key, a finger or the scrollbar), start again only when you scroll back to the end, and show a button that jumps there.
+  (#366, [#384](https://github.com/adam-hanna/vibe-code/pull/384))
+- **A local Linux build makes its AppImage again.** linuxdeploy's bundled `strip` cannot read the `.relr.dyn` sections newer distributions ship, so `npm run app:build` failed on Fedora 44. A local build now bundles unstripped; CI still strips.
+  (#324, [#383](https://github.com/adam-hanna/vibe-code/pull/383))
+
+### Internal
+
+- **The phone launch checks run on every `v*` tag**, so an rc is checked on an emulator and a simulator before anybody installs it, not only on the release PR.
+  (#378, [#382](https://github.com/adam-hanna/vibe-code/pull/382))
+- **The back-merge from `main` into `develop` is a merge commit**, and the release checklist says why: a squashed back-merge made the next release PR conflict in 47 files.
+  (#379, [#381](https://github.com/adam-hanna/vibe-code/pull/381))
+- **`AGENTS.md` is a core under 32 KiB**, with the design notes moved word for word into `docs/agents/`. Claude Code warned that the file was too large to load, and Codex reads only the first 32 KiB.
+  ([#387](https://github.com/adam-hanna/vibe-code/pull/387))
+- **Tested with codex `0.163.0`** (was `0.157.1`) and claude `2.1.303`, with a recorded fixture for each.
+
 ## 1.7.0 - 2026-10-19
 
 Seventeen pull requests since 1.6.1. **Nothing here breaks an existing config:** no key was renamed or removed, no flag was removed, and no key was added to `vibe.config.json`. What a running setup can notice is listed under Upgrading.

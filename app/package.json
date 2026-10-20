@@ -16,7 +16,7 @@
     "stage:sidecar": "node scripts/stage-sidecar.mjs",
     "tauri": "tauri",
     "app:dev": "tauri dev",
-    "app:build": "tauri build",
+    "app:build": "node scripts/app-build.mjs",
     "app:exe": "tauri build --no-bundle",
     "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml -p vibe-desktop -p vibe-remote",
     "test:web": "vitest run",

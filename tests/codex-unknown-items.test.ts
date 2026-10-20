@@ -90,8 +90,8 @@ test('through the heartbeat, the warning fires once per run per type, naming bot
   assert.equal(warned.length, 1);
   assert.equal(warned[0]?.level, 'warn');
   assert.match(warned[0]?.message ?? '', /"mystery_item"/);
-  assert.match(warned[0]?.message ?? '', /codex 0\.160\.0 installed, tested with 0\.157\.1/);
-  assert.deepEqual(warned[0]?.data, { type: 'mystery_item', installed: '0.160.0', tested: '0.157.1' });
+  assert.match(warned[0]?.message ?? '', /codex 0\.160\.0 installed, tested with 0\.163\.0/);
+  assert.deepEqual(warned[0]?.data, { type: 'mystery_item', installed: '0.160.0', tested: '0.163.0' });
 
   // A new run warns again.
   resetUnrecognisedCodexItems(null);
