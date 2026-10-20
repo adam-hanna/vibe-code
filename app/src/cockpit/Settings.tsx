@@ -23,6 +23,16 @@ import { memory, useMemoryRevision } from '../memory';
 import { CLI_DEFAULT, loadCliModels, optionsFor, useModels, whyNot } from './models';
 import { backToCommand, convert, gatesPatch, pastedEscapes, readGates, ready, toRow } from './gateform';
 import type { Gate, GateRow } from './gateform';
+import {
+  blankRow as blankSeatRow,
+  quorumPatch,
+  readSeats,
+  ready as seatReady,
+  seatsPatch,
+  toRow as toSeatRow,
+  UNCONFIRMED_P0_CHOICES,
+} from './seatform';
+import type { Seat, SeatKind, SeatRow } from './seatform';
 import type { Listing } from './models';
 import { RemoteAccess } from '../remote/RemoteAccess';
 import { SURFACE } from '../surface';
@@ -750,6 +760,220 @@ function ModelField({
 }
 
 /**
+ * One list of review seats - the finders or the verifiers (#388).
+ *
+ * `GateList`'s shape: `seatform.ts` holds the decisions and this draws them;
+ * the whole list goes out on every save; a row is saved on leaving it, and a
+ * select saves at once because choosing is the whole of that edit. A new row is
+ * not sent until it names an agent.
+ */
+function SeatList({
+  kind,
+  seats,
+  efforts,
+  providers,
+  models,
+  inherited,
+  busy,
+  onSave,
+}: {
+  kind: SeatKind;
+  seats: Seat[];
+  efforts: readonly string[];
+  providers: readonly string[];
+  models: Readonly<Record<string, Listing>>;
+  /** What a blank model means for an agent: its own `model` setting, as configured. */
+  inherited: (provider: string) => string | undefined;
+  busy: boolean;
+  onSave: (patch: Record<string, unknown>) => void;
+}) {
+  const refusals = useContext(Refusals);
+  const savedJson = JSON.stringify(seats);
+  const [rows, setRowsState] = useState<SeatRow[]>(() => seats.map(toSeatRow));
+  // The rows as last set, for the row's blur: the model field inside a row saves
+  // on its own blur first, and the row's handler would otherwise commit the list
+  // from before that edit and put the old model back.
+  const latest = useRef(rows);
+  const setRows = (next: SeatRow[]): void => {
+    latest.current = next;
+    setRowsState(next);
+  };
+  // Re-seeded from what is in force whenever that changes or a save is refused,
+  // keeping only the rows nobody has saved yet - `GateList`'s rule.
+  useEffect(() => {
+    setRows([...seats.map(toSeatRow), ...latest.current.filter((r) => !seatReady(r))]);
+    // `savedJson` stands in for `seats`, whose identity changes every render.
+  }, [savedJson, refusals]);
+
+  const noun = kind === 'finders' ? 'finder' : 'verifier';
+  const commit = (next: readonly SeatRow[]): void => {
+    const patch = seatsPatch(kind, next);
+    const sent = (patch['review'] as Record<string, unknown>)[kind];
+    // Leaving a row without changing it is not an edit.
+    if (JSON.stringify(sent) === JSON.stringify(seats)) return;
+    onSave(patch);
+  };
+  const edit = (key: string, change: Partial<SeatRow>): SeatRow[] => {
+    const next = latest.current.map((r) => (r.key === key ? { ...r, ...change } : r));
+    setRows(next);
+    return next;
+  };
+  const remove = (key: string): void => {
+    const gone = latest.current.find((r) => r.key === key);
+    const next = latest.current.filter((r) => r.key !== key);
+    setRows(next);
+    if (gone !== undefined && gone.saved !== null) commit(next);
+  };
+
+  return (
+    <div className={S.block}>
+      {rows.length > 0 && (
+        <table className={S.matrix}>
+          <thead>
+            <tr>
+              <th>{noun}</th>
+              <th>agent</th>
+              <th>effort</th>
+              <th>model</th>
+              <th>minutes</th>
+              {kind === 'finders' && <th>focus</th>}
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row, i) => (
+              <tr
+                key={row.key}
+                // Leaving the row is the save, wherever in it focus was.
+                onBlur={(e) => {
+                  if (e.currentTarget.contains(e.relatedTarget as Node | null)) return;
+                  commit(latest.current);
+                }}
+              >
+                <td>
+                  <code>{`${noun} ${String(i + 1)}`}</code>
+                </td>
+                <td>
+                  <select
+                    aria-label={`${noun} ${String(i + 1)} agent`}
+                    value={row.provider}
+                    disabled={busy}
+                    // A model named for one agent is not the other's, so it goes
+                    // with the agent - the role table's rule.
+                    onChange={(e) => commit(edit(row.key, { provider: e.target.value, model: '' }))}
+                  >
+                    <option value="">— choose an agent —</option>
+                    {providers.map((p) => (
+                      <option key={p} value={p}>
+                        {p}
+                      </option>
+                    ))}
+                  </select>
+                  {!seatReady(row) && <div className={S.hint}>saved once it names an agent</div>}
+                </td>
+                <td data-label="effort">
+                  <select
+                    aria-label={`${noun} ${String(i + 1)} effort`}
+                    value={row.effort}
+                    disabled={busy}
+                    onChange={(e) => commit(edit(row.key, { effort: e.target.value }))}
+                  >
+                    <option value="">— agent default —</option>
+                    {efforts.map((e) => (
+                      <option key={e} value={e}>
+                        {e}
+                      </option>
+                    ))}
+                  </select>
+                </td>
+                <td data-label="model">
+                  <ModelField
+                    id={`${kind}-${row.key}-model`}
+                    value={row.model === '' ? undefined : row.model}
+                    agent={row.provider === '' ? 'agent' : row.provider}
+                    listing={models[row.provider] ?? null}
+                    inherited={inherited(row.provider)}
+                    disabled={busy || row.provider === ''}
+                    onSave={(model) => commit(edit(row.key, { model }))}
+                  />
+                </td>
+                <td data-label="minutes">
+                  <input
+                    aria-label={`${noun} ${String(i + 1)} minutes`}
+                    className={S.num}
+                    value={row.minutes}
+                    placeholder="agent's"
+                    inputMode="numeric"
+                    disabled={busy}
+                    onChange={(e) => edit(row.key, { minutes: e.target.value })}
+                  />
+                </td>
+                {kind === 'finders' && (
+                  <td data-label="focus" className="w-full">
+                    <input
+                      aria-label={`${noun} ${String(i + 1)} focus`}
+                      className={S.text}
+                      value={row.focus}
+                      placeholder="— the shared prompt —"
+                      disabled={busy}
+                      onChange={(e) => edit(row.key, { focus: e.target.value })}
+                    />
+                  </td>
+                )}
+                <td>
+                  <Button variant="quiet" size="sm" disabled={busy} onClick={() => remove(row.key)}>
+                    remove
+                  </Button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      <div className={S.row}>
+        <Button variant="quiet" size="sm" disabled={busy} onClick={() => setRows([...latest.current, blankSeatRow()])}>
+          {`add a ${noun}`}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+/** The quorum: blank is a majority (`null`), which the number fields cannot say. */
+function QuorumField({
+  value,
+  disabled,
+  onSave,
+}: {
+  value: number | null;
+  disabled: boolean;
+  onSave: (patch: Record<string, unknown>) => void;
+}) {
+  const inForce = value === null ? '' : String(value);
+  const { typed, setTyped, focus, left } = useTyped(inForce);
+  return (
+    <input
+      id="review-quorum"
+      className={S.num}
+      value={typed}
+      placeholder="majority"
+      inputMode="numeric"
+      disabled={disabled}
+      {...focus}
+      onChange={(e) => setTyped(e.target.value)}
+      onBlur={() => {
+        left();
+        if (typed.trim() !== inForce) onSave(quorumPatch(typed));
+      }}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') e.currentTarget.blur();
+        if (e.key === 'Escape') setTyped(inForce);
+      }}
+    />
+  );
+}
+
+/**
  * One block: what it renders as, and the three ways to change it.
  *
  * **Saving and adopting are separate buttons, and that is the design.** A draft
@@ -1407,6 +1631,7 @@ export function Settings({
     claude?: { model?: string };
     codex?: { model?: string };
     instructions?: { text?: string };
+    review?: { finders?: unknown; verifiers?: unknown; quorum?: unknown; unconfirmedP0?: unknown };
   };
   const gates = effective.gates ?? {};
   const loop = effective.loop ?? {};
@@ -1415,6 +1640,10 @@ export function Settings({
   const git = effective.git ?? {};
   const verify = effective.verify ?? {};
   const roles = effective.roles ?? {};
+  const review = effective.review ?? {};
+  // What a seat's blank model means: its agent's own setting, as the role rows read it.
+  const inheritedModel = (provider: string): string | undefined =>
+    provider === 'claude' || provider === 'codex' ? effective[provider]?.model : undefined;
   // Not on `Config` - no run reads it - so it is read off the global file (#246).
   const cap = capOf(frame.globalRaw);
   // Which rows the FILE claims, as opposed to which are in force, is `source`
@@ -2517,6 +2746,74 @@ export function Settings({
             })}
           </tbody>
         </table>
+      </section>
+
+      {/* ---- more review seats, and a vote (#388) ------------------------ */}
+      <section className={S.block}>
+        <h3 className={S.h}>who else reviews, and who votes</h3>
+        {/* Part A: saved and validated, read by no run. Said first, so nobody
+            configures a vote and believes a run is holding findings to it. */}
+        <p className={S.note}>
+          This version saves these lists and checks them, but no run uses them yet: a run reviews
+          with the reviewer above alone. Finders are reviewers in addition to that one, each looking
+          at the change without seeing the others&apos; findings. Verifiers will vote on each
+          blocking finding before it can block.
+        </p>
+        <h4 className={S.h4}>finders</h4>
+        <SeatList
+          kind="finders"
+          seats={readSeats(review.finders)}
+          efforts={frame.efforts}
+          providers={frame.providers}
+          models={models}
+          inherited={inheritedModel}
+          busy={busy}
+          onSave={save}
+        />
+        <h4 className={S.h4}>verifiers</h4>
+        <SeatList
+          kind="verifiers"
+          seats={readSeats(review.verifiers)}
+          efforts={frame.efforts}
+          providers={frame.providers}
+          models={models}
+          inherited={inheritedModel}
+          busy={busy}
+          onSave={save}
+        />
+        <div className={S.row}>
+          <label className={S.label} htmlFor="review-quorum">
+            quorum {source('review', 'quorum')}
+          </label>
+          <QuorumField
+            value={typeof review.quorum === 'number' ? review.quorum : null}
+            disabled={busy}
+            onSave={save}
+          />
+          <span className={S.hint}>
+            how many verifiers must say a finding is real. Blank means a majority of the verifiers —
+            more than half of them.
+          </span>
+        </div>
+        <div className={S.block}>
+          <span className={S.label}>
+            a P0 the vote does not confirm {source('review', 'unconfirmedP0')}
+          </span>
+          {UNCONFIRMED_P0_CHOICES.map((choice) => (
+            <label key={choice.value} className={cn(S.radio, 'max-w-none')}>
+              <input
+                type="radio"
+                name="review-unconfirmed-p0"
+                checked={review.unconfirmedP0 === choice.value}
+                disabled={busy}
+                onChange={() => save({ review: { unconfirmedP0: choice.value } })}
+              />
+              <span>
+                <code>{choice.value}</code> — {choice.meaning}
+              </span>
+            </label>
+          ))}
+        </div>
       </section>
 
       {/* ---- what every turn is told ------------------------------------- */}

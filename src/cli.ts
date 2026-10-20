@@ -47,9 +47,12 @@ import {
   DEFAULT_ROLE_PROVIDERS,
   effortFor,
   modelFor,
+  FINDER_KEYS,
   ROLE_NAMES,
+  roleSetting,
   rolesFor,
   roleWarnings,
+  seatResolved,
   turnTimeoutMs,
 } from '@src/roles.js';
 import type { RolePatches } from '@src/roles.js';
@@ -1541,6 +1544,52 @@ function reportResolvedRoles(cfg: Config): void {
 }
 
 /**
+ * The review seats `review` names (#388), under the role table - and nothing at
+ * all when it names none, so doctor under the defaults prints what it always
+ * has.
+ *
+ * Marked *not used yet* on its first line, because that is the whole truth of
+ * this release: the lists are accepted and validated, and no run reads them.
+ * A seat's figures come through `seatResolved`, the rule a turn would be
+ * spawned with, so the line already says what Part B will run.
+ *
+ * The majority is printed as the definition it is - more than half - and not
+ * as a recommendation.
+ */
+function reportReviewSeats(cfg: Config): void {
+  const { finders, verifiers, quorum, unconfirmedP0 } = cfg.review;
+  if (finders.length === 0 && verifiers.length === 0) return;
+  log.info('  review seats (not used yet: accepted and validated, no run reads them in this version):');
+  const rows: [string, string][] = [];
+  const seat = (where: string, entry: unknown, keys?: readonly string[]): string => {
+    // Validated already; read through the same reader so a string entry is a seat.
+    const setting = roleSetting(where, entry, keys === undefined ? {} : { keys });
+    const r = seatResolved(setting, cfg);
+    const focus =
+      typeof entry === 'object' && entry !== null && typeof (entry as Record<string, unknown>)['focus'] === 'string'
+        ? `  focus: ${JSON.stringify((entry as Record<string, unknown>)['focus'])}`
+        : '';
+    return `${setting.provider.padEnd(6)}  ${r.model} / ${r.effort} / ${r.timeoutMs}ms${focus}`;
+  };
+  finders.forEach((entry, i) => {
+    rows.push([`finder ${i + 1}`, seat(`review.finders[${i}]`, entry, FINDER_KEYS)]);
+  });
+  verifiers.forEach((entry, i) => {
+    rows.push([`verifier ${i + 1}`, seat(`review.verifiers[${i}]`, entry)]);
+  });
+  if (verifiers.length > 0) {
+    const n = verifiers.length;
+    rows.push([
+      'quorum',
+      quorum === null ? `${Math.floor(n / 2) + 1} of ${n} (a majority)` : `${quorum} of ${n}`,
+    ]);
+  }
+  rows.push(['unconfirmed P0', unconfirmedP0]);
+  const width = Math.max(...rows.map(([label]) => label.length));
+  for (const [label, text] of rows) log.info(`    ${label.padEnd(width)}  ${text}`);
+}
+
+/**
  * What this process found waiting for it, and what it did about it (#77).
  *
  * In memory and never persisted. A stored "this total is incomplete" flag would
@@ -2878,6 +2927,7 @@ async function cmdDoctor(args: readonly string[]): Promise<ExitCode> {
     if (globalAt !== null && existsSync(globalAt)) log.info(`  also your settings for all projects: ${globalAt}`);
     log.info(`  claude ${shownModel(cfg.claude.model, 'claude')}/${cfg.claude.effort} - codex ${shownModel(cfg.codex.model, 'codex')}/${cfg.codex.effort}`);
     reportResolvedRoles(cfg);
+    reportReviewSeats(cfg);
     // Which MCP servers each role reaches and how each provider enforces it
     // (#138), in the words `src/mcp.ts` keeps for every surface that says it.
     log.info('  mcp:');

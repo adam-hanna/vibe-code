@@ -277,6 +277,8 @@ const SLOT_NAMES = {
   judge: 'judge',
   review: 'review',
   write: 'write',
+  'fresh-claude': 'fresh-claude',
+  'fresh-codex': 'fresh-codex',
 } satisfies Record<SlotName, SlotName>;
 
 const FILE_CHANGE_STATUSES = {

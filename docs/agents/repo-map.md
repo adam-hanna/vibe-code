@@ -35,7 +35,8 @@ src/codex.ts         Codex adapter (codex exec --json)
 src/appserver.ts     Codex app-server JSON-RPC client (rate limits only)
 src/ratelimits.ts    rate-limit windows and the brake
 src/charge.ts        the one seam every token and dollar is charged through
-src/slots.ts         session-slot lifecycle (main = Claude, judge + review = Codex, write = one-shot Codex)
+src/slots.ts         session-slot lifecycle (main = Claude, judge + review = Codex, write = one-shot Codex,
+                     fresh-claude + fresh-codex = one-shot read-only review seats, unused until #388 Part B)
 src/context.ts       context measurement, compaction, session rotation
 src/preflight.ts     toolchain contract enforcement, `vibe doctor`
 src/cliversions.ts   the installed claude/codex against the tested versions, and the flags vibe passes
@@ -77,6 +78,7 @@ app/src/cockpit/appearance.ts  how big the product is drawn, and nothing else ab
 app/src/cockpit/drafts.ts      saved prompt versions - the window's library, not the project's
 src/answers.ts          filling in NEEDS-INPUT.md from somewhere that is not a text editor
 app/src/cockpit/Settings.tsx   every setting, and which of the three places each one goes
+app/src/cockpit/seatform.ts    the review seats as a form: the finder and verifier lists, the quorum (#388)
 app/src/cockpit/outgroups.ts the output cut into rounds, and a finished run's transcript
 app/src/pilot/saved.ts       a conversation kept between launches, and which run it is about
 src/replay.ts           a finished run, said again - and what an archive cannot say
