@@ -26,11 +26,11 @@ function helpText(flags: readonly string[], commands: readonly string[] = []): s
 
 type Answer = { code: number; stdout: string } | 'throw';
 
-/** Every help as the installed 2.1.303 / 0.157.1 have it, with overrides. */
+/** Every help as the installed 2.1.303 / 0.163.0 have it, with overrides. */
 function fakeExec(overrides: Record<string, Answer> = {}, calls: string[] = []): RunFn {
   const answers: Record<string, Answer> = {
     'claude-bin --version': { code: 0, stdout: '2.1.303 (Claude Code)' },
-    'codex-bin --version': { code: 0, stdout: 'codex-cli 0.157.1' },
+    'codex-bin --version': { code: 0, stdout: 'codex-cli 0.163.0' },
   };
   for (const req of CLI_FLAG_REQUIREMENTS) {
     answers[`${req.cli}-bin ${req.help.join(' ')}`] = {
@@ -69,7 +69,7 @@ test('help declaring every flag vibe passes refuses nothing and warns about noth
   const result = await check();
   assert.deepEqual(result.blocking, []);
   assert.deepEqual(result.warnings, []);
-  assert.deepEqual(result.versions, { claude: '2.1.303', codex: '0.157.1' });
+  assert.deepEqual(result.versions, { claude: '2.1.303', codex: '0.163.0' });
   assert.ok(result.confirmations.includes('claude 2.1.303 (tested 2.1.303)'));
   assert.ok(result.confirmations.some((c) => c.startsWith('codex exec resume --help: all ')));
 });

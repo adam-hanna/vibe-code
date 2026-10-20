@@ -1,0 +1,22 @@
+{
+  "cli": "codex",
+  "version": "0.163.0",
+  "versionOutput": "codex-cli 0.163.0",
+  "recordedAt": "2026-10-20T20:12:46.186Z",
+  "argv": [
+    "exec",
+    "--json",
+    "-c",
+    "model_reasoning_effort=\"low\"",
+    "-s",
+    "read-only",
+    "--skip-git-repo-check",
+    "-C",
+    "<tmp>",
+    "--output-schema",
+    "<tmp>/schema.json",
+    "-o",
+    "<tmp>/last-message.json",
+    "-"
+  ]
+}
