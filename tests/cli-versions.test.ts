@@ -21,7 +21,7 @@ import type { RunFn } from '@src/proc.js';
  */
 
 test('the tested versions are the measured ones, with no floor beside them', () => {
-  assert.deepEqual(TESTED_CLI_VERSIONS, { claude: '2.1.303', codex: '0.157.1' });
+  assert.deepEqual(TESTED_CLI_VERSIONS, { claude: '2.1.303', codex: '0.163.0' });
 });
 
 test('a version is read out of what each CLI actually prints', () => {

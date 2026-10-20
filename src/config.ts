@@ -45,8 +45,8 @@ const SANDBOXES: readonly Sandbox[] = ['read-only', 'workspace-write', 'danger-f
  * The agent CLI versions this build was tested against (#298).
  *
  * The versions installed when this constant was written, measured with
- * `claude --version` (printed `2.1.294 (Claude Code)`) and `codex --version`
- * (printed `codex-cli 0.157.1`). Bumped as a release step, with the fixtures
+ * `claude --version` (printed `2.1.303 (Claude Code)`) and `codex --version`
+ * (printed `codex-cli 0.163.0`). Bumped as a release step, with the fixtures
  * under `tests/fixtures/cli/` re-recorded beside it.
  *
  * **Tested, deliberately not a floor and not a ceiling.** Being older than
@@ -57,7 +57,7 @@ const SANDBOXES: readonly Sandbox[] = ['read-only', 'workspace-write', 'danger-f
  */
 export const TESTED_CLI_VERSIONS: Readonly<Record<AgentProvider, string>> = {
   claude: '2.1.303',
-  codex: '0.157.1',
+  codex: '0.163.0',
 };
 
 export const DEFAULTS: Config = {
