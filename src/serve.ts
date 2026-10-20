@@ -236,7 +236,8 @@ export interface SessionDeps {
    * an `error` carrying the validator's own sentence.
    */
   writeConfig?: (
-    dir: string,
+    /** Null for a global write with no project in front of it (#385). */
+    dir: string | null,
     patch: Record<string, unknown>,
     scope: 'project' | 'global',
   ) => { path: string };
@@ -819,7 +820,8 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
           : {
               type: 'changed',
               what: 'config',
-              key: msg.scope === 'global' ? 'global' : msg.dir,
+              // A null `dir` is only ever global, which the decoder enforces.
+              key: msg.scope === 'global' || msg.dir === null ? 'global' : msg.dir,
               id: msg.id,
               ...(msg.origin === undefined ? {} : { origin: msg.origin }),
             };
@@ -830,16 +832,27 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
         wrote = msg.patch !== undefined;
         // The config that RESULTED, whether this was a read or a write, so a
         // form never has to assume its own save took effect.
-        const loaded = readConfig(msg.dir);
+        // With no project (#385) there is no project file to have read, so its
+        // three fields are null rather than a load of some directory nobody
+        // named; the decoder lets a null `dir` through only in the global scope.
+        const project =
+          msg.dir === null
+            ? { dir: null, effective: null, raw: null, path: null }
+            : (() => {
+                const loaded = readConfig(msg.dir);
+                return {
+                  dir: msg.dir,
+                  effective: loaded,
+                  raw: readRawConfig(msg.dir),
+                  // The project's path even after a global write: `path` has always
+                  // meant the project's file, and the global one has its own field.
+                  path: msg.scope === 'global' ? loaded.configPath : (path ?? loaded.configPath),
+                };
+              })();
         send({
           type: 'config',
           id: msg.id,
-          dir: msg.dir,
-          effective: loaded,
-          raw: readRawConfig(msg.dir),
-          // The project's path even after a global write: `path` has always
-          // meant the project's file, and the global one has its own field.
-          path: msg.scope === 'global' ? loaded.configPath : (path ?? loaded.configPath),
+          ...project,
           globalRaw: readGlobalConfig(),
           globalPath: globalConfigPath(),
           globalEffective: mergeConfig(DEFAULTS, readGlobalConfig()),
