@@ -1,4 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useMemo, useState } from 'react';
+import { useFollow } from '../follow';
+import { JumpToEnd } from '../JumpToEnd';
 import { LivenessDot } from '../design';
 import { Badge } from '@/ui/badge';
 import { Button } from '@/ui/button';
@@ -221,8 +223,9 @@ export function OutputPane({
    */
   transcript?: { dir: string; runId: string } | null;
 }) {
-  const end = useRef<HTMLDivElement>(null);
-  const pinned = useRef(true);
+  // Follows the end while the reader leaves it there (`follow.ts`, shared with
+  // the pilot's log since #366, which found the same 24px defect here).
+  const follow = useFollow<HTMLDivElement>();
   /** Groups the reader has shut. Open is the default, so a new one is visible. */
   const [closed, setClosed] = useState<ReadonlySet<number>>(() => new Set());
 
@@ -239,12 +242,6 @@ export function OutputPane({
     [past, lines, read],
   );
   const shown = useMemo(() => groups(source), [source]);
-
-  useEffect(() => {
-    // Only when the reader is already at the bottom. Yanking the view down while
-    // somebody is reading back through a run is the reason log panes get muted.
-    if (pinned.current) end.current?.scrollIntoView({ block: 'end' });
-  }, [source.length]);
 
   // Who is running, from the last line that carried a role. Told rather than
   // inferred, and absent rather than guessed between turns.
@@ -280,10 +277,8 @@ export function OutputPane({
 
       <div
         className="flex min-h-0 flex-1 flex-col overflow-y-auto bg-page px-6 py-3"
-        onScroll={(e) => {
-          const el = e.currentTarget;
-          pinned.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
-        }}
+        ref={follow.ref}
+        onScroll={follow.onScroll}
       >
         {shown.map((group) => (
           <Group
@@ -311,7 +306,7 @@ export function OutputPane({
                   : 'this run’s transcript is empty'}
           </div>
         )}
-        <div ref={end} />
+        <JumpToEnd shown={!follow.following} onJump={follow.jump} />
       </div>
 
       {/* Named rather than left implied, the way the launching row names its
