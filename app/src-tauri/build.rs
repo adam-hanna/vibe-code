@@ -4,6 +4,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// The file `npm run stage:sidecar` writes, read here. Gitignored.
 const STAMP: &str = ".build-stamp";
 
+/// The app's version lives here, and only here (#336). `tauri.conf.json` says
+/// `"version": "../../package.json"`, so the bundles, the installers and the
+/// updater all read it; `Cargo.toml`'s `0.1.0` is the crate's and was never
+/// bumped, and the status bar and the log used to print it.
+const PACKAGE_JSON: &str = "../../package.json";
+
 /// Stamp the build with what it is, then hand over to Tauri (#201).
 ///
 /// **Two builds of one version are otherwise identical**, and single-instance
@@ -37,6 +43,10 @@ const STAMP: &str = ".build-stamp";
 /// a build that cannot say which one it is must say *that*.
 fn main() {
     println!("cargo:rerun-if-changed={STAMP}");
+    println!("cargo:rerun-if-changed={PACKAGE_JSON}");
+    // A panic rather than an empty string: Tauri reads the same file for the
+    // bundle's version, so a build that cannot read it is not a build at all.
+    println!("cargo:rustc-env=VIBE_APP_VERSION={}", app_version().expect("package.json names the app's version"));
 
     let written = std::fs::read_to_string(STAMP).ok();
     let mut lines = written.iter().flat_map(|text| text.lines());
@@ -60,6 +70,13 @@ fn main() {
     println!("cargo:rustc-env=VIBE_BUILD_AT={at}");
 
     tauri_build::build()
+}
+
+/// `version` out of `package.json`, or `None` if it cannot be read.
+fn app_version() -> Option<String> {
+    let text = std::fs::read_to_string(PACKAGE_JSON).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&text).ok()?;
+    json.get("version")?.as_str().filter(|v| !v.trim().is_empty()).map(str::to_string)
 }
 
 fn now_millis() -> Option<u128> {
