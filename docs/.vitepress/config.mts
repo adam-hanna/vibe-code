@@ -10,7 +10,7 @@ export default defineConfig({
   description:
     'Runs the plan, critique, implement and review loop between Claude Code and Codex, so you do not have to.',
   // An internal design note lives under docs/plans/ and is not part of the site.
-  srcExclude: ['plans/**'],
+  srcExclude: ['plans/**', 'agents/**'],
   themeConfig: {
     nav: [
       { text: 'Guide', link: '/getting-started' },
