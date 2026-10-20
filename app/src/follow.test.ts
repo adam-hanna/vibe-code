@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { AT_BOTTOM_PX, START, atBottom, keyUp, nextFollow, onScrollbar, touchUp, wheelUp } from './follow';
+import { AT_BOTTOM_PX, START, atBottom, keyUp, nextFollow, onScrollbar, stuck, touchUp, wheelUp } from './follow';
 import type { FollowState } from './follow';
 
 /**
@@ -122,6 +122,42 @@ describe('when the view follows the end', () => {
   test('the jump button arms it', () => {
     const s: FollowState = { following: false, top: 100, height: 1000 };
     expect(nextFollow(s, { kind: 'jump' }).following).toBe(true);
+  });
+
+  test('an upward intent survives a scroll event still pending from the hook\'s own stick', () => {
+    // The review finding on #384: a chunk grew the content and the observer
+    // moved scrollTop 826 -> 856, but that move's scroll event had not run
+    // when the reader's wheel disarmed and moved the view back to 853. With
+    // the last scroll event's 826 as the baseline, 853 read as a move DOWN
+    // near the end and re-armed, and the next chunk pulled the reader back.
+    let s = following(826, 1226);
+    s = stuck(s, at(856, 1256));
+    s = nextFollow(s, { kind: 'up' });
+    s = nextFollow(s, scroll(853, 1256));
+    expect(s.following).toBe(false);
+    // And a later chunk arriving below keeps it off.
+    expect(nextFollow(s, scroll(853, 1300)).following).toBe(false);
+  });
+
+  test("the stick's own late scroll event does not undo an upward intent", () => {
+    // The other order: the wheel disarms before the reader's move has begun,
+    // and the stick's pending event arrives first, still at 856 - at the end,
+    // and not moved. Staying put re-arms only a view that was already armed;
+    // a disarmed one needs a real move down to the end.
+    let s = stuck(following(826, 1226), at(856, 1256));
+    s = nextFollow(s, { kind: 'up' });
+    s = nextFollow(s, scroll(856, 1256));
+    expect(s.following).toBe(false);
+    s = nextFollow(s, scroll(853, 1256));
+    expect(s.following).toBe(false);
+    // Coming back down to the end is still how it re-arms.
+    expect(nextFollow(s, scroll(856, 1256)).following).toBe(true);
+  });
+
+  test('a stick records where it left the view and changes nothing else', () => {
+    expect(stuck(following(826, 1226), at(856, 1256))).toEqual({ following: true, top: 856, height: 1256 });
+    const off: FollowState = { following: false, top: 100, height: 1000 };
+    expect(stuck(off, at(600, 1000)).following).toBe(false);
   });
 
   test('a fresh pane starts armed', () => {

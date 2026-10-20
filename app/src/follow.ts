@@ -45,8 +45,8 @@ import type { RefObject } from 'react';
  * a wheel or a finger moving the content down, PageUp, ArrowUp, Home or
  * shift-space, or a press on the scrollbar. Backing that, a `scroll` that moved
  * up while the content did not shrink disarms at any distance, with no
- * threshold. It is armed again only by **arriving** at the bottom, moving down
- * or staying put, or by the jump button the panes draw while it is off.
+ * threshold. It is armed again only by **arriving** at the bottom, which means
+ * moving down to it, or by the jump button the panes draw while it is off.
  * `nextFollow` is the decision, pure; the hook is listeners around it.
  *
  * It is shared by the pilot's log and the run output, which had a second copy
@@ -108,9 +108,10 @@ export type FollowInput =
  *   shorter: a scroller clamps `scrollTop` when its content shrinks (a card
  *   folding, a streamed text replaced by its final one), and that is not the
  *   reader.
- * - A `scroll` that ends at the bottom without having moved up arms. That is a
- *   reader arriving there, and it is also the hook's own jump to the end, which
- *   therefore never disarms anything.
+ * - A `scroll` that moved down and ends at the bottom arms. That is a reader
+ *   arriving there, and it is also the hook's own jump to the end, which
+ *   therefore never disarms anything. One that did not move changes nothing,
+ *   so an upward intent outlives the stick's own late event.
  * - Anything else leaves following as it was.
  */
 export function nextFollow(state: FollowState, input: FollowInput): FollowState {
@@ -118,11 +119,32 @@ export function nextFollow(state: FollowState, input: FollowInput): FollowState 
   if (input.kind === 'jump') return { ...state, following: true };
   const { at } = input;
   const movedUp = at.scrollTop < state.top;
+  const movedDown = at.scrollTop > state.top;
   const shrank = at.scrollHeight < state.height;
   let following = state.following;
   if (movedUp && !shrank) following = false;
-  else if (!movedUp && atBottom(at)) following = true;
+  // Staying put keeps an armed view armed; it never re-arms a disarmed one.
+  // The stick's own `scroll` event can land after an upward intent and before
+  // the reader's move, still at the end and not moved, and reading that as
+  // arriving undid the intent (review of #384). Only a move down arrives.
+  else if (movedDown && atBottom(at)) following = true;
   return { following, top: at.scrollTop, height: at.scrollHeight };
+}
+
+/**
+ * Where the hook's own move to the end left the view, recorded at once.
+ *
+ * `nextFollow` compares each `scroll` with the position the last one left, and
+ * a `scroll` event lands a frame after the move it reports. So when `stick`
+ * moved the view (826 -> 856, say) and the reader's wheel disarmed and moved
+ * it back to 853 before that event ran, the baseline was still 826, 853 read
+ * as a move down near the end, and following re-armed: the pull back to the
+ * bottom #366 is about, through a narrower gap (review of #384). Recording the
+ * position the hook itself set makes the baseline the true one. Following is
+ * left alone: a stick only runs while armed and never decides anything.
+ */
+export function stuck(state: FollowState, at: ScrollPosition): FollowState {
+  return { ...state, top: at.scrollTop, height: at.scrollHeight };
 }
 
 /** A wheel that moves the content down, which is scrolling up. */
@@ -189,7 +211,9 @@ export function useFollow<T extends HTMLElement>(enabled = true): Follow<T> {
   const jump = useCallback(() => {
     apply({ kind: 'jump' });
     const el = ref.current;
-    if (el !== null) el.scrollTop = el.scrollHeight;
+    if (el === null) return;
+    el.scrollTop = el.scrollHeight;
+    state.current = stuck(state.current, el);
   }, [apply]);
 
   useEffect(() => {
@@ -211,6 +235,9 @@ export function useFollow<T extends HTMLElement>(enabled = true): Follow<T> {
       // as arriving at the bottom, so following stays armed rather than being
       // switched off by its own effect.
       el.scrollTop = el.scrollHeight;
+      // Before its `scroll` event runs, an upward intent can arrive: compare
+      // that event with where this left the view, not where the last one did.
+      state.current = stuck(state.current, el);
     };
 
     // Intent arrives before the move, which is what beats the next chunk.
