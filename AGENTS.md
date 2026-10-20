@@ -74,7 +74,9 @@ docs site from `main`. `ci.yml` runs on every push and pull request into `main`,
 (`workflow_dispatch`): the core gate (`npm run typecheck && npm test`), the app gate
 (typecheck, vitest, `audit:contrast`) and the Rust tests, all on Ubuntu 22.04 with Node 22.
 `mobile.yml` builds the phone app and launches it on an Android emulator and an iOS simulator,
-on a pull request into `main` that touches it, and by hand. `release.yml` builds the desktop
+on a pull request into `main` that touches it, on every `v*` tag, and by hand (#378: `release.yml`
+builds the phone apps and never launches them, so without it an rc could be green while the
+phone opened on nothing). `release.yml` builds the desktop
 bundles and the phone apps on a `v*` tag into a draft GitHub release (#239, #348). What CI does **not** run: a linter or
 formatter, the tests on macOS or Windows, `npm publish` - and **anything on `develop`**.
 Actions minutes are a budget, so at the owner's decision a merge into `develop` runs nothing:
@@ -2394,7 +2396,8 @@ fails on fifty `_SC*` symbols. `gen/` is generated
 by `tauri <platform> init` on each machine and in CI, because iOS's needs macOS to make.
 `.github/workflows/mobile.yml` launches both mock builds - an Android emulator and an iOS
 simulator - and fails unless the cockpit read the recorded run. It runs on a pull request into
-`main`, or by hand with `gh workflow run mobile.yml --ref <branch>`, never on `develop`.
+`main`, on every `v*` tag, or by hand with `gh workflow run mobile.yml --ref <branch>`, never on
+`develop`.
 
 **The phone pairs, connects and reconnects through `vibe_remote::client`** (#346). It is in the
 shared crate, so the desktop crate's tests run the **real** pairing handler and bridge against
@@ -2620,7 +2623,7 @@ docs/images/         screenshots, shared by README.md and the site
 docs/plans/          internal design notes, excluded from the site
 .github/workflows/pages.yml    builds docs/ from main and deploys it to Pages
 .github/workflows/ci.yml       the core, app and Rust gates on push and PR into main, and by hand
-.github/workflows/mobile.yml   the phone app's tests and its emulator and simulator launches, on PR into main
+.github/workflows/mobile.yml   the phone app's tests and its emulator and simulator launches, on PR into main and v* tags
 .github/workflows/release.yml  the desktop bundles and the phone apps on a v* tag, into one draft release
 .github/actions/linux-deps/    the Linux packages a Tauri build needs, listed once
 ```
@@ -4356,7 +4359,7 @@ and its commits survive it.
    `gh attestation verify Vibe-macos-arm64.dmg --repo adam-hanna/vibe-code` and
    `sha256sum -c SHA256SUMS --ignore-missing`. An attestation is stored against a file's digest,
    not against the release, so it verifies while the release is still a draft.
-9. **Wait for `release.yml` on the tag, install the draft on at least one machine and both
+9. **Wait for `release.yml` and `mobile.yml` on the tag, install the draft on at least one machine and both
    phone apps on a phone, then publish the draft release.** The APK from the draft must install
    *over* the previous release's (same key, higher `versionCode`), and the `.ipa` must sign and
    open through AltStore or Sideloadly; then pair each with the desktop. The workflow builds the Windows, macOS (Apple Silicon) and Linux bundles
