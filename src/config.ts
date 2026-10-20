@@ -1154,16 +1154,25 @@ export function withProjectFile(stored: Config, targetDir: string): Config {
  * repository holding half a config.
  */
 export function writeConfigPatch(
-  targetDir: string,
+  /**
+   * The project, or null for a global write with no project in front of it
+   * (#385) - an install that has never added one. Null is refused for a
+   * project write, which has no file to write.
+   */
+  targetDir: string | null,
   patch: Record<string, unknown>,
   /**
    * Which file (#223). `global` writes the settings for every project and is
    * validated twice: on its own, so it is a legal config wherever it is read,
    * and under this project's file, so a save cannot leave the project in front
-   * of you unloadable.
+   * of you unloadable. With no project there is nothing to validate under, so
+   * the first is the whole check (#385).
    */
   scope: 'project' | 'global' = 'project',
 ): { path: string } {
+  if (scope === 'project' && targetDir === null) {
+    throw new Error("a project's settings need the project's directory, and none was named");
+  }
   const globalPath = globalConfigPath();
   if (scope === 'global' && globalPath === null) {
     throw new Error('global settings are switched off (VIBE_GLOBAL_CONFIG is empty)');
@@ -1177,7 +1186,7 @@ export function writeConfigPatch(
     refuseProjectAuth(patch, 'vibe.config.json');
     refuseProjectRuns(patch, 'vibe.config.json');
   }
-  const raw = scope === 'global' ? readGlobalConfig() : readRawConfig(targetDir);
+  const raw = scope === 'global' || targetDir === null ? readGlobalConfig() : readRawConfig(targetDir);
   const candidate: Record<string, unknown> = { ...raw };
   for (const [key, value] of Object.entries(patch)) {
     const existing = raw[key];
@@ -1196,7 +1205,7 @@ export function writeConfigPatch(
   // The same pipeline `loadConfig` runs, in the same order and for the same
   // reasons - `validateRoles` first, because `resolveRoleScopedAgents` reads the
   // table and a bad role checked afterwards surfaces as a toolchain error.
-  const project = scope === 'global' ? readRawConfig(targetDir) : candidate;
+  const project = scope === 'global' ? (targetDir === null ? null : readRawConfig(targetDir)) : candidate;
   const global = scope === 'global' ? candidate : readGlobalConfig();
   if (scope === 'global') {
     // Not part of `Config`, so `validate` never sees it - checked here instead,
@@ -1209,12 +1218,19 @@ export function writeConfigPatch(
     validateRoles(alone.roles);
     validate(resolveRoleScopedAgents(alone, [candidate]));
   }
-  const merged = mergeConfig(mergeConfig(DEFAULTS, global), project);
-  validateRoles(merged.roles);
-  validate(resolveRoleScopedAgents(merged, [global, project]));
+  // Under the project in front of you, when there is one. With none, the check
+  // above was the whole of it, and running it again under `{}` would say the
+  // same thing twice (#385).
+  if (project !== null) {
+    const merged = mergeConfig(mergeConfig(DEFAULTS, global), project);
+    validateRoles(merged.roles);
+    validate(resolveRoleScopedAgents(merged, [global, project]));
+  }
 
+  // Both nulls were refused at the top; this only tells the compiler so.
   const configPath =
-    scope === 'global' && globalPath !== null ? globalPath : path.join(targetDir, 'vibe.config.json');
+    scope === 'global' ? globalPath : targetDir === null ? null : path.join(targetDir, 'vibe.config.json');
+  if (configPath === null) throw new Error('no file to write the settings to');
   if (scope === 'global') mkdirSync(path.dirname(configPath), { recursive: true });
   const tmp = `${configPath}.tmp`;
   writeFileSync(tmp, `${JSON.stringify(candidate, null, 2)}\n`, 'utf8');

@@ -241,7 +241,9 @@ describe('one form, pointed at one of two files (#223)', () => {
   // like the worktree command."* Any key at either level, project wins.
   test('a save goes to the file the switch names', () => {
     // One writer, told its file; `save` is that writer pointed by the switch.
-    expect(settings).toContain('.config(dir, patch, to)');
+    // Case 2 (#385): the writer reads its directory off the door, which is
+    // null for the global door with no project, rather than off `dir` itself.
+    expect(settings).toContain('.config(door.dir, patch, to)');
     expect(settings).toContain('(patch: Record<string, unknown>) => write(patch, scope), [write, scope]');
   });
 
@@ -256,7 +258,9 @@ describe('one form, pointed at one of two files (#223)', () => {
 
   test('the global view draws the defaults plus the global file, never this project', () => {
     // Computed by the host, so the window does not merge anything itself.
-    expect(settings).toContain("const raw = scope === 'global' ? frame.globalRaw : frame.raw;");
+    // Case 2 (#385): `raw` is null on a read that named no project, which a
+    // project door never sends, so the project half carries a `?? {}`.
+    expect(settings).toContain("const raw = scope === 'global' ? frame.globalRaw : (frame.raw ?? {});");
     expect(settings).toContain("(scope === 'global' ? frame.globalEffective : frame.effective)");
   });
 
@@ -291,7 +295,17 @@ describe('which view each setting lives in (#223)', () => {
     const block = settings.slice(machine, settings.indexOf('how many rounds, and what it will accept'));
     expect(block).toContain('Anthropic and OpenAI');
     expect(block).toContain('what the pilot may do without asking');
-    expect(block).toContain('how this is drawn');
+    // Case 2 (#385): the window's own sections moved into `ThisWindow`, so the
+    // global view can draw them without a config frame; the block places it.
+    expect(block).toContain('<ThisWindow');
+    const thisWindow = settings.slice(settings.indexOf('function ThisWindow('), settings.indexOf('export function Settings('));
+    expect(thisWindow).toContain('how this is drawn');
+  });
+
+  test('with no frame, the project view draws nothing more and the global view draws the window (#385)', () => {
+    const empty = settings.slice(settings.indexOf('if (frame === null) {'), settings.indexOf('// The file being edited'));
+    expect(empty).toContain("if (scope === 'project') return empty;");
+    expect(empty).toContain('<ThisWindow');
   });
 });
 

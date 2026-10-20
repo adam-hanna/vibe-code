@@ -246,9 +246,14 @@ export interface Archive {
 export interface ConfigFrame {
   type: 'config';
   id: number;
-  dir: string;
+  /**
+   * Null when a global read named no project (#385) - an install that has
+   * never added one - and then `effective`, `raw` and `path` are null too:
+   * there was no project file to read. Every global field is still sent.
+   */
+  dir: string | null;
   effective: unknown;
-  raw: Record<string, unknown>;
+  raw: Record<string, unknown> | null;
   path: string | null;
   /**
    * The settings for every project (#223): the file as written, where it lives
@@ -1124,16 +1129,24 @@ export async function stats(dir: string): Promise<ArchiveStats> {
  * validator's own sentence, which names the field. Nothing was written.
  */
 export async function config(
-  dir: string,
+  /**
+   * The project, or null for the settings for all projects with no project in
+   * front of them (#385). Null is always the global scope: the host refuses a
+   * project read or write that names no directory, so this sends `global` with
+   * it rather than letting a caller's default turn it into that refusal.
+   */
+  dir: string | null,
   patch?: Record<string, unknown>,
   /** Which file a patch goes to. A read answers with both, so it takes none. */
   scope: 'project' | 'global' = 'project',
 ): Promise<ConfigFrame> {
-  const refused = patch === undefined || configGuard === null ? null : configGuard(patch, scope, dir);
+  const to = dir === null ? 'global' : scope;
+  const refused = patch === undefined || configGuard === null ? null : configGuard(patch, to, dir ?? '');
   if (refused !== null) throw new Error(refused);
   const id = nextRequestId();
+  const where = dir === null ? { scope: 'global' as const } : { dir };
   return ask<ConfigFrame>(
-    patch === undefined ? { type: 'config', id, dir } : { type: 'config', id, dir, patch, scope },
+    patch === undefined ? { type: 'config', id, ...where } : { type: 'config', id, ...where, patch, scope: to },
     id,
     'config',
     'the host did not answer with the configuration',

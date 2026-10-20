@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { Badge } from '@/ui/badge';
 import { Button } from '@/ui/button';
@@ -14,6 +14,7 @@ import { pickDirectory } from './pick';
 import { projectName } from './projects';
 import { capOf } from './hosts';
 import { showsConfig } from '../changed';
+import { settingsRead } from './settingsdoor';
 import { DRAFTS_KEY, draftsFor, readDrafts, removeDraft, saveDraft } from './drafts';
 import type { Draft } from './drafts';
 import type { KeyStatus } from '../pilot/keys';
@@ -1001,6 +1002,135 @@ function WhereItIs({ dir, onRelocate }: { dir: string; onRelocate: (to: string) 
   );
 }
 
+/**
+ * The parts of the settings for all projects that are never read from
+ * `vibe.config.json` (#385): how this window is drawn, the update check, the
+ * desktop's quit on a phone, and remote access. Each is this window's or Rust's
+ * own, so each is drawn whether or not the host's config frame could be read -
+ * a screen that could not read a file had no reason to hide a switch that never
+ * lived in one. The API keys are not here: their rows draw the route the frame
+ * carries, so they wait for it.
+ */
+function ThisWindow({
+  scale,
+  onScale,
+  theme,
+  onTheme,
+  checkUpdates,
+  onCheckUpdates,
+  remoteProblem,
+  onRemoteProblemSeen,
+}: {
+  scale: number;
+  onScale: (next: number) => void;
+  theme: Theme;
+  onTheme: (next: Theme) => void;
+  checkUpdates: boolean;
+  onCheckUpdates: (on: boolean) => void;
+  remoteProblem: string | null;
+  onRemoteProblemSeen?: (() => void) | undefined;
+}) {
+  return (
+    <>
+      {/* ---- this window ------------------------------------------------- */}
+      {/* On a phone the text size is the phone's own (#347), so it is set
+          under This phone, not among the desktop's settings. */}
+      {!SURFACE.compactChrome && (
+      <section className={S.block}>
+        <h3 className={S.h}>how this is drawn</h3>
+        <p className={S.note}>
+          This window, on this machine. It is not written to <code>vibe.config.json</code> — how
+          big you like your text is not a fact about any run, and that file is meant to be
+          committed.
+        </p>
+        <div className={S.scale}>
+          {STEPS.map((step) => (
+            <label key={step.scale} className={S.radio}>
+              <input
+                type="radio"
+                name="type-scale"
+                checked={scale === step.scale}
+                onChange={() => onScale(step.scale)}
+              />
+              <span style={{ fontSize: `calc(var(--size-body) * ${String(step.scale)})` }}>
+                {step.label}
+              </span>
+            </label>
+          ))}
+        </div>
+        {/* Every size at once, which is what keeps the ramp the spec chose. A
+            control that moved body text alone would leave headings where they
+            were and break the relationships that make a page readable. */}
+        <p className={S.note}>
+          Every size moves together, so the proportions the design chose survive being scaled.
+        </p>
+        <div className={S.scale}>
+          {THEMES.map((t) => (
+            <label key={t.theme} className={S.radio}>
+              <input type="radio" name="theme" checked={theme === t.theme} onChange={() => onTheme(t.theme)} />
+              <span>{t.label}</span>
+            </label>
+          ))}
+        </div>
+        <p className={S.note}>
+          Light or dark, or whichever the system is set to. Both palettes are the ones the contrast
+          gate is measured against; nothing else about the look is configurable.
+        </p>
+      </section>
+      )}
+
+      {/* Whether this app asks for a newer version of itself (#299): the one
+          network request the app makes on its own, so it is said in full
+          beside the switch that turns it off. */}
+      <section className={S.block}>
+        <h3 className={S.h}>check for updates</h3>
+        <label className="flex cursor-pointer items-baseline gap-2 text-body-sm text-secondary">
+          <input
+            type="checkbox"
+            checked={checkUpdates}
+            onChange={(e) => onCheckUpdates(e.target.checked)}
+          />
+          <span>
+            {SURFACE.compactChrome
+              ? 'Check for a new version of the desktop app'
+              : 'Check for a new version of the app'}
+          </span>
+        </label>
+        {/* On a phone this is the desktop's check, asked over the connection -
+            the phone app is updated by its store - and the switch is the
+            desktop's too: it is kept in the desktop's memory, which the phone
+            shares, so it says so rather than claiming to be this device's. */}
+        {SURFACE.compactChrome ? (
+          <p className={S.note}>
+            Whether the desktop app this phone is connected to looks for a newer version of
+            itself: at launch and every six hours it makes one plain HTTPS request for a public
+            file on GitHub that names the latest release, and nothing identifying you or either
+            device is sent. When one exists, an arrow appears beside Settings at the top of the
+            sidebar. This is the desktop&apos;s switch, so turning it off here turns it off there
+            too. The phone app itself is updated by its app store.
+          </p>
+        ) : (
+          <p className={S.note}>
+            At launch and every six hours, the app makes one plain HTTPS request for a public file
+            on GitHub that names the latest release. Nothing identifying you or this machine is
+            sent. When a newer version exists, an arrow appears above Settings at the foot of the
+            left bar. Off means no request at all. Like the text size, this is this window&apos;s
+            setting, on this machine.
+          </p>
+        )}
+      </section>
+
+      {/* The phone has no tray, so this is where the desktop app is quit
+          from there (#345). Never drawn on the desktop, which has Quit. */}
+      {!SURFACE.tray && <QuitDesktop />}
+
+      {/* Remote access (#341, #344): always drawn - the switch, keep awake,
+          and, while it is on, start at login, the relay and pairing. */}
+      <RemoteAccess problem={remoteProblem} onProblemSeen={() => onRemoteProblemSeen?.()} />
+    </>
+  );
+}
+
 export function Settings({
   scope,
   onRelocate,
@@ -1117,19 +1247,26 @@ export function Settings({
   /** Whether the dialog in front of switching YOLO on is open (#223). */
   const [askYolo, setAskYolo] = useState(false);
 
+  // Which read this door sends (#385): with no project, the global door asks
+  // for the global settings alone and the project door asks nothing.
+  const door = useMemo(() => settingsRead(scope, dir), [scope, dir]);
   const load = useCallback(() => {
     if (!host.inShell()) {
       setFailure('the configuration is read by the host, and there is no host in a browser');
       return;
     }
+    if (door.kind === 'none') {
+      setFailure(door.why);
+      return;
+    }
     void host
-      .config(dir)
+      .config(door.dir)
       .then((next) => {
         setFrame(next);
         setFailure(null);
       })
       .catch((err: unknown) => setFailure(err instanceof Error ? err.message : String(err)));
-  }, [dir]);
+  }, [door]);
 
   useEffect(load, [load]);
 
@@ -1156,10 +1293,13 @@ export function Settings({
 
   const write = useCallback(
     (patch: Record<string, unknown>, to: 'project' | 'global') => {
+      // No frame is drawn without a read, so a door with nothing to read has
+      // no control to save from; refused here too rather than sent (#385).
+      if (door.kind === 'none') return;
       setBusy(true);
       setSaved(null);
       void host
-        .config(dir, patch, to)
+        .config(door.dir, patch, to)
         .then((next) => {
           // The config that RESULTED, not the patch that was sent.
           setFrame(next);
@@ -1178,7 +1318,7 @@ export function Settings({
         })
         .finally(() => setBusy(false));
     },
-    [dir, onSaved],
+    [door, onSaved],
   );
   /**
    * The old directory's `vibe.config.json`, offered to a project just moved to
@@ -1195,7 +1335,8 @@ export function Settings({
     void host
       .config(movedFrom)
       .then((old) => {
-        if (live && old.path !== null && Object.keys(old.raw).length > 0) setCarry({ path: old.path, raw: old.raw });
+        const { path: from, raw: was } = old;
+        if (live && from !== null && was !== null && Object.keys(was).length > 0) setCarry({ path: from, raw: was });
       })
       // An old directory whose file cannot be read has nothing to offer.
       .catch(() => undefined);
@@ -1208,20 +1349,42 @@ export function Settings({
   const save = useCallback((patch: Record<string, unknown>) => write(patch, scope), [write, scope]);
 
   if (frame === null) {
-    return (
+    // A door with no project has nothing to try again: the same press would
+    // draw the same sentence, so it is not offered (#385).
+    const noProject = door.kind === 'none';
+    const empty = (
       <div className={EMPTY}>
-        <Badge variant={failure === null ? 'quiet' : 'alarm'}>
-          {failure === null ? 'reading' : 'no configuration'}
+        <Badge variant={failure === null ? 'quiet' : noProject ? 'quiet' : 'alarm'}>
+          {failure === null ? 'reading' : noProject ? 'no project' : 'no configuration'}
         </Badge>
         <p>{failure ?? 'asking the host what this repository is configured to do…'}</p>
-        {failure !== null && (
+        {failure !== null && !noProject && (
           <button className={S.again} onClick={load}>
             try again
           </button>
         )}
-        {scope === 'project' && onRelocate !== undefined && failure !== null && (
+        {scope === 'project' && !noProject && onRelocate !== undefined && failure !== null && (
           <WhereItIs dir={dir} onRelocate={onRelocate} />
         )}
+      </div>
+    );
+    if (scope === 'project') return empty;
+    // The global view still draws what was never in the file (#385), so a
+    // frame that could not be read does not take remote access or the type
+    // scale away with it.
+    return (
+      <div className={cn(PANE, 'w-full max-w-5xl gap-5', SURFACE.compactChrome && 'px-4')}>
+        {empty}
+        <ThisWindow
+          scale={scale}
+          onScale={onScale}
+          theme={theme}
+          onTheme={onTheme}
+          checkUpdates={checkUpdates}
+          onCheckUpdates={onCheckUpdates}
+          remoteProblem={remoteProblem}
+          onRemoteProblemSeen={onRemoteProblemSeen}
+        />
       </div>
     );
   }
@@ -1230,7 +1393,9 @@ export function Settings({
   // that is the defaults plus the global file alone — what a project that says
   // nothing gets — and never this project's values, which would put one
   // repository's choices in front of somebody editing all of them.
-  const raw = scope === 'global' ? frame.globalRaw : frame.raw;
+  // `?? {}` only for the type: a project door always reads with a directory,
+  // and only a read with none answers a null `raw` (#385).
+  const raw = scope === 'global' ? frame.globalRaw : (frame.raw ?? {});
   const effective = (scope === 'global' ? frame.globalEffective : frame.effective) as {
     gates?: Record<string, string>;
     roles?: Record<string, string | { provider?: string; effort?: string; model?: string }>;
@@ -1363,101 +1528,16 @@ export function Settings({
         </p>
       ) : (
         <>
-          {/* ---- this window ------------------------------------------------- */}
-          {/* On a phone the text size is the phone's own (#347), so it is set
-              under This phone, not among the desktop's settings. */}
-          {!SURFACE.compactChrome && (
-          <section className={S.block}>
-            <h3 className={S.h}>how this is drawn</h3>
-            <p className={S.note}>
-              This window, on this machine. It is not written to <code>vibe.config.json</code> — how
-              big you like your text is not a fact about any run, and that file is meant to be
-              committed.
-            </p>
-            <div className={S.scale}>
-              {STEPS.map((step) => (
-                <label key={step.scale} className={S.radio}>
-                  <input
-                    type="radio"
-                    name="type-scale"
-                    checked={scale === step.scale}
-                    onChange={() => onScale(step.scale)}
-                  />
-                  <span style={{ fontSize: `calc(var(--size-body) * ${String(step.scale)})` }}>
-                    {step.label}
-                  </span>
-                </label>
-              ))}
-            </div>
-            {/* Every size at once, which is what keeps the ramp the spec chose. A
-                control that moved body text alone would leave headings where they
-                were and break the relationships that make a page readable. */}
-            <p className={S.note}>
-              Every size moves together, so the proportions the design chose survive being scaled.
-            </p>
-            <div className={S.scale}>
-              {THEMES.map((t) => (
-                <label key={t.theme} className={S.radio}>
-                  <input type="radio" name="theme" checked={theme === t.theme} onChange={() => onTheme(t.theme)} />
-                  <span>{t.label}</span>
-                </label>
-              ))}
-            </div>
-            <p className={S.note}>
-              Light or dark, or whichever the system is set to. Both palettes are the ones the contrast
-              gate is measured against; nothing else about the look is configurable.
-            </p>
-          </section>
-          )}
-
-          {/* Whether this app asks for a newer version of itself (#299): the one
-              network request the app makes on its own, so it is said in full
-              beside the switch that turns it off. */}
-          <section className={S.block}>
-            <h3 className={S.h}>check for updates</h3>
-            <label className="flex cursor-pointer items-baseline gap-2 text-body-sm text-secondary">
-              <input
-                type="checkbox"
-                checked={checkUpdates}
-                onChange={(e) => onCheckUpdates(e.target.checked)}
-              />
-              <span>
-                {SURFACE.compactChrome
-                  ? 'Check for a new version of the desktop app'
-                  : 'Check for a new version of the app'}
-              </span>
-            </label>
-            {/* On a phone this is the desktop's check, asked over the connection -
-                the phone app is updated by its store - and the switch is the
-                desktop's too: it is kept in the desktop's memory, which the phone
-                shares, so it says so rather than claiming to be this device's. */}
-            {SURFACE.compactChrome ? (
-              <p className={S.note}>
-                Whether the desktop app this phone is connected to looks for a newer version of
-                itself: at launch and every six hours it makes one plain HTTPS request for a public
-                file on GitHub that names the latest release, and nothing identifying you or either
-                device is sent. When one exists, an arrow appears beside Settings at the top of the
-                sidebar. This is the desktop&apos;s switch, so turning it off here turns it off there
-                too. The phone app itself is updated by its app store.
-              </p>
-            ) : (
-              <p className={S.note}>
-                At launch and every six hours, the app makes one plain HTTPS request for a public file
-                on GitHub that names the latest release. Nothing identifying you or this machine is
-                sent. When a newer version exists, an arrow appears above Settings at the foot of the
-                left bar. Off means no request at all. Like the text size, this is this window&apos;s
-                setting, on this machine.
-              </p>
-            )}
-          </section>
-
-          {/* The phone has no tray, so this is where the desktop app is quit
-              from there (#345). Never drawn on the desktop, which has Quit. */}
-          {!SURFACE.tray && <QuitDesktop />}
-
-          {/* Remote access (#341, #344): always drawn - the switch, keep awake,
-              and, while it is on, start at login, the relay and pairing. */}
-          <RemoteAccess problem={remoteProblem} onProblemSeen={() => onRemoteProblemSeen?.()} />
+          <ThisWindow
+            scale={scale}
+            onScale={onScale}
+            theme={theme}
+            onTheme={onTheme}
+            checkUpdates={checkUpdates}
+            onCheckUpdates={onCheckUpdates}
+            remoteProblem={remoteProblem}
+            onRemoteProblemSeen={onRemoteProblemSeen}
+          />
 
           {/* ---- how each vendor is reached (#223) ---------------------------- */}
           <section className={S.block}>
