@@ -13,6 +13,7 @@ import {
   CommandShortcut,
 } from '../ui/command';
 import { chordLabel } from './actions';
+import { paletteFilter } from './paletteFilter';
 import type { Action, ActionId } from './actions';
 
 /**
@@ -29,9 +30,12 @@ import type { Action, ActionId } from './actions';
  * sidebar click. Starting a run stays in `1b` and the pilot.
  *
  * The run list is substring-matched on the id and the task and nothing
- * cleverer, through `cmdk`'s own filter with a value that is both - a fuzzy
- * reorder would make the same keystrokes pick a different run on a different
- * day. Runs needing a human sort first (`4e`).
+ * cleverer, by `paletteFilter` handed to `cmdk` with a value that is both - a
+ * fuzzy reorder would make the same keystrokes pick a different run on a
+ * different day. **The filter has to be passed**: `cmdk`'s default is a fuzzy
+ * scorer that is roughly cubic in the value's length, and a value holding a
+ * whole brief froze the window for seconds per keystroke (#397). Runs needing
+ * a human sort first (`4e`).
  */
 function openable(run: ArchiveRun): boolean {
   return run.linked !== true && run.unverified !== true && run.status !== 'unreadable';
@@ -97,7 +101,7 @@ export function Palette({
   const platform = typeof navigator === 'undefined' ? '' : navigator.platform;
 
   return (
-    <CommandDialog open={open} onOpenChange={onOpenChange} title="Command palette">
+    <CommandDialog open={open} onOpenChange={onOpenChange} title="Command palette" filter={paletteFilter}>
       <CommandInput placeholder="Type an action, or a run…" autoFocus />
       <CommandList>
         <CommandEmpty>Nothing matches.</CommandEmpty>
