@@ -14,8 +14,8 @@ process.env['VIBE_CODEX_BIN'] = process.execPath;
 /**
  * `vibe doctor` lists the review seats (#388), and says nothing extra under the
  * defaults - so doctor's output for every config that names no seat is what it
- * was. Finders are used since Part B and are listed as such; verifiers, the
- * quorum and `unconfirmedP0` are still marked *not used yet*.
+ * was. Finders are used since Part B and verifiers since Part C, each under a
+ * header of its own that says what it costs; *not used yet* is gone.
  *
  * The fixture makes each figure distinguishable: one finder names everything,
  * one names nothing and so takes Claude's read timeout, and a verifier names
@@ -59,7 +59,7 @@ function line(lines: readonly string[], label: string): string {
   return found[0] as string;
 }
 
-test('doctor lists finders as used and verifiers under "not used yet"', async () => {
+test('doctor lists finders and verifiers as used, each under its own header', async () => {
   const { code, lines } = await doctor(
     targetDir({
       finders: [
@@ -71,18 +71,20 @@ test('doctor lists finders as used and verifiers under "not used yet"', async ()
     }),
   );
   assert.equal(code, EXIT.OK);
-  // Finders are used since #388 Part B: their rows sit under their own header,
-  // and the *not used yet* header comes after them and covers the rest only.
+  // Finders are used since #388 Part B and verifiers since Part C: each block
+  // sits under its own header, the verifiers' after the finders', and nothing
+  // says *not used yet* any more.
   const findersAt = lines.findIndex((l) => l.includes('review finders (each reviews every chunk'));
-  const unusedAt = lines.findIndex((l) =>
-    /review seats \(not used yet: accepted and validated, no run reads them/.test(l),
+  const verifiersAt = lines.findIndex((l) =>
+    /review verifiers \(each votes on every blocking finding not reproduced; one extra turn per such finding per verifier\)/.test(l),
   );
   assert.ok(findersAt >= 0, 'a review finders header');
-  assert.ok(unusedAt > findersAt, 'the not-used-yet header follows the finders');
+  assert.ok(verifiersAt > findersAt, 'the verifiers header follows the finders');
+  assert.equal(lines.some((l) => l.includes('not used yet')), false);
   const at = (label: string): number => lines.indexOf(line(lines, label));
-  assert.ok(at('finder 1') > findersAt && at('finder 2') < unusedAt, 'finders are not under "not used yet"');
+  assert.ok(at('finder 1') > findersAt && at('finder 2') < verifiersAt, 'finders are under their own header');
   for (const label of ['verifier 1', 'verifier 3', 'quorum', 'unconfirmed P0']) {
-    assert.ok(at(label) > unusedAt, `${label} is still under "not used yet"`);
+    assert.ok(at(label) > verifiersAt, `${label} is under the verifiers header`);
   }
   assert.match(line(lines, 'finder 1'), /codex\s+finder-fixture \/ max \/ 555000ms {2}focus: "security"$/);
   assert.match(line(lines, 'finder 2'), /claude\s+claude-fixture \/ low \/ 333000ms$/);
@@ -103,4 +105,5 @@ test('under the defaults doctor prints no review block', async () => {
   const { code, lines } = await doctor(targetDir(undefined));
   assert.equal(code, EXIT.OK);
   assert.equal(lines.some((l) => l.includes('review seats')), false);
+  assert.equal(lines.some((l) => l.includes('review finders') || l.includes('review verifiers')), false);
 });

@@ -137,6 +137,8 @@ interface Seat {
   turnRound?: number;
   /** Which additional review finder took the turn (#388 Part B); absent for the first. */
   finder?: number;
+  /** Which review verifier cast this vote (#388 Part C); `1` is `review.verifiers[0]`. */
+  verifier?: number;
 }
 
 /**
@@ -186,6 +188,20 @@ export function seatOf(label: string): Seat | null {
   // critique, so it cannot be a cycle of its own. Its round is the plan round it
   // happened under, which the checkpoint timeline supplies.
   if (answers !== null) return { role: 'answerer', kind: 'answer', phase: 'planning', round: null };
+  // `vote-2-3-v1` is verifier 1's vote on finding 3 of review round 2 (#388
+  // Part C): a turn of that review round, on the reviewer's job, told apart by
+  // `verifier`. The round is the first segment, as `numbered` reads it.
+  const vote = numbered('vote');
+  const verifier = /^vote-\d+-\d+-v(\d+)$/.exec(label)?.[1];
+  if (vote !== null && verifier !== undefined) {
+    return {
+      role: 'reviewer',
+      kind: 'vote',
+      phase: 'review',
+      round: vote,
+      verifier: Number.parseInt(verifier, 10),
+    };
+  }
   const review = numbered('review');
   if (review !== null) {
     // `review-2-f1` and `review-2-f1-part3` are additional finders' turns in
@@ -451,6 +467,10 @@ export function replayRun(state: RunState, sources: ReplaySources): Replay {
           ...(seat.finder === undefined
             ? {}
             : { finder: seat.finder, seat: `review.finders[${String(seat.finder - 1)}]` }),
+          // And a verifier's says which one, as its live frame does (#388 Part C).
+          ...(seat.verifier === undefined
+            ? {}
+            : { verifier: seat.verifier, seat: `review.verifiers[${String(seat.verifier - 1)}]` }),
           // Told, never inferred. A window that guessed which turns had a
           // measured start would guess wrong on the ones that matter.
           unmeasured: start === null,
@@ -526,9 +546,11 @@ export function replayRun(state: RunState, sources: ReplaySources): Replay {
   // the round's artifact, and the findings pane's denominator is read off it -
   // never off the configured count. A replay without it would draw every
   // finding's provenance with no denominator.
+  // The vote's tally (#388 Part C) rides the same loop, for the same reason:
+  // it is the one account of what a round's vote came to.
   for (const event of state.events) {
     const id = event.type;
-    if (id !== 'review_finders_merged' && id !== 'review_finder_failed') continue;
+    if (id !== 'review_finders_merged' && id !== 'review_finder_failed' && id !== 'review_votes_tallied') continue;
     const at = ms(typeof event['at'] === 'string' ? event['at'] : null);
     if (at === null) continue;
     const { at: _at, type: _type, ...data } = event;

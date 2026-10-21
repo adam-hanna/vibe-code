@@ -5,7 +5,7 @@ import { Button } from '@/ui/button';
 import { cn } from '@/lib/utils';
 import { Counts } from './Counts';
 import { Caret, Section } from './Disclosure';
-import { foundByLine, ofKind, readReport } from './artifacts';
+import { ballotLine, foundByLine, ofKind, readReport, votesLine } from './artifacts';
 import { SEVERITIES } from './model';
 import { DOCUMENT, EMPTY, FILE, HEAD, LABEL, NOTE, PANE } from './pane';
 import { useArtifact, useArtifacts, noText } from './useArtifacts';
@@ -83,14 +83,26 @@ const ABSENT = 'm-0 text-body-sm text-tertiary';
  * the file has the prose and the census has what happened to the finding since,
  * and a pane that read only one of them would be missing half.
  */
-function History({ row }: { row: FindingRow }) {
+function History({
+  row,
+  byVote = false,
+}: {
+  row: FindingRow;
+  /**
+   * The downgrade was the review vote's (#388 Part C), which the report file
+   * says and the census does not. Named as the vote rather than as *guard*: it
+   * is the one move that rests on what other agents concluded, not on a
+   * mechanical check, and a reader weighing an override needs to know which.
+   */
+  byVote?: boolean;
+}) {
   const changes = row.severityChanges ?? [];
   if (row.downgraded === null && changes.length === 0) return null;
   return (
     <ul className={FACTS}>
       {row.downgraded !== null && (
         <li>
-          <Badge>guard</Badge> downgraded from {row.downgraded.from} — {row.downgraded.reason}
+          <Badge>{byVote ? 'vote' : 'guard'}</Badge> downgraded from {row.downgraded.from} — {row.downgraded.reason}
         </li>
       )}
       {changes.map((c, i) => (
@@ -179,6 +191,8 @@ function Finding({
   reported: number | null;
 }) {
   const [open, setOpen] = useState(false);
+  // The report file says the vote moved it; the census row only says a guard did (#388 Part C).
+  const movedByVote = finding.votes?.outcome === 'unconfirmed' && finding.downgraded !== null;
   const w = weight(finding.severity);
   return (
     <div className="rounded-sm border border-rule-inner bg-panel">
@@ -204,13 +218,18 @@ function Finding({
             {/* Who found it, behind the fold and never on the row (#388 Part B).
                 A finding with no `foundBy` adds nothing here. */}
             {finding.foundBy !== null && <Badge>{foundByLine(finding.foundBy, reported)}</Badge>}
+            {/* The vote, below who found it and never on the row (#388 Part C).
+                A finding nobody voted on adds nothing here. */}
+            {finding.votes !== null && <Badge>{votesLine(finding.votes)}</Badge>}
             {finding.deferred && <Badge>deferred — real, and for separate work</Badge>}
             {/* The guards' downgrade, which is a fact about the severity above
                 and has to be readable beside it. Never rewritten and never
                 cleared, including by a person restoring the severity (#142). */}
             {finding.downgraded !== null && (
               <Badge variant="alarm">
-                guard downgraded it from {finding.downgraded.from}
+                {movedByVote
+                  ? `${finding.downgraded.reason}, moved from ${finding.downgraded.from}`
+                  : `guard downgraded it from ${finding.downgraded.from}`}
               </Badge>
             )}
             {/* Said out loud rather than left as an empty row. *Nobody tried to
@@ -221,6 +240,15 @@ function Finding({
               <Badge>no reproducer was written</Badge>
             )}
           </div>
+          {/* One line per ballot: the seat, its vote and its reason. Every
+              verifier saw the same claim and none saw another's vote. */}
+          {finding.votes !== null && finding.votes.ballots.length > 0 && (
+            <ul className={FACTS}>
+              {finding.votes.ballots.map((b) => (
+                <li key={b.seat}>{ballotLine(b)}</li>
+              ))}
+            </ul>
+          )}
 
           <h5 className={CAPTION}>What is wrong</h5>
           {finding.detail === null ? (
@@ -271,7 +299,7 @@ function Finding({
           {row !== null && (row.downgraded !== null || (row.severityChanges ?? []).length > 0) && (
             <>
               <h5 className={CAPTION}>How it reached this severity</h5>
-              <History row={row} />
+              <History row={row} byVote={movedByVote} />
             </>
           )}
           {row !== null && row.reproducer !== null && (

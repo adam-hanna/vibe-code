@@ -1107,6 +1107,39 @@ export interface FoundBy {
   id: string;
 }
 
+/** What one verifier said about one finding (#388 Part C). */
+export type VoteValue = 'real' | 'not-real' | 'cannot-tell';
+
+/** One verifier's ballot on one finding. See `Finding.votes`. */
+export interface Ballot {
+  /** The config path, `review.verifiers[0]`. */
+  seat: string;
+  provider: AgentProvider;
+  /** The configured model, or `"default"` - as `foundBy` has it. */
+  model: string;
+  /** The vote as cast. A turn that failed cast nothing, and reads `cannot-tell`. */
+  vote: VoteValue;
+  /** The vote as it was counted: a `not-real` whose evidence resolved to nothing is `cannot-tell`. */
+  counted: VoteValue;
+  /** The verifier's own reason, or `the turn failed: <first line>`. */
+  reason: string;
+  /** The citations it gave, canonicalised where they resolved. */
+  evidence: Evidence[];
+  /** Why it was counted otherwise than cast. Present only when `counted !== vote`. */
+  countedReason?: string;
+}
+
+/** The vote on one finding, and what it came to. See `Finding.votes`. */
+export interface Votes {
+  quorum: number;
+  n: number;
+  real: number;
+  notReal: number;
+  cannotTell: number;
+  outcome: 'confirmed' | 'unconfirmed' | 'undecided';
+  ballots: Ballot[];
+}
+
 export interface Finding {
   id: string;
   severity: Severity;
@@ -1143,6 +1176,18 @@ export interface Finding {
    * delete a claim.
    */
   foundBy?: FoundBy[];
+  /**
+   * What the review verifiers voted, and what the tally came to (#388 Part C).
+   *
+   * **Absent unless the finding was put to a vote** - a P0 or P1 that was not
+   * reproduced, on a run that seats verifiers - so a default run's artifacts
+   * carry no such key, byte for byte. Written only by `applyVotes`. An
+   * `unconfirmed` P1 (or a P0 under `unconfirmedP0: "demote"`) is moved to P2
+   * through `toP2`, so `downgraded` names the tally beside this record.
+   * Rides through `readFinding` unvalidated, as `foundBy` does: a malformed
+   * caption must not delete a claim. The oscillation census never reads it.
+   */
+  votes?: Votes;
   /**
    * Where this finding says to look. At least one entry, per the schema.
    *

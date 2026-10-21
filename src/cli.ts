@@ -48,8 +48,8 @@ import {
   effortFor,
   modelFor,
   readFinders,
+  readVerifiers,
   ROLE_NAMES,
-  roleSetting,
   rolesFor,
   roleWarnings,
   seatResolved,
@@ -1525,6 +1525,17 @@ export function reportRoles(cfg: Config): void {
     );
     log.info(`Finders: ${seated.join(' ')}`);
   }
+  // The verifiers (#388 Part C), the same way: only when there are any.
+  const verifiers = readVerifiers(cfg);
+  if (verifiers.length > 0) {
+    const seated = verifiers.map(
+      ({ setting }) =>
+        `${setting.provider}` +
+        `${setting.model === undefined ? '' : `@${setting.model}`}` +
+        `${setting.effort === undefined ? '' : `/${setting.effort}`}`,
+    );
+    log.info(`Verifiers: ${seated.join(' ')}`);
+  }
   for (const warning of roleWarnings(cfg)) log.warn(warning);
 }
 
@@ -1564,19 +1575,20 @@ function reportResolvedRoles(cfg: Config): void {
  * all when it names none, so doctor under the defaults prints what it always
  * has.
  *
- * Two blocks, because they are two different truths since #388 Part B. The
- * finders are used: each reviews every chunk after `roles.reviewer`, at one
- * extra turn per chunk per finder. The verifiers, the quorum and
- * `unconfirmedP0` are still accepted, validated and read by no run, and keep
- * *not used yet* on their first line until Part C. A seat's figures come
+ * Two blocks, because they cost differently. The finders (#388 Part B) each
+ * review every chunk after `roles.reviewer`, at one extra turn per chunk per
+ * finder. The verifiers (#388 Part C) each vote on every blocking finding that
+ * was not reproduced, at one extra turn per such finding per verifier, held to
+ * the quorum and `unconfirmedP0` printed with them. A seat's figures come
  * through `seatResolved`, the rule a turn is spawned with.
  *
  * The majority is printed as the definition it is - more than half - and not
  * as a recommendation.
  */
 function reportReviewSeats(cfg: Config): void {
-  const { verifiers, quorum, unconfirmedP0 } = cfg.review;
+  const { quorum, unconfirmedP0 } = cfg.review;
   const finders = readFinders(cfg);
+  const verifiers = readVerifiers(cfg);
   if (finders.length === 0 && verifiers.length === 0) return;
   const seat = (setting: RoleSetting, focus?: string): string => {
     const r = seatResolved(setting, cfg);
@@ -1592,12 +1604,10 @@ function reportReviewSeats(cfg: Config): void {
     print(finders.map((f): [string, string] => [`finder ${f.k}`, seat(f.setting, f.focus)]));
   }
   if (verifiers.length === 0) return;
-  log.info('  review seats (not used yet: accepted and validated, no run reads them in this version):');
-  const rows: [string, string][] = [];
-  verifiers.forEach((entry, i) => {
-    // Validated already; read through the same reader so a string entry is a seat.
-    rows.push([`verifier ${i + 1}`, seat(roleSetting(`review.verifiers[${i}]`, entry))]);
-  });
+  log.info(
+    '  review verifiers (each votes on every blocking finding not reproduced; one extra turn per such finding per verifier):',
+  );
+  const rows: [string, string][] = verifiers.map((v): [string, string] => [`verifier ${v.k}`, seat(v.setting)]);
   const n = verifiers.length;
   rows.push([
     'quorum',
@@ -2668,6 +2678,54 @@ export function reportReviewFinders(state: RunState): void {
   }
   log.info(`Finders:  review round ${round + 1}: ${reported} of ${seats} reported; ${cost}.`);
 }
+/**
+ * What the review vote cost and what it came to (#388 Part C), as one summary
+ * line - and nothing at all on a run that cast no vote.
+ *
+ * `reportReviewFinders`' rule, for the same reasons: the cost is the charges -
+ * every vote-labelled `claude_turn`, `codex_turn` and `turn_failed` through
+ * `chargedTurns` - and the outcome is the last recorded `review_votes_tallied`
+ * event, never a tally of failed turns, which a resumed round could have left
+ * from an attempt whose votes were thrown away.
+ */
+export function reportReviewVotes(state: RunState): void {
+  let turns = 0;
+  let failed = 0;
+  let tokens = 0;
+  for (const t of chargedTurns(state)) {
+    if (seatOf(t.label)?.verifier === undefined) continue;
+    turns += 1;
+    if (t.failed) failed += 1;
+    const spent = t.data['tokens'];
+    if (typeof spent === 'number' && Number.isFinite(spent)) tokens += spent;
+  }
+  let last: Record<string, unknown> | null = null;
+  for (const e of state.events) if (e.type === 'review_votes_tallied') last = e;
+  if (turns === 0 && last === null) return;
+
+  const cost =
+    `the vote took ${turns} turn(s)` +
+    (failed > 0 ? ` (${failed} failed)` : '') +
+    `, ${fmtTokens(tokens)} tokens across the run`;
+  const n = (key: string): number | null => {
+    const v = last?.[key];
+    return typeof v === 'number' && Number.isFinite(v) ? v : null;
+  };
+  const round = n('round');
+  const findings = n('findings');
+  const confirmed = n('confirmed');
+  const unconfirmed = n('unconfirmed');
+  const undecided = n('undecided');
+  if (round === null || findings === null || confirmed === null || unconfirmed === null || undecided === null) {
+    log.info(`Votes:    ${cost}; no review round completed its tally.`);
+    return;
+  }
+  log.info(
+    `Votes:    review round ${round + 1}: ${findings} finding(s) voted on - ${confirmed} confirmed, ` +
+      `${unconfirmed} unconfirmed, ${undecided} undecided; ${cost}.`,
+  );
+}
+
 
 /**
  * The Claude share, or null when the state cannot support one.
@@ -2755,6 +2813,7 @@ function summary(state: RunState, started: number, recovery?: RecoveryReport): v
     `Rounds:   ${state.planRound} plan revision(s)${asked}, ${state.reviewRound} fix round(s)`,
   );
   reportReviewFinders(state);
+  reportReviewVotes(state);
   if (state.sessionRotations > 0) log.info(`Compacted: ${state.sessionRotations} time(s)`);
   // A record of what `forkedFrom` holds, never a computation over it: the totals
   // above include the inherited spend, and this is what says so. Nothing here
@@ -2999,7 +3058,7 @@ async function cmdDoctor(args: readonly string[]): Promise<ExitCode> {
     // (#138), in the words `src/mcp.ts` keeps for every surface that says it.
     log.info('  mcp:');
     const table = rolesFor(cfg);
-    for (const line of describeMcp(table, readFinders(cfg))) log.info(`    ${line}`);
+    for (const line of describeMcp(table, readFinders(cfg), readVerifiers(cfg))) log.info(`    ${line}`);
     const mcpBlocked = await mcpRefusals(cfg, table, {
       cwd: targetDir,
       repoDir: targetDir,

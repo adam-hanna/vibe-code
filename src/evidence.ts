@@ -9,8 +9,10 @@ import type {
   ReproducerOutcome,
   Severity,
   TurnActivity,
+  Votes,
 } from '@src/types.js';
 import { readEvidenceEntry, reproducerOutcomesOf } from '@src/validate.js';
+import { tallyReason } from '@src/vote.js';
 
 /**
  * Is a finding grounded - does it point at something that exists?
@@ -725,4 +727,76 @@ export function inspectedItems(activity: TurnActivity | undefined): number | nul
   const kinds = Object.entries(activity.items);
   if (kinds.length === 0) return null;
   return kinds.reduce((sum, [kind, n]) => (NON_INSPECTING_ITEMS.has(kind) ? sum : sum + n), 0);
+}
+
+/**
+ * A verifier's citations, through the grounding a finding's go through (#388
+ * Part C).
+ *
+ * `groundFindings` itself, not a second resolver: the vote is wrapped as a
+ * one-finding P1 report, so whatever would downgrade a blocking finding for
+ * citing nothing that resolves is exactly what marks a vote's evidence as
+ * unresolved. `unresolved` is that downgrade's reason, or null when at least
+ * one citation resolved; `evidence` is the entries as given, with every resolved
+ * path canonicalised.
+ */
+export function groundVoteEvidence(
+  evidence: readonly unknown[],
+  cwd: string,
+  runDir: string,
+  style: PathStyle | null,
+): { evidence: Evidence[]; unresolved: string | null } {
+  const probe: Finding = {
+    id: 'vote',
+    severity: 'P1',
+    title: '',
+    detail: '',
+    suggested_fix: '',
+    // The one cast, the one `groundFindings` itself makes: what was given is
+    // carried through unvalidated, and grounding decides whether it resolves.
+    ...(evidence.length > 0 ? { evidence: [...evidence] as Evidence[] } : {}),
+  };
+  const grounded = groundFindings({ verdict: 'REVISE', summary: '', findings: [probe] }, cwd, runDir, style);
+  const [only] = grounded.report.findings;
+  return {
+    evidence: only?.evidence ?? [],
+    unresolved: grounded.downgraded[0]?.downgraded?.reason ?? null,
+  };
+}
+
+/**
+ * Attach each finding's vote, and move what the vote did not confirm (#388
+ * Part C).
+ *
+ * Pure, as the other guards are: the artifact and `state.pendingFindings` are
+ * written from these objects. An `unconfirmed` P1 goes to P2 through `toP2`, so
+ * it is a guard's downgrade like any other - `downgraded` names the tally, the
+ * gate stops counting it, and a person can still restore it (#142). An
+ * `unconfirmed` P0 follows `unconfirmedP0`: `demote` moves it the same way,
+ * `block` leaves it, and `halt` leaves it and hands it back in `held` so the
+ * caller can stop for a person once the artifact is written. Confirmed and
+ * undecided findings keep their severity.
+ */
+export function applyVotes(
+  report: FindingsReport,
+  votes: ReadonlyMap<string, Votes>,
+  unconfirmedP0: 'block' | 'halt' | 'demote',
+): { report: FindingsReport; downgraded: Finding[]; held: Finding[] } {
+  const downgraded: Finding[] = [];
+  const held: Finding[] = [];
+  const findings = report.findings.map((f) => {
+    const v = votes.get(f.id);
+    if (v === undefined) return f;
+    const recorded: Finding = { ...f, votes: v };
+    if (v.outcome !== 'unconfirmed') return recorded;
+    if (f.severity === 'P0' && unconfirmedP0 !== 'demote') {
+      if (unconfirmedP0 === 'halt') held.push(recorded);
+      return recorded;
+    }
+    if (f.severity !== 'P0' && f.severity !== 'P1') return recorded;
+    const next = toP2(recorded, {}, tallyReason(v));
+    downgraded.push(next);
+    return next;
+  });
+  return { report: { ...report, findings }, downgraded, held };
 }

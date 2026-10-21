@@ -68,17 +68,31 @@ What a role does not choose is decided by its job. Writing roles get a writable 
 
 ## `review`
 
-**`review.finders` is used; `review.verifiers`, `review.quorum` and `review.unconfirmedP0` are accepted and validated, but no run uses them yet (#388).** A run that names only verifiers runs exactly as one that names none. `vibe doctor` lists your finders as used and marks the verifiers, the quorum and `unconfirmedP0` *not used yet*.
-
-What it is for: more finders, which look at the change independently of each other, and verifiers, which will vote on each blocking finding before it can block.
+What it is for: more finders, which look at the change independently of each other, and verifiers, which vote on each blocking finding before it can block (#388). With both lists empty, which is the default, a review round is exactly what it was without this section. `vibe doctor` lists your finders and verifiers, and the line printed before the first turn names them.
 
 **What a finder does.** `roles.reviewer` reviews every part of the diff first, exactly as it does with no finders. Then each finder, in order, reviews every part too, with the same prompt the reviewer gets for that part: the same diff, plan, last implementer report, reproducer gates and judge files. A finder never sees what another finder found. A finder that names `focus` gets one extra section at the end of its prompt, `## Focus for this review`, holding that text; no other finder's prompt changes.
 
-**Where it sits.** Every finder turn is a fresh, read-only conversation on its own provider: it never resumes a thread, never shares the implementer's Claude session, and a Codex finder runs under `codex.sandbox`, as the reviewer does. Its turns are labelled `review-<round>-f<k>`, or `review-<round>-f<k>-part<i>` when the diff is split, where `f1` is `review.finders[0]`. A finder's `mcpServers` are checked before the first turn, like a role's.
+**Where it sits.** Every finder turn is a fresh, read-only conversation on its own provider: it never resumes a thread, never shares the implementer's Claude session, and a Codex finder runs under `codex.sandbox`, as the reviewer does. Its turns are labelled `review-<round>-f<k>`, or `review-<round>-f<k>-part<i>` when the diff is split, where `f1` is `review.finders[0]`. A finder's `mcpServers` are checked before the first turn, like a role's, and so are a verifier's.
 
 **How findings are merged.** Two findings from different finders are one defect when they cite the same code location (the same path and line) or when their titles say the same thing. Otherwise both are kept. A merged finding keeps the most blocking severity, and the title, detail and fix of the finder that gave it. Its citations are the union. Two findings from the same finder are never merged. If two unrelated findings share an id, the later one is renamed `<id>-f<k>`. When at least one finder is configured, every finding in `code-review-<n>.json` carries `foundBy`: which seats raised it, with each seat's provider, configured model (`default` when none was set) and the id it used.
 
 **What it costs.** One extra turn per diff part per finder, every review round, all of it inside `budget.maxTokens`. There is no separate ceiling. A finder whose turn fails, other than by a stop or a ceiling, is recorded as `review_finder_failed` and contributes nothing; the round goes on with the others, and the round says how many finders reported (*"2 of 3 reported"*). The run summary's `Finders:` line says what the finders cost in turns and tokens.
+
+**What gets a vote.** After the findings are merged and any reproducers have run, every P0 and P1 goes to every verifier, one at a time - except a finding whose own reproducer reproduced, which blocks without a vote, and anything a check already moved to P2. P2 and P3 are never voted on.
+
+**What a verifier sees.** The finding's title, detail, citations and suggested fix; the plan and its out-of-scope list; the parts of the diff its citations point at (all of it, if they point at none); and the repository, to read. It never sees which finder raised the finding or how many did, how any other verifier voted, or the finding's id or history. It answers `real`, `not-real` or `cannot-tell`, and is asked whether the defect exists - not how severe it is or whether it is worth fixing. A `not-real` has to cite something that resolves, as a finding does; one that does not is recorded as cast and counted as `cannot-tell`. Every verifier turn is a fresh, read-only conversation, labelled `vote-<round>-<n>-v<k>`, where `<n>` is the finding's place in the round's report and `v1` is `review.verifiers[0]`.
+
+**The three outcomes.** With `n` verifiers and a quorum of `q`:
+
+- **confirmed** when at least `q` counted `real`. The finding keeps its severity.
+- **unconfirmed** when more than `n - q` counted `not-real`, so the quorum could not have been reached even if every `cannot-tell` had been `real`. An unconfirmed P1 is moved to P2, with the tally as the reason (*"unconfirmed by vote: 1 real, 2 not-real, 0 cannot-tell of 3 (quorum 2)"*); it stops blocking and is listed in FOLLOW-UPS.md, and you can move it back as you can any downgrade. An unconfirmed P0 does what `review.unconfirmedP0` says.
+- **undecided** otherwise. The finding keeps its severity and keeps blocking.
+
+A verifier whose turn fails, other than by a stop or a ceiling, counts as `cannot-tell`, with the error recorded. So too few usable votes leave a finding blocking; they never let it through. Every finding that was voted on carries `votes` in `code-review-<n>.json`: the counts, the outcome, and each verifier's vote, how it was counted, and its reason.
+
+**`unconfirmedP0: "halt"`.** The round's `code-review-<n>.json` is written with the P0 unchanged, and the run stops for input (exit code 2). NEEDS-INPUT.md lists each such finding with every vote and its reason. Leave it alone and resume, and it keeps blocking: the resume goes to the fix round with it. To demote it, fill in its block under *Change a severity* and resume; that is recorded as your change. A resume never votes on that round again.
+
+**What the vote costs.** One turn per voted finding per verifier, every review round, inside `budget.maxTokens`. The run summary's `Votes:` line says what the vote cost in turns and tokens, and what the last round's vote came to.
 
 ```json
 {
@@ -94,11 +108,11 @@ What it is for: more finders, which look at the change independently of each oth
 | Key | Default | Meaning |
 |---|---|---|
 | `review.finders` | `[]` | Finders **in addition to** `roles.reviewer`, which stays the first finder and keeps its own settings. Each entry is written the way a role is: a provider name, or an object with `provider` (required), `model`, `effort`, `timeoutMs` and `mcpServers`. A finder may also take `focus`, a non-empty string saying what to look at hardest; it is appended to that finder's prompt only. |
-| `review.verifiers` | `[]` | The seats that will vote on each blocking finding. Entries take exactly a role's keys. A `focus` on a verifier is refused as an unknown key. |
+| `review.verifiers` | `[]` | The seats that vote on each blocking finding. Entries take exactly a role's keys. A `focus` on a verifier is refused as an unknown key. |
 | `review.quorum` | `null` | How many `real` votes confirm a finding. `null` means a majority of the verifiers, `floor(n/2)+1`. A whole number must be at least 1 and at most the number of verifiers, and it is refused when there are no verifiers. |
-| `review.unconfirmedP0` | `"block"` | What a P0 that the vote did not confirm will do. `"block"` records the votes and it still blocks. `"halt"` stops the run and asks you, showing every vote. `"demote"` moves it to P2, as an unconfirmed P1 is moved. |
+| `review.unconfirmedP0` | `"block"` | What a P0 that the vote did not confirm does. `"block"` records the votes and it still blocks. `"halt"` stops the run and asks you, showing every vote. `"demote"` moves it to P2, as an unconfirmed P1 is moved. |
 
-Every finder runs, and every verifier will run, as a fresh, read-only turn. It never resumes a conversation and never shares the implementer's session. A refused entry is named by its index, counted from 0, in the same words a role's mistake gets, for example `review.finders[1].effort is "huge"; must be one of low, medium, high, xhigh, max`.
+Every finder and every verifier runs as a fresh, read-only turn. It never resumes a conversation and never shares the implementer's session. A refused entry is named by its index, counted from 0, in the same words a role's mistake gets, for example `review.finders[1].effort is "huge"; must be one of low, medium, high, xhigh, max`.
 
 `review` may be set in the settings for all projects and in a project's `vibe.config.json`. The project wins key by key, and a list is replaced whole: a project that names `finders` replaces the global file's finders and keeps its `quorum`.
 

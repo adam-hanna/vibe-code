@@ -11,7 +11,7 @@ import { run } from '@src/proc.js';
 import { checkClis } from '@src/cliversions.js';
 import type { CliCheck } from '@src/cliversions.js';
 import { codexEffortOverride, codexMcpDisableArgs, listCodexMcpServers } from '@src/mcp.js';
-import { codexProbeSandbox, enabledRolesFor, providerAccess, rolesFor } from '@src/roles.js';
+import { codexProbeSandbox, enabledRolesFor, providerAccess, rolesFor, seatProviders } from '@src/roles.js';
 import type { Access, RoleTable } from '@src/roles.js';
 import { contractForAgent, setOwn, validateContract } from '@src/runtime.js';
 import type {
@@ -240,7 +240,11 @@ export function adjudicate(
   // sandbox that cannot run the toolchain; where no such turn is dispatched, the
   // finding describes a shell nothing will use.
   const codex = verdicts.find((verdict) => verdict.provider === 'codex');
-  const codexRuns = enabledRolesFor('codex', cfg, roles).length > 0;
+  // A review seat counts too (#388 Part C): a Codex that only a finder or a
+  // verifier uses is still spawned into this sandbox, and a verifier that cannot
+  // run its turn counts as `cannot-tell` on every vote - safe, but the vote
+  // would then do nothing without anyone being told.
+  const codexRuns = enabledRolesFor('codex', cfg, roles).length > 0 || seatProviders(cfg).includes('codex');
   if (codexRuns && codex?.result.prepared?.mechanisms.includes('sandbox-policy') === true) {
     blockingReasons.push(
       `Codex's ${cfg.codex.sandbox} sandbox blocks required tools. ` +

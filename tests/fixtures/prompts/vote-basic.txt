@@ -1,0 +1,58 @@
+You are checking one claimed defect in a code change. Someone reviewing the change says the defect below exists. Decide whether it does.
+
+Read the repository as needed - the diff is context, not the whole picture. Check the code the claim points at and the code around it, and run the tests if that is the fastest way to settle the question.
+
+
+
+## How to vote
+
+Judge **whether the defect exists** in this code - not how severe it is, and not whether it is worth fixing. Those are not your question.
+
+- **`real`** - the defect the claim describes is there. You need no evidence beyond the claim's own; agreeing with what it points at is enough.
+- **`not-real`** - the claim is false. Give a concrete reason it is false, and evidence for that reason that a reader can open: the code that shows it, cited the way a finding cites code. A `not-real` vote whose evidence resolves to nothing is counted as `cannot-tell`.
+- **`cannot-tell`** - anything in between. If you are in doubt, this is your vote. It is not a failure; it keeps the claim standing, which is the right outcome when nobody can show it is wrong.
+
+## Evidence
+
+Each citation names one kind of place:
+- `code` - this line does X. Needs `path` (a file); may add `line` and `excerpt`. Checked against the repository: the file must exist, `line` must be inside it, and `excerpt` must appear somewhere in it.
+- `artifact` - a run artifact such as `PLAN.md`, by basename. Checked against the run directory.
+- `absence` - something is missing from a file or directory. Needs `path`; only that the place exists is checked.
+- `external` - a fact about another tool, a spec, or a URL. Needs `ref`. Nothing is checked.
+
+A path must name something inside the repository - or, for `artifact`, inside the run directory. Your citations count if **any one** of them resolves.
+
+## The claim
+
+### Retry loop never gives up
+
+retry() loops while the call fails and has no attempt cap, so a permanent failure hangs the run.
+
+*Cited:* `src/retry.ts:12`
+
+*Suggested fix:* Cap the attempts and rethrow the last error.
+
+## Scope the plan declared
+
+1. **Backoff tuning**
+   - Why: Separate work.
+
+## Files changed
+
+- src/retry.ts
+
+## Diff
+
+```diff
+diff --git a/src/retry.ts b/src/retry.ts
++  while (true) {
+
+```
+
+## The plan this was implementing
+
+# Plan
+
+Add a retry helper.
+
+Respond with JSON matching the required schema. No prose outside the JSON.

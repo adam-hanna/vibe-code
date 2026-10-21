@@ -19,16 +19,15 @@ import type { Handlers } from './helpers/loop-harness.js';
 import type { Config, ReviewConfig, RunState } from '@src/types.js';
 
 /**
- * Most of `review` is still groundwork (#388 Part A): a run that names
- * verifiers behaves exactly as one that names none.
+ * What `review` changes about a run, against a default one (#388).
  *
  * The first case pins the default loop's turn labels as they are today - plan,
  * critique, implement, a blocking review, a fix round and an approving review.
  * The second runs the same loop with two verifiers, a quorum and a non-default
- * `unconfirmedP0` and requires the identical labels, the identical
- * `code-review-<n>.json` files and the identical event sequence. A run that read
- * those keys anywhere would show it in one of those three. (Finders are used
- * since #388 Part B; `review-finders-loop.test.ts` pins what they change.)
+ * `unconfirmedP0`, and requires exactly the vote's own additions (Part C) and
+ * nothing else: the same other labels, artifacts and event sequence. Finders
+ * (Part B) are pinned in `review-finders-loop.test.ts`, and the vote's
+ * outcomes in `review-votes-loop.test.ts`.
  */
 
 const LABELS = ['plan', 'critique-0', 'implement', 'review-0', 'fix-1', 'review-1'];
@@ -66,23 +65,65 @@ test('a default run takes exactly the turns it always has', async () => {
   assert.deepEqual(Object.keys(reviews(state)), ['code-review-0.json', 'code-review-1.json']);
 });
 
-// Finders are used since #388 Part B, so this claim now holds for the rest of
-// the section only: naming verifiers, a quorum and `unconfirmedP0` changes
-// nothing a run does until Part C. What finders change is pinned in
-// `review-finders-loop.test.ts`.
-test('naming verifiers, a quorum and unconfirmedP0 changes nothing a run does, in this release', async () => {
+// Finders are used since #388 Part B and verifiers since Part C, so the claim
+// this case made before - that naming verifiers changes nothing a run does -
+// is no longer the contract. What still holds, and is pinned here: the vote
+// adds exactly one turn per blocking finding per verifier, labelled
+// `vote-<r>-<n>-v<k>`, plus one `review_votes_tallied` event per round; a
+// round with nothing blocking casts no vote and writes the artifact a default
+// run writes; and everything else - every other turn, every other event, every
+// severity - is what the default run does. Finders: `review-finders-loop.test.ts`.
+test('verifiers add one vote turn per blocking finding per verifier, and nothing else', async () => {
   const plain = await run(DEFAULTS.review);
-  const seated = await run({
-    finders: [],
-    verifiers: ['codex', { provider: 'claude', effort: 'high' }],
-    quorum: 2,
-    unconfirmedP0: 'halt',
-  });
-  assert.deepEqual(seated.calls, LABELS);
-  assert.deepEqual(reviews(seated.state), reviews(plain.state));
+
+  const state = freshRun({ prefix: 'vibe-review-defaults-', task: 'review defaults', planOnly: false, git: true, commit: true });
+  const calls: string[] = [];
+  const cfg: Config = config(
+    { p1Tolerance: 0 },
+    {
+      ...committing(),
+      ...verifying(state),
+      review: { finders: [], verifiers: ['codex', { provider: 'claude', effort: 'high' }], quorum: 2, unconfirmedP0: 'halt' },
+    },
+  );
+  const base = handlers(state);
+  const real = { vote: 'real', reason: 'It is there.', evidence: [] };
+  const voting: Handlers = {
+    claude: (label, options) => (label.startsWith('vote-') ? real : base.claude?.(label, options)),
+    codex: (label, options) => (label.startsWith('vote-') ? real : base.codex?.(label, options)),
+  };
+  await orchestrate(state, cfg, false, agents(voting, calls));
+
+  assert.deepEqual(calls, [
+    'plan',
+    'critique-0',
+    'implement',
+    'review-0',
+    'vote-0-1-v1',
+    'vote-0-1-v2',
+    'vote-0-2-v1',
+    'vote-0-2-v2',
+    'fix-1',
+    'review-1',
+  ]);
+  assert.equal(state.status, plain.state.status);
+
+  // The approving round voted on nothing, and its artifact is the default one.
+  const seated = reviews(state);
+  const unseated = reviews(plain.state);
+  assert.equal(seated['code-review-1.json'], unseated['code-review-1.json']);
+  // The blocking round's findings carry their votes, and nothing else moved.
+  const round0 = JSON.parse(seated['code-review-0.json'] ?? '{}') as { findings: Record<string, unknown>[] };
+  for (const f of round0.findings) assert.equal((f['votes'] as { outcome: string }).outcome, 'confirmed');
+  const stripped = { ...round0, findings: round0.findings.map(({ votes: _votes, ...rest }) => rest) };
+  assert.deepEqual(stripped, JSON.parse(unseated['code-review-0.json'] ?? '{}'));
+
+  // Every event the default run records, in its order, once the vote's own are set aside.
+  const isVote = (e: Record<string, unknown>): boolean =>
+    e['type'] === 'review_votes_tallied' || (typeof e['label'] === 'string' && e['label'].startsWith('vote-'));
   assert.deepEqual(
-    seated.state.events.map((e) => e.type),
+    state.events.filter((e) => !isVote(e)).map((e) => e.type),
     plain.state.events.map((e) => e.type),
   );
-  assert.equal(seated.state.status, plain.state.status);
+  assert.equal(state.events.filter((e) => e.type === 'review_votes_tallied').length, 2);
 });

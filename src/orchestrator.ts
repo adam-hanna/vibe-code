@@ -13,10 +13,14 @@ import type { CodexTurnOptions, CodexTurnResult } from '@src/codex.js';
 import { preserveGateArtifacts, sweepGateArtifacts } from '@src/artifacts.js';
 import {
   applyReproducerOutcomes,
+  applyVotes,
   downgradeInert,
   groundFindings,
+  groundVoteEvidence,
   refusePlaceholderPlan,
 } from '@src/evidence.js';
+import { VOTE_SCHEMA } from '@src/schemas.js';
+import { countBallot, describeVotes, failedBallot, tally } from '@src/vote.js';
 import { describeOutcome, observe } from '@src/reproducer.js';
 import { gateMode } from '@src/gates.js';
 import { moveSection, raisePhase, raiseSection } from '@src/raise.js';
@@ -38,12 +42,13 @@ import {
   modelSource,
   roleEnabled,
   readFinders,
+  readVerifiers,
   rolesFor,
   seatTable,
   slotForRole,
   turnTimeoutMs,
 } from '@src/roles.js';
-import type { Access, FinderEntry, Role, RoleSpec, RoleTable } from '@src/roles.js';
+import type { Access, FinderEntry, Role, RoleSpec, RoleTable, VerifierEntry } from '@src/roles.js';
 import { mergeAcrossFinders } from '@src/finder-merge.js';
 import type { FinderReport } from '@src/finder-merge.js';
 import { claudeMcpDefinitions, resolveClaudeGrants } from '@src/mcp.js';
@@ -108,6 +113,7 @@ import {
   parseFindings,
   parseTestVerdicts,
   parsePlan,
+  parseVote,
   readEvidence,
   reproducerOutcomesOf,
   reproductionAt,
@@ -153,6 +159,7 @@ import {
 import type { VerifyResult } from '@src/verify.js';
 import type {
   Answer,
+  Ballot,
   CheckpointCommitNote,
   ClaudeTurnResult,
   Config,
@@ -169,6 +176,7 @@ import type {
   RunState,
   RunSummary,
   TurnActivity,
+  Votes,
 } from '@src/types.js';
 
 // The accounting vocabulary lives in @src/charge.js, a leaf: the session
@@ -1344,11 +1352,11 @@ async function reviewPhase(
     // Inside the callback, for the reason given at the critique call site: a
     // held budget escalation must not cost the run the record of the review it
     // paid for.
-    const review = await withConcurrentCompaction(
+    const { found: review, unconfirmedP0 } = await withConcurrentCompaction(
       state,
       cfg,
       async () => {
-        const found = await runReview(state, cfg, cwd, plan, roles, turns);
+        const { report: found, unconfirmedP0 } = await runReview(state, cfg, cwd, plan, roles, turns);
         artifact(state, `code-review-${state.reviewRound}.json`, found);
         collectDeferred(state, found.findings);
         writeFollowUps(state, plan);
@@ -1356,7 +1364,7 @@ async function reviewPhase(
         // phase: what the run just paid 15M tokens for must survive a stop
         // between this turn and the fix that answers it.
         recordPendingFindings(state, 'review', found.findings);
-        return found;
+        return { found, unconfirmedP0 };
       },
       turns.claude,
       'reviewer',
@@ -1366,6 +1374,23 @@ async function reviewPhase(
     const decision = gate(review.findings, cfg.loop.p1Tolerance);
     const stoppers = blockingFindings(review.findings);
     sayFindings('review', review.findings, decision, cfg.loop.p1Tolerance);
+    // `review.unconfirmedP0: "halt"` (#388 Part C): after the artifact and the
+    // pending findings are written, never before - the stop is about a record
+    // that has to exist. The P0 is not moved. A resume with no answer carries it
+    // to the fix round, blocking, and casts no vote again: the votes in the
+    // artifact are the record. A person who disagrees moves it with the #142
+    // block NEEDS-INPUT.md already renders for every carried finding.
+    if (unconfirmedP0.length > 0) {
+      throw new Escalation(
+        EXIT.NEEDS_HUMAN,
+        `The review verifiers did not confirm ${unconfirmedP0.length} P0 finding(s), and ` +
+          'review.unconfirmedP0 is "halt". Each is still P0. Leave it alone and it keeps blocking: ' +
+          'the resume sends it to the fix round. To demote one, fill in its block under ' +
+          '"Change a severity" below, then resume.',
+        null,
+        unconfirmedP0,
+      );
+    }
     if (decision.pass) {
       if (decision.tolerated.length === 0) {
         recordAndSay(
@@ -1837,7 +1862,30 @@ function renderOutstanding(
  * `undefined` into a human-facing document.
  */
 function isDeferrable(f: unknown): f is Finding {
-  return hasFindingShape(f) && f.defer === true && (f.severity === 'P2' || f.severity === 'P3');
+  return (
+    hasFindingShape(f) &&
+    (f.defer === true || movedByVote(f)) &&
+    (f.severity === 'P2' || f.severity === 'P3')
+  );
+}
+
+/**
+ * A finding the review vote moved to P2 (#388 Part C).
+ *
+ * It goes to FOLLOW-UPS.md like a deferral, but is never marked `defer: true`:
+ * the fixer's prompt reads a deferral as *real, and agreed to belong in
+ * separate work*, and an unconfirmed claim is neither. The record says which of
+ * the two it is instead (`*Unconfirmed by vote:*`). Read tolerantly, because
+ * `votes` rides through stored state unvalidated.
+ */
+function movedByVote(f: Finding): boolean {
+  const votes: unknown = f.votes;
+  return (
+    typeof votes === 'object' &&
+    votes !== null &&
+    (votes as Record<string, unknown>)['outcome'] === 'unconfirmed' &&
+    f.downgraded !== undefined
+  );
 }
 
 /**
@@ -1948,6 +1996,9 @@ export function writeFollowUps(state: RunState, plan: Plan): string | null {
           .map(
             (f) =>
               `### ${f.title} \`${f.id}\`\n\n*Severity when deferred:* ${f.severity}\n\n` +
+              (movedByVote(f) && f.downgraded !== undefined
+                ? `*Unconfirmed by vote:* ${f.downgraded.reason}\n\n`
+                : '') +
               `${f.detail}\n\n*Suggested fix:* ${f.suggested_fix}\n`,
           )
           .join('\n'),
@@ -2950,6 +3001,16 @@ export interface TurnRequest {
   jsonSchema?: object | undefined;
   /** Claude only: the tools the turn may use. */
   tools?: readonly string[] | undefined;
+  /**
+   * The config path of the review seat taking this turn - `review.finders[0]`,
+   * `review.verifiers[1]` - or absent for a role's own turn (#388 Part C).
+   *
+   * Read only by the sentences that name a setting a user would edit: a seat's
+   * model, timeout or MCP grant that fails mid-turn names the seat's line rather
+   * than `roles.reviewer`, which it did not come from. Absent, every one of
+   * those sentences is byte-identical to what it was.
+   */
+  seatPath?: string | undefined;
 }
 
 export interface TurnOutcome {
@@ -3177,13 +3238,15 @@ function noteRoleProvenance(
   roles: RoleTable,
   /** The figure this turn actually ran with - `DispatchRequest.timeoutMs`. */
   timeoutMs: number,
+  /** The review seat's path, when a seat took the turn - see `TurnRequest.seatPath`. */
+  seatPath?: string,
 ): unknown {
   const spec = roles[role];
   // The guard that keeps a run setting nothing byte-identical: no per-role
   // setting, no note.
   const notes: string[] = [];
   if (spec.model !== undefined) {
-    notes.push(`[this turn ran ${modelSource(role, roles)} = "${modelFor(role, cfg, roles)}"]`);
+    notes.push(`[this turn ran ${modelSource(role, roles, seatPath)} = "${modelFor(role, cfg, roles)}"]`);
   }
   // A bare number, no unit: the key names the unit, and `proc.ts`'s own "timed
   // out after 5400000ms" is already in the same message.
@@ -3195,7 +3258,7 @@ function noteRoleProvenance(
   // itself. No orchestrator call site does that today; the tests do, and a
   // future one that starts to gets silence rather than a false statement.
   if (spec.timeoutMs !== undefined && spec.timeoutMs === timeoutMs) {
-    notes.push(`[this turn ran roles.${role}.timeoutMs = ${spec.timeoutMs}]`);
+    notes.push(`[this turn ran ${seatPath ?? `roles.${role}`}.timeoutMs = ${spec.timeoutMs}]`);
   }
   if (notes.length === 0 || !(err instanceof Error)) return err;
   // Per note, so an error that has already been through here once - and there is
@@ -3286,6 +3349,7 @@ async function claudeDispatch(
             home: os.homedir(),
             configDir: process.env['CLAUDE_CONFIG_DIR'],
           }),
+          req.seatPath ?? `roles.${req.role}`,
         );
 
   // A rotation that could not be overlapped with Codex work happens here, at a
@@ -3424,7 +3488,7 @@ async function claudeDispatch(
       },
     );
   } catch (err: unknown) {
-    throw noteRoleProvenance(err, req.role, cfg, roles, req.timeoutMs);
+    throw noteRoleProvenance(err, req.role, cfg, roles, req.timeoutMs, req.seatPath);
   }
 
   // Asked before `markSlotStarted`, which is what makes `slotForkParent` answer
@@ -4007,7 +4071,7 @@ async function codexDispatch(
       });
     });
   } catch (err: unknown) {
-    throw noteRoleProvenance(err, req.role, cfg, roles, req.timeoutMs);
+    throw noteRoleProvenance(err, req.role, cfg, roles, req.timeoutMs, req.seatPath);
   }
   const { structured, raw, sessionId, tokens, activity } = outcome;
 
@@ -4332,7 +4396,16 @@ async function runReview(
   plan: Plan,
   roles: RoleTable,
   turns: AgentTurns,
-): Promise<FindingsReport & { testChanges?: TestChanges }> {
+): Promise<{
+  report: FindingsReport & { testChanges?: TestChanges };
+  /**
+   * The P0s the vote did not confirm, under `review.unconfirmedP0: "halt"` -
+   * empty otherwise (#388 Part C). Handed back rather than thrown here because
+   * the caller writes `code-review-<n>.json`, and the stop has to come after
+   * the record of what it stopped for.
+   */
+  unconfirmedP0: Finding[];
+}> {
   // Before `log.step`, so the run never claims a reviewer started on a diff it
   // could not read. The decision that a gitless run is refused rather than
   // degraded is NOT made here - it is made by `gitPrecondition` in the preflight
@@ -4542,6 +4615,7 @@ async function runReview(
               prompt: P.withFocus(reviewPromptFor(i, false, false), f.focus),
               cwd,
               label,
+              seatPath: f.path,
             },
             turns,
             table,
@@ -4629,6 +4703,159 @@ async function runReview(
       },
     );
     return merge.report;
+  };
+  /**
+   * The vote on every blocking finding that was not reproduced (#388 Part C),
+   * after the reproducers and before the gate.
+   *
+   * Each eligible finding goes to every verifier, in sequence - every vote on
+   * finding 1, then every vote on finding 2 - for the reason the finders run in
+   * sequence. A verifier is a reviewer whose seat was swapped and whose job is a
+   * vote (`seatTable` with `VOTE_SCHEMA`): the same `runTurn`, so its timeout,
+   * charge, heartbeat and path style follow the seat. It is shown the claim and
+   * nothing about who made it, and never another verifier's vote.
+   *
+   * Not voted on: a P2 or P3, which includes everything a guard already moved;
+   * and a finding whose own reproducer reproduced, which is an observation the
+   * vote has nothing to add to - it blocks, whatever `unconfirmedP0` says.
+   */
+  const runVotes = async (
+    verifiers: readonly VerifierEntry[],
+    report: FindingsReport,
+  ): Promise<{ report: FindingsReport; held: Finding[] }> => {
+    const blocking = (f: Finding): boolean => f.severity === 'P0' || f.severity === 'P1';
+    const reproduced = (f: Finding): boolean =>
+      reproducerOutcomesOf(f).some((o) => o.verdict === 'reproduced');
+    // 1-based in the report as voted on, after reproducers: the `<n>` of the label.
+    const eligible = report.findings
+      .map((f, i) => ({ f, n: i + 1 }))
+      .filter(({ f }) => blocking(f) && !reproduced(f));
+    const notVoted = report.findings.filter((f) => blocking(f) && reproduced(f)).length;
+
+    const votes = new Map<string, Votes>();
+    let cast = 0;
+    for (const { f, n } of eligible) {
+      // The diff parts its evidence cites, or every part when it cites none
+      // of them: a claim about a file the diff never touched is still a claim
+      // about this change, and the verifier can read the rest of the tree.
+      const cited = new Set(
+        readEvidence(f.evidence).flatMap((e) => (typeof e.path === 'string' ? [e.path] : [])),
+      );
+      const touching = chunks.filter((c) => c.files.some((file) => cited.has(file)));
+      const shown = touching.length > 0 ? touching : chunks;
+      const prompt = P.votePrompt(
+        {
+          title: f.title,
+          detail: f.detail,
+          suggested_fix: f.suggested_fix,
+          ...(f.evidence === undefined ? {} : { evidence: f.evidence }),
+        },
+        shown.flatMap((c) => c.files),
+        shown.map((c) => c.diff).join('\n'),
+        plan.plan_md,
+        plan.out_of_scope,
+        state.environment,
+        roles,
+      );
+      const ballots: Ballot[] = [];
+      for (const v of verifiers) {
+        const table = seatTable(roles, v.setting, VOTE_SCHEMA);
+        const req: TurnRequest = {
+          role: 'reviewer',
+          prompt,
+          cwd,
+          label: `vote-${state.reviewRound}-${n}-v${v.k}`,
+          seatPath: v.path,
+        };
+        log.step(`${holderLabel('reviewer', table)} is checking ${f.id} (verifier ${v.k})`, {
+          id: 'turn_started',
+          data: {
+            role: 'reviewer',
+            kind: 'vote',
+            round: state.reviewRound,
+            verifier: v.k,
+            seat: v.path,
+            finding: f.id,
+          },
+        });
+        cast += 1;
+        try {
+          const outcome = await runTurn(state, cfg, req, turns, table);
+          const said = parseVote(readStructured(outcome));
+          // The verifier's own path convention, because it typed the paths -
+          // the read `groundAndRecord` makes for the reviewer.
+          const grounded = groundVoteEvidence(
+            said.evidence,
+            cwd,
+            state.dir,
+            pathStyleFor(state, 'reviewer', table),
+          );
+          const counted = countBallot(said.vote, grounded.unresolved);
+          ballots.push({
+            seat: v.path,
+            provider: v.setting.provider,
+            model: v.setting.model ?? 'default',
+            vote: said.vote,
+            counted: counted.counted,
+            reason: said.reason,
+            evidence: grounded.evidence,
+            ...(counted.countedReason === undefined ? {} : { countedReason: counted.countedReason }),
+          });
+        } catch (err: unknown) {
+          // A stop, a ceiling, a rate limit waited out past its cap: not a vote.
+          if (err instanceof Escalation || err instanceof Cancelled) throw err;
+          // Anything else is a vote not cast, and counts as one: `cannot-tell`,
+          // which can only keep the finding blocking. Too few usable votes must
+          // never let a finding through.
+          const ballot = failedBallot(v, err);
+          ballots.push(ballot);
+          log.warn(`Verifier ${v.k} (${v.path}) failed on ${req.label}, counted as cannot-tell: ${ballot.reason}`);
+        }
+      }
+      votes.set(f.id, tally(ballots, cfg.review.quorum));
+    }
+
+    const applied = applyVotes(report, votes, cfg.review.unconfirmedP0);
+    recordDowngrades(state, applied.downgraded);
+
+    const outcomes = [...votes.values()];
+    const count = (o: Votes['outcome']): number => outcomes.filter((v) => v.outcome === o).length;
+    const confirmed = count('confirmed');
+    const unconfirmed = count('unconfirmed');
+    const undecided = count('undecided');
+    const moved = applied.downgraded.length;
+    const held = applied.held.length;
+    const kept = unconfirmed - moved - held;
+    const fate = [
+      moved > 0 ? `${moved} moved to P2` : '',
+      kept > 0 ? `${kept} still blocking` : '',
+      held > 0 ? `${held} held for you` : '',
+    ].filter((s) => s !== '');
+    // Recorded, not narration only: the summary and the window read the last
+    // of these for the round, never a tally of failed turns - a resumed round
+    // that never reached here leaves none behind (Part B's rule for finders).
+    recordAndSay(
+      state,
+      'info',
+      'review_votes_tallied',
+      `review round ${state.reviewRound + 1}: ${eligible.length} findings to vote × ` +
+        `${verifiers.length} verifiers, ${cast} votes; ${confirmed} confirmed, ${unconfirmed} unconfirmed` +
+        `${fate.length > 0 ? ` (${fate.join(', ')})` : ''}, ${undecided} undecided (still blocking); ` +
+        `${notVoted} reproduced, not voted`,
+      {
+        round: state.reviewRound,
+        findings: eligible.length,
+        verifiers: verifiers.length,
+        votes: cast,
+        confirmed,
+        unconfirmed,
+        moved,
+        held,
+        undecided,
+        reproduced: notVoted,
+      },
+    );
+    return { report: applied.report, held: applied.held };
   };
   for (const [i, chunk] of chunks.entries()) {
     const listed = listedFor(chunk);
@@ -4748,7 +4975,17 @@ async function runReview(
   // Into the round's `code-review-<n>.json`, which the caller writes once from
   // this. Absent rather than empty when no judge file was touched, so that
   // artifact is byte-for-byte what it was before (#112).
-  return testChanges === undefined ? proven : { ...proven, testChanges };
+  //
+  // The vote comes after the reproducers and inside this function for the same
+  // two reasons (#388 Part C): it is a decision about the merged round, and its
+  // record belongs in the one artifact the caller writes. With no verifier,
+  // exactly the report of every round before it: no turn, no `votes`, no event.
+  const verifiers = readVerifiers(cfg);
+  const voted = verifiers.length === 0 ? { report: proven, held: [] } : await runVotes(verifiers, proven);
+  return {
+    report: testChanges === undefined ? voted.report : { ...voted.report, testChanges },
+    unconfirmedP0: voted.held,
+  };
 }
 
 /**
@@ -5204,9 +5441,13 @@ export function writeEscalation(state: RunState, escalation: Escalation): string
   }
 
   if (escalation.findings && escalation.findings.length > 0) {
-    lines.push('## Outstanding P1 findings\n');
+    // A stop for the vote (#388 Part C) lists what the verifiers said, each
+    // ballot with its reason; every other stop renders exactly as it did.
+    const voted = escalation.findings.every((f) => f.severity === 'P0' && f.votes?.outcome === 'unconfirmed');
+    lines.push(voted ? '## Unconfirmed P0 findings\n' : '## Outstanding P1 findings\n');
     for (const f of escalation.findings) {
       lines.push(`### ${f.title} \`${f.id}\`\n${f.detail}\n\n*Suggested fix:* ${f.suggested_fix}\n`);
+      if (voted && f.votes !== undefined) lines.push(`${describeVotes(f.votes).join('\n')}\n`);
     }
   }
 

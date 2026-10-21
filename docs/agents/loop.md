@@ -490,9 +490,8 @@ record them, and set `VIBE_CLI_FIXTURES=pending` on its own gate.
 additional finders, the verifiers, the quorum and what an unconfirmed P0 does. It is validated
 by `validateReview` in `src/config.ts`, and each seat goes through `roleSetting`, the reader
 `roles.<role>` uses, which now takes a config path (`review.finders[1]`) for its messages.
-The settings screen edits it (`app/src/cockpit/seatform.ts`) and `vibe doctor` lists it,
-marked *not used yet*. `runReview`, the prompts, the labels and the artifacts are untouched,
-so a run that names seats behaves exactly as one that names none.
+The settings screen edits it (`app/src/cockpit/seatform.ts`) and `vibe doctor` lists it.
+Part A changed no run; Parts B and C below are what read it.
 
 **The slots a seat will use exist and are unused.** `fresh-claude` and `fresh-codex` in
 `src/slots.ts` never persist and store nothing; `seatSlot` picks one. A Claude seat must never
@@ -549,3 +548,56 @@ children, and is its own change.
 - **⚑ The first finder keeps its memory.** `roles.reviewer` keeps its Codex `review` thread
   across rounds while additional finders are fresh every round, so it is less independent than
   the others. Accepted, because a fresh first seat would break the default run's identity.
+
+**Part C runs the vote.** Inside `runReview`, after the merge and `proveFindings` and before
+the return, so the caller still writes `code-review-<n>.json` once and the votes are in it
+(#142: that file is never rewritten). The order is merge, then reproducers, then votes, then
+the gate. With `review.verifiers: []` nothing runs: no turn, no `votes` key, no event.
+
+- **What is voted on.** Every P0 and P1 left after the reproducers, except one whose own
+  reproducer *reproduced* - that is an observation, and a vote has nothing to add to it; it
+  blocks whatever `unconfirmedP0` says. A finding a guard already moved is P2 by then, and P2
+  and P3 are never voted on. Each eligible finding goes to every verifier, in sequence (finding
+  1 to every verifier, then finding 2), labelled `vote-<r>-<n>-v<k>`: `<n>` is the finding's
+  1-based place in the report as voted on, `v1` is `review.verifiers[0]`. `seatOf` reads it
+  back as `kind: 'vote'`, `verifier: k`.
+- **A verifier is a reviewer whose seat was swapped and whose job is a vote.** `seatTable(roles,
+  setting, VOTE_SCHEMA)` and `runTurn`, as a finder, and both providers take the schema off the
+  spec. `votePrompt` takes the claim's title, detail, evidence and fix, the plan and its
+  out-of-scope list, and the diff parts its evidence cites (every part when it cites none of
+  them). It has no argument through which `foundBy`, the id, the severity, the id's history or
+  another ballot could reach it: a verifier that knew how others voted would be counting heads.
+- **The tally is fail-closed** (`src/vote.ts`, pure). With `n` verifiers and quorum `q`
+  (`review.quorum`, or `floor(n/2)+1`): *confirmed* when `real >= q`; *unconfirmed* only when
+  `notReal > n - q`, so the quorum is out of reach even if every `cannot-tell` had been `real`;
+  otherwise *undecided*, which keeps blocking. **Why `cannot-tell` blocks:** the vote exists to
+  stop a *wrong* blocker buying a fix round, and must never be what lets a *real* one through. A
+  doubtful verifier, a turn that failed after `runTurn`'s own retries (recorded with the error's
+  first line) and a `not-real` that points at nothing all count as not having voted against. An
+  `Escalation`, a stop or the budget ceiling propagates; they are not votes.
+- **A `not-real` must point at something** (#48's rule, turned round). Its evidence goes through
+  `groundFindings` itself (`groundVoteEvidence` wraps it as a one-finding P1), by the seat's path
+  style; one that resolves to nothing is recorded as cast and counted as `cannot-tell`, with
+  `countedReason` saying why. A `real` vote needs no evidence of its own.
+- **What unconfirmed does** (`applyVotes` in `src/evidence.ts`). A P1 goes to P2 through `toP2`,
+  so it is a guard's downgrade: `downgraded.reason` names the tally, `finding_downgraded` is
+  recorded, the gate stops counting it, and a person can restore it (#142). A P0 follows
+  `unconfirmedP0`: `demote` moves it the same way, `block` leaves it, and `halt` leaves it and
+  hands it back to `reviewPhase`, which writes the artifact and the pending findings and *then*
+  throws a needs-input `Escalation`. The stop is thrown by the caller because the caller writes
+  the record. NEEDS-INPUT.md lists every ballot, and the existing #142 *Change a severity* block
+  is how a person demotes it - a person's change, through `move`, with no new parser. A resume
+  goes straight to the fix round with the carried findings, so it never re-votes that round.
+- **FOLLOW-UPS.md.** It listed only `defer: true` findings, and a vote-moved P2 is not one: the
+  fixer's prompt reads a deferral as *real, and agreed to belong in separate work*, which an
+  unconfirmed claim is not. So `isDeferrable` also takes a P2 the vote moved, and the file says
+  `*Unconfirmed by vote:*` beside it.
+- **Narration and the summary.** Each vote turn's `turn_started` carries `kind: 'vote'`,
+  `verifier`, `seat` and `finding`. One `review_votes_tallied` event per round, only with
+  verifiers, counts what was voted on and what it came to. The summary's `Votes:` line takes its
+  cost from `chargedTurns` (`turn_failed` included) and its outcome from the last tally event,
+  Part B's rule.
+- **Preflight covers every seat.** `mcpRefusals` asks about each verifier's grants by path, and
+  `adjudicate`'s Codex sandbox verdict counts a Codex that only a seat uses (`seatProviders`).
+  Both agents were already probed on every run. A seat's turn that fails mid-turn names its own
+  line (`TurnRequest.seatPath`), not `roles.reviewer`.
