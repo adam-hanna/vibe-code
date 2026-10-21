@@ -408,14 +408,14 @@ Nothing in the tooling does this for you; the measurements are in
 6. Verify from a clean checkout: `npm run typecheck`, `npm test`, `npm pack --dry-run`.
 7. Merge, then tag: `git tag -a v<version> -m "..." && git push origin v<version>`.
 8. **When `release.yml` has finished on the tag, verify the draft before publishing it:**
-   `gh release download v<version> --pattern 'Vibe-macos-arm64.dmg' --pattern SHA256SUMS`, then
-   `gh attestation verify Vibe-macos-arm64.dmg --repo adam-hanna/vibe-code` and
+   `gh release download v<version> --pattern 'Vibe-macos-universal.dmg' --pattern SHA256SUMS`, then
+   `gh attestation verify Vibe-macos-universal.dmg --repo adam-hanna/vibe-code` and
    `sha256sum -c SHA256SUMS --ignore-missing`. An attestation is stored against a file's digest,
    not against the release, so it verifies while the release is still a draft.
 9. **Wait for `release.yml` and `mobile.yml` on the tag, install the draft on at least one machine and both
    phone apps on a phone, then publish the draft release.** The APK from the draft must install
    *over* the previous release's (same key, higher `versionCode`), and the `.ipa` must sign and
-   open through AltStore or Sideloadly; then pair each with the desktop. The workflow builds the Windows, macOS (Apple Silicon) and Linux bundles
+   open through AltStore or Sideloadly; then pair each with the desktop. The workflow builds the Windows, macOS (universal) and Linux bundles
    into one draft and never publishes it. A tag that is not `package.json`'s version still
    builds, with a warning, and the bundles carry `package.json`'s version - so a throwaway
    `v<version>-rc.N` tag is how to try the workflow, and it yields a draft pre-release. A tag

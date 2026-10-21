@@ -38,7 +38,10 @@ properly:
   the real host from the built `.app` and fails unless it says `ready`. To check a bundle
   by hand: `echo '' | Vibe.app/Contents/MacOS/node
   Vibe.app/Contents/Resources/host/dist/src/hostmain.js` must print a `ready` frame, and
-  `codesign -d --entitlements - Vibe.app/Contents/MacOS/node` must list `allow-jit`.
+  `codesign -d --entitlements - Vibe.app/Contents/MacOS/node` must list `allow-jit`. The bundle
+  is universal (#325, `releases.md`), so run the same line again under `arch -x86_64` for the
+  slice an Intel Mac runs, and `lipo -archs` on each file in `Contents/MacOS` must say
+  `x86_64 arm64`.
 
   **A white window from the released AppImage is a second cause with the same symptom**
   (#331). The variable above was set and did not help. WebKit aborted at start-up with
