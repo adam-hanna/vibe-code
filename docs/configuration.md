@@ -68,9 +68,17 @@ What a role does not choose is decided by its job. Writing roles get a writable 
 
 ## `review`
 
-**In this release the `review` lists are accepted and validated, but no run uses them yet.** A run that names finders or verifiers here runs exactly as one that names none: one reviewer, whose P0 and P1 findings go to a fix round. The section exists now so that your settings, the desktop settings screen and `vibe doctor` are in place before the loop starts reading it (#388). `vibe doctor` lists the seats you configured and marks them *not used yet*.
+**`review.finders` is used; `review.verifiers`, `review.quorum` and `review.unconfirmedP0` are accepted and validated, but no run uses them yet (#388).** A run that names only verifiers runs exactly as one that names none. `vibe doctor` lists your finders as used and marks the verifiers, the quorum and `unconfirmedP0` *not used yet*.
 
-What it is for: more finders, which look at the change independently of each other, and verifiers, which vote on each blocking finding before it can block.
+What it is for: more finders, which look at the change independently of each other, and verifiers, which will vote on each blocking finding before it can block.
+
+**What a finder does.** `roles.reviewer` reviews every part of the diff first, exactly as it does with no finders. Then each finder, in order, reviews every part too, with the same prompt the reviewer gets for that part: the same diff, plan, last implementer report, reproducer gates and judge files. A finder never sees what another finder found. A finder that names `focus` gets one extra section at the end of its prompt, `## Focus for this review`, holding that text; no other finder's prompt changes.
+
+**Where it sits.** Every finder turn is a fresh, read-only conversation on its own provider: it never resumes a thread, never shares the implementer's Claude session, and a Codex finder runs under `codex.sandbox`, as the reviewer does. Its turns are labelled `review-<round>-f<k>`, or `review-<round>-f<k>-part<i>` when the diff is split, where `f1` is `review.finders[0]`. A finder's `mcpServers` are checked before the first turn, like a role's.
+
+**How findings are merged.** Two findings from different finders are one defect when they cite the same code location (the same path and line) or when their titles say the same thing. Otherwise both are kept. A merged finding keeps the most blocking severity, and the title, detail and fix of the finder that gave it. Its citations are the union. Two findings from the same finder are never merged. If two unrelated findings share an id, the later one is renamed `<id>-f<k>`. When at least one finder is configured, every finding in `code-review-<n>.json` carries `foundBy`: which seats raised it, with each seat's provider, configured model (`default` when none was set) and the id it used.
+
+**What it costs.** One extra turn per diff part per finder, every review round, all of it inside `budget.maxTokens`. There is no separate ceiling. A finder whose turn fails, other than by a stop or a ceiling, is recorded as `review_finder_failed` and contributes nothing; the round goes on with the others, and the round says how many finders reported (*"2 of 3 reported"*). The run summary's `Finders:` line says what the finders cost in turns and tokens.
 
 ```json
 {
@@ -85,12 +93,12 @@ What it is for: more finders, which look at the change independently of each oth
 
 | Key | Default | Meaning |
 |---|---|---|
-| `review.finders` | `[]` | Finders **in addition to** `roles.reviewer`, which stays the first finder and keeps its own settings. Each entry is written the way a role is: a provider name, or an object with `provider` (required), `model`, `effort`, `timeoutMs` and `mcpServers`. A finder may also take `focus`, a non-empty string saying what to look at hardest. No prompt uses `focus` yet. |
+| `review.finders` | `[]` | Finders **in addition to** `roles.reviewer`, which stays the first finder and keeps its own settings. Each entry is written the way a role is: a provider name, or an object with `provider` (required), `model`, `effort`, `timeoutMs` and `mcpServers`. A finder may also take `focus`, a non-empty string saying what to look at hardest; it is appended to that finder's prompt only. |
 | `review.verifiers` | `[]` | The seats that will vote on each blocking finding. Entries take exactly a role's keys. A `focus` on a verifier is refused as an unknown key. |
 | `review.quorum` | `null` | How many `real` votes confirm a finding. `null` means a majority of the verifiers, `floor(n/2)+1`. A whole number must be at least 1 and at most the number of verifiers, and it is refused when there are no verifiers. |
 | `review.unconfirmedP0` | `"block"` | What a P0 that the vote did not confirm will do. `"block"` records the votes and it still blocks. `"halt"` stops the run and asks you, showing every vote. `"demote"` moves it to P2, as an unconfirmed P1 is moved. |
 
-Every finder and verifier will run as a fresh, read-only turn. It never resumes a conversation and never shares the implementer's session. A refused entry is named by its index, counted from 0, in the same words a role's mistake gets, for example `review.finders[1].effort is "huge"; must be one of low, medium, high, xhigh, max`.
+Every finder runs, and every verifier will run, as a fresh, read-only turn. It never resumes a conversation and never shares the implementer's session. A refused entry is named by its index, counted from 0, in the same words a role's mistake gets, for example `review.finders[1].effort is "huge"; must be one of low, medium, high, xhigh, max`.
 
 `review` may be set in the settings for all projects and in a project's `vibe.config.json`. The project wins key by key, and a list is replaced whole: a project that names `finders` replaces the global file's finders and keeps its `quorum`.
 

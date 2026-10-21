@@ -2751,13 +2751,15 @@ export function Settings({
       {/* ---- more review seats, and a vote (#388) ------------------------ */}
       <section className={S.block}>
         <h3 className={S.h}>who else reviews, and who votes</h3>
-        {/* Part A: saved and validated, read by no run. Said first, so nobody
-            configures a vote and believes a run is holding findings to it. */}
+        {/* Finders run since #388 Part B; the vote is still saved and read by no
+            run. Said first, so nobody configures a vote and believes a run is
+            holding findings to it. */}
         <p className={S.note}>
-          This version saves these lists and checks them, but no run uses them yet: a run reviews
-          with the reviewer above alone. Finders are reviewers in addition to that one, each looking
-          at the change without seeing the others&apos; findings. Verifiers will vote on each
-          blocking finding before it can block.
+          Finders are reviewers in addition to the one above, each reviewing every part of the
+          change after it without seeing the others&apos; findings: one extra turn per part per
+          finder, every review round. Verifiers will vote on each blocking finding before it can
+          block — this version saves them, the quorum and what an unconfirmed P0 does, and checks
+          them, but no run uses them yet.
         </p>
         <h4 className={S.h4}>finders</h4>
         <SeatList

@@ -487,6 +487,20 @@ export const p0s = (findings: readonly Finding[]): Finding[] =>
 export const blockers = (findings: readonly Finding[]): Finding[] =>
   findings.filter((f) => f.severity === 'P0' || f.severity === 'P1');
 
+/**
+ * Most blocking first, so a later chunk can only ever raise a finding's severity.
+ *
+ * Here rather than in the orchestrator since #388 Part B: the merge across
+ * finders (`src/finder-merge.ts`) ranks by the same table, and two copies would
+ * be two orders a severity could fall between.
+ */
+export const SEVERITY_RANK = {
+  P0: 0,
+  P1: 1,
+  P2: 2,
+  P3: 3,
+} satisfies Record<Severity, number>;
+
 export interface Gate {
   /** True when the loop may move on. */
   pass: boolean;

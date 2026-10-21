@@ -19,15 +19,16 @@ import type { Handlers } from './helpers/loop-harness.js';
 import type { Config, ReviewConfig, RunState } from '@src/types.js';
 
 /**
- * `review` is groundwork in this release (#388 Part A): a run that names seats
- * behaves exactly as one that names none.
+ * Most of `review` is still groundwork (#388 Part A): a run that names
+ * verifiers behaves exactly as one that names none.
  *
  * The first case pins the default loop's turn labels as they are today - plan,
  * critique, implement, a blocking review, a fix round and an approving review.
- * The second runs the same loop with two extra finders and two verifiers and
- * requires the identical labels, the identical `code-review-<n>.json` files and
- * the identical event sequence. A run that read the section anywhere would
- * show it in one of those three.
+ * The second runs the same loop with two verifiers, a quorum and a non-default
+ * `unconfirmedP0` and requires the identical labels, the identical
+ * `code-review-<n>.json` files and the identical event sequence. A run that read
+ * those keys anywhere would show it in one of those three. (Finders are used
+ * since #388 Part B; `review-finders-loop.test.ts` pins what they change.)
  */
 
 const LABELS = ['plan', 'critique-0', 'implement', 'review-0', 'fix-1', 'review-1'];
@@ -65,10 +66,14 @@ test('a default run takes exactly the turns it always has', async () => {
   assert.deepEqual(Object.keys(reviews(state)), ['code-review-0.json', 'code-review-1.json']);
 });
 
-test('naming finders and verifiers changes nothing a run does, in this release', async () => {
+// Finders are used since #388 Part B, so this claim now holds for the rest of
+// the section only: naming verifiers, a quorum and `unconfirmedP0` changes
+// nothing a run does until Part C. What finders change is pinned in
+// `review-finders-loop.test.ts`.
+test('naming verifiers, a quorum and unconfirmedP0 changes nothing a run does, in this release', async () => {
   const plain = await run(DEFAULTS.review);
   const seated = await run({
-    finders: [{ provider: 'claude', model: 'opus', focus: 'concurrency' }, 'codex'],
+    finders: [],
     verifiers: ['codex', { provider: 'claude', effort: 'high' }],
     quorum: 2,
     unconfirmedP0: 'halt',

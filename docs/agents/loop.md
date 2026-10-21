@@ -486,7 +486,7 @@ record them, and set `VIBE_CLI_FIXTURES=pending` on its own gate.
 
 ## More finders, and a vote (#388)
 
-**Part A is configuration only, and no run reads it.** `review` in `DEFAULTS` holds the
+**Part A was configuration only.** `review` in `DEFAULTS` holds the
 additional finders, the verifiers, the quorum and what an unconfirmed P0 does. It is validated
 by `validateReview` in `src/config.ts`, and each seat goes through `roleSetting`, the reader
 `roles.<role>` uses, which now takes a config path (`review.finders[1]`) for its messages.
@@ -499,3 +499,53 @@ so a run that names seats behaves exactly as one that names none.
 sit on `main`, which is the implementer's own session, and no seat may resume `review` or
 `judge`. They are left out of a fork's census because they hold no conversation to fork.
 Part B seats the finders on them, and Part C the verifiers.
+
+**Part B runs the finders.** A finder is a reviewer whose seat was swapped, not a second
+dispatch path: `seatTable` in `src/roles.ts` returns the run's table with `reviewer` replaced
+by a spec built from the finder's entry (through the same `specFor` `tableFor` uses) on
+`seatSlot(provider)`. `runReview` then calls the ordinary `runTurn` with that table, so the
+timeout, the path style, memory, the holder's name, the charge and the heartbeat follow the
+seat with no code of their own. `roles.reviewer` is the first finder, byte for byte; with
+`review.finders: []` the round is exactly what it was, with no `foundBy`, no new event and no
+new narration. Finders run in sequence after the first has reviewed every part. Running them at
+once needs the cancel latch, the charge seam, `saveState` and the heartbeat proven safe with two
+children, and is its own change.
+
+- **The dispatch guard.** `claudeDispatch` asks `perTurnSlot(slot)` (`src/slots.ts`) before
+  `shouldRotate` and before `recordTurnContext`. Both are about `main`: asked with a finder's
+  model, which `main` was never measured under, `shouldRotate` reads "unmeasured, so rotate"
+  after any implement turn, and `recordTurnContext` would overwrite `main`'s occupancy with a
+  fresh finder's. `fresh-slot-dispatch.test.ts` switches context on to prove it, with a control
+  that does rotate a Claude reviewer on `main`.
+- **Grounding is per turn, attribution stays the role.** Each finder turn goes through
+  `groundAndRecord` as a chunk does, so the guards judge it by what it did, and `raisedBy` stays
+  `reviewer`. A finder's own parts merge with `mergeReviewReports` first.
+- **The merge across finders** (`src/finder-merge.ts`) is by claim, and on doubt it keeps both.
+  Two findings from different finders are one defect when they share a `code` citation (same
+  normalised path, same line, both present) or when `similarity(title) >= REPHRASE_THRESHOLD`.
+  That threshold was measured for question rephrasing and recycled finding labels, not for this
+  population, and is reused rather than tuned until runs with several finders exist to measure.
+  Greedy in finder order; one finder is never merged with itself. The winner is the most
+  blocking (`SEVERITY_RANK`, now in `src/validate.ts`), ties to the earliest; it brings its own
+  text and its own `downgraded`, because a guard's record is never moved onto a finding it did
+  not judge. The id is the earliest finder's; an unrelated finding that collides is re-keyed
+  `<id>-f<k>`, since pending findings, `severityChanges` and the oscillation census are keyed by
+  id. `foundBy` keeps the id each finder used, which is also the id its own downgrade events
+  name. After the merge the pipeline is unchanged: `proveFindings`, then the artifact once, then
+  `recordPendingFindings`.
+- **The first finder owns `reviewCoverage` and `testChanges`** (decision 6). Additional
+  finders' test verdicts are dropped: two judges' verdicts on one file would need a rule for
+  disagreeing, and inventing one is out of scope.
+- **A failed additional finder does not end the round** (decision 7). An `Escalation` or a
+  `Cancelled` propagates as it would for the first finder; anything else is recorded as
+  `review_finder_failed` and that finder contributes nothing. Losing an extra seat can only leave
+  out what that seat alone would have raised, so the run falls back to what a default config
+  does, and `review_finders_merged` says "2 of 3 reported".
+- **The summary reads the last merge event, not a tally of failures.** `review_finders_merged`
+  is recorded, and only an attempt that finished its merge writes one; a resumed round re-reviews
+  from scratch, so a `review_finder_failed` from the attempt it replaced must not lower the
+  count. The cost half comes from `chargedTurns`, `turn_failed` included. The window's "found by
+  n of m" takes `m` from the same frame, which `replayRun` carries, and never the configured count.
+- **⚑ The first finder keeps its memory.** `roles.reviewer` keeps its Codex `review` thread
+  across rounds while additional finders are fresh every round, so it is less independent than
+  the others. Accepted, because a fresh first seat would break the default run's identity.

@@ -1153,6 +1153,17 @@ function judgeLine(change: FileChange): string {
 }
 
 /**
+ * An additional finder's focus, appended to its review prompt only (#388 Part B).
+ *
+ * Without one the prompt is returned as it came, so a finder with no `focus`
+ * reads exactly what a memoryless reviewer reads. Appended rather than woven in,
+ * so no other finder's prompt - and no default run's - changes a byte.
+ */
+export function withFocus(prompt: string, focus: string | undefined): string {
+  return focus === undefined ? prompt : `${prompt}\n\n## Focus for this review\n\n${focus}`;
+}
+
+/**
  * The block asking for a verdict on each change to the judge (#112).
  *
  * The definition of "justified" is AGENTS.md's rule for when a test may be

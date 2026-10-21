@@ -354,7 +354,8 @@ export const SLOTS: Record<SlotName, SlotSpec> = {
    * settled rule - a persisted Codex thread never holds a writing role - cannot
    * be broken through it, and a seat never inherits another turn's judgement.
    * Kept apart from `write` so a log, a fork record or a test that names the
-   * slot says which job it was. Unused by the loop until #388 Part B.
+   * slot says which job it was. Where every additional review finder's Codex
+   * turn runs (#388 Part B).
    */
   'fresh-codex': {
     provider: 'codex',
@@ -376,7 +377,8 @@ export const SLOTS: Record<SlotName, SlotSpec> = {
    *
    * Client-origin, because `claude` is spawned under an id - but it stores none
    * and has no `reset`, so `ensureSlotId` mints a new id for every turn and
-   * nothing about the run's state changes. Unused by the loop until Part B.
+   * nothing about the run's state changes. Where every additional review
+   * finder's Claude turn runs (#388 Part B).
    */
   'fresh-claude': {
     provider: 'claude',
@@ -399,6 +401,19 @@ export const SLOTS: Record<SlotName, SlotSpec> = {
  * that are not losses.
  */
 const PER_TURN_SLOTS: ReadonlySet<SlotName> = new Set<SlotName>(['fresh-claude', 'fresh-codex']);
+
+/**
+ * Whether this slot holds no conversation of the run: one id per turn, nothing
+ * stored (#388 Part B).
+ *
+ * The one question dispatch asks before acting on a run's conversation on a
+ * turn's behalf. A finder on a fresh slot must not decide that `main` needs
+ * rotating, and must not overwrite the record of how full `main` is - those
+ * belong to the implementer's session, which this turn never spoke to.
+ */
+export function perTurnSlot(slot: SlotName): boolean {
+  return PER_TURN_SLOTS.has(slot);
+}
 
 export function slotId(state: RunState, slot: SlotName): string | null {
   return SLOTS[slot].id(state);
@@ -698,7 +713,7 @@ export function forkedSlotFields(parent: RunState, cfg: Config): ForkedSlotField
   const pending: Partial<Record<SlotName, ForkPendingEntry>> = {};
 
   for (const slot of Object.keys(SLOTS) as SlotName[]) {
-    if (PER_TURN_SLOTS.has(slot)) continue;
+    if (perTurnSlot(slot)) continue;
     const spec = SLOTS[slot];
     const parentId = spec.id(parent);
     if (!spec.persists(cfg)) {

@@ -28,6 +28,7 @@ const card = (startedAt: number, phase = 'planning'): RoundCard => ({
   work: null,
   verify: null,
   census: null,
+  finders: null,
   commit: null,
   questions: null,
 });

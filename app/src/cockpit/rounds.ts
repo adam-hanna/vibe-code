@@ -2,6 +2,7 @@ import type {
   Census,
   Commit,
   CycleKind,
+  FinderMerge,
   PhaseGroup,
   QuestionRound,
   Run,
@@ -106,6 +107,15 @@ export interface RoundCard {
   verify: VerifyPass | null;
   /** What the gate made of this round's findings, or null. `1e` has the detail. */
   census: Census | null;
+  /**
+   * What this round's review finders came to, or null (#388 Part B).
+   *
+   * Null on every round with no additional finder, and on a round this window
+   * was not told about. Attached by arrival, as the census is. The findings pane
+   * reads `reported` off it as the denominator of a finding's provenance, and
+   * says none rather than the configured count when it is null.
+   */
+  finders: FinderMerge | null;
   /**
    * What this round committed, or null (#223).
    *
@@ -236,6 +246,7 @@ export function rounds(run: Run): readonly RoundCard[] {
     work: lastWork(phase.turns),
     verify: null,
     census: null,
+    finders: null,
     commit: null,
     questions: null,
   }));
@@ -254,6 +265,11 @@ export function rounds(run: Run): readonly RoundCard[] {
     const i = during(cards, census.at, census.seq);
     const card = cards[i];
     if (card !== undefined) cards[i] = { ...card, census };
+  }
+  for (const merge of run.finderMerges) {
+    const i = during(cards, merge.at, merge.seq);
+    const card = cards[i];
+    if (card !== undefined) cards[i] = { ...card, finders: merge };
   }
   for (const commit of run.commits) {
     const i = during(cards, commit.at, commit.seq);

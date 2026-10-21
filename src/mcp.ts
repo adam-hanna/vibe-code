@@ -4,8 +4,8 @@ import path from 'node:path';
 import { agentEnv } from '@src/auth.js';
 import type { RunFn } from '@src/proc.js';
 import { setOwn } from '@src/runtime.js';
-import { mcpServersFor, roleEnabled, ROLE_NAMES } from '@src/roles.js';
-import type { Role, RoleTable } from '@src/roles.js';
+import { mcpServersFor, readFinders, roleEnabled, ROLE_NAMES } from '@src/roles.js';
+import type { FinderEntry, Role, RoleTable } from '@src/roles.js';
 import type { Config } from '@src/types.js';
 
 /**
@@ -66,15 +66,20 @@ function enforcementLabel(provider: 'claude' | 'codex'): string {
  * two mechanisms with the Codex caveat. Lines, unindented, for a caller to
  * place.
  */
-export function describeMcp(roles: RoleTable): string[] {
+export function describeMcp(roles: RoleTable, finders: readonly FinderEntry[] = []): string[] {
   // `role:` rather than doctor's bare `role` column, so the line that states a
   // seat's model and timeout stays the only one that starts with its name.
+  // Padded to the role names alone, so a config with no finder prints exactly
+  // what it did before finders were seated (#388 Part B).
   const width = Math.max(...ROLE_NAMES.map((role) => role.length)) + 1;
-  const lines = ROLE_NAMES.map((role) => {
-    const granted = mcpServersFor(role, roles);
+  const row = (label: string, granted: readonly string[], provider: 'claude' | 'codex'): string => {
     const named = granted.length === 0 ? 'none' : granted.join(', ');
-    return `${`${role}:`.padEnd(width)}  ${named}  (${enforcementLabel(roles[role].provider)})`;
-  });
+    return `${label.padEnd(width)}  ${named}  (${enforcementLabel(provider)})`;
+  };
+  const lines = [
+    ...ROLE_NAMES.map((role) => row(`${role}:`, mcpServersFor(role, roles), roles[role].provider)),
+    ...finders.map((f) => row(`finder ${String(f.k)}:`, f.setting.mcpServers ?? [], f.setting.provider)),
+  ];
   return [
     ...lines,
     enforcementLabel('claude'),
@@ -172,19 +177,25 @@ export function resolveClaudeGrants(
   role: Role,
   granted: readonly string[],
   definitions: ReadonlyMap<string, Record<string, unknown>>,
+  /**
+   * The setting the grant was read from, as a message names it. A role's own
+   * path unless said otherwise; a review finder passes `review.finders[<i>]`
+   * (#388 Part B), so its refusal names the line a user would edit.
+   */
+  subject = `roles.${role}`,
 ): Record<string, Record<string, unknown>> {
   const out: Record<string, Record<string, unknown>> = {};
   for (const name of granted) {
     if (isClaudeAiConnector(name)) {
       throw new Error(
-        `roles.${role}.mcpServers names "${name}", a claude.ai connector. Its definition is in ` +
+        `${subject}.mcpServers names "${name}", a claude.ai connector. Its definition is in ` +
           'no file vibe can read, so it cannot be re-supplied under --strict-mcp-config.',
       );
     }
     const def = definitions.get(name);
     if (def === undefined) {
       throw new Error(
-        `roles.${role}.mcpServers names "${name}", which is in none of ~/.claude.json (user ` +
+        `${subject}.mcpServers names "${name}", which is in none of ~/.claude.json (user ` +
           'or this project) or .mcp.json.',
       );
     }
@@ -348,23 +359,44 @@ export interface McpRefusalContext {
  */
 export async function mcpRefusals(cfg: Config, roles: RoleTable, ctx: McpRefusalContext): Promise<string[]> {
   const refusals: string[] = [];
-  const asking = ROLE_NAMES.filter(
-    (role) => roleEnabled(role, cfg) && mcpServersFor(role, roles).length > 0,
-  );
+  // Every seat that named servers, as the setting a message names: the enabled
+  // roles first, in table order, then each review finder (#388 Part B) - a
+  // finder that names a server nothing defines would otherwise pass here and
+  // fail only at its first turn, in the middle of a review.
+  const asking: Grantee[] = [
+    ...ROLE_NAMES.filter((role) => roleEnabled(role, cfg) && mcpServersFor(role, roles).length > 0).map(
+      (role): Grantee => ({
+        role,
+        subject: `roles.${role}`,
+        provider: roles[role].provider,
+        servers: mcpServersFor(role, roles),
+      }),
+    ),
+    ...readFinders(cfg)
+      .filter((f) => (f.setting.mcpServers ?? []).length > 0)
+      .map(
+        (f): Grantee => ({
+          role: 'reviewer',
+          subject: f.path,
+          provider: f.setting.provider,
+          servers: f.setting.mcpServers ?? [],
+        }),
+      ),
+  ];
   if (asking.length === 0) return refusals;
 
-  const claudeRoles = asking.filter((role) => roles[role].provider === 'claude');
-  if (claudeRoles.length > 0) {
+  const claudeSeats = asking.filter((g) => g.provider === 'claude');
+  if (claudeSeats.length > 0) {
     const definitions = claudeMcpDefinitions({
       cwd: ctx.cwd,
       repoDir: ctx.repoDir,
       home: ctx.home ?? os.homedir(),
       configDir: ctx.configDir ?? process.env['CLAUDE_CONFIG_DIR'],
     });
-    for (const role of claudeRoles) {
-      for (const name of mcpServersFor(role, roles)) {
+    for (const seat of claudeSeats) {
+      for (const name of seat.servers) {
         try {
-          resolveClaudeGrants(role, [name], definitions);
+          resolveClaudeGrants(seat.role, [name], definitions, seat.subject);
         } catch (err) {
           refusals.push(err instanceof Error ? err.message : String(err));
         }
@@ -372,8 +404,8 @@ export async function mcpRefusals(cfg: Config, roles: RoleTable, ctx: McpRefusal
     }
   }
 
-  const codexRoles = asking.filter((role) => roles[role].provider === 'codex');
-  if (codexRoles.length > 0) {
+  const codexSeats = asking.filter((g) => g.provider === 'codex');
+  if (codexSeats.length > 0) {
     let listed: string[] | null = null;
     try {
       listed = await listCodexMcpServers(ctx.exec, ctx.codexBin(), ctx.cwd, codexEffortOverride(cfg.codex.effort));
@@ -381,11 +413,11 @@ export async function mcpRefusals(cfg: Config, roles: RoleTable, ctx: McpRefusal
       refusals.push(err instanceof Error ? err.message : String(err));
     }
     if (listed !== null) {
-      for (const role of codexRoles) {
-        for (const name of mcpServersFor(role, roles)) {
+      for (const seat of codexSeats) {
+        for (const name of seat.servers) {
           if (!listed.includes(name)) {
             refusals.push(
-              `roles.${role}.mcpServers names "${name}", which codex mcp list does not report in ` +
+              `${seat.subject}.mcpServers names "${name}", which codex mcp list does not report in ` +
                 `${ctx.cwd}.`,
             );
           }
@@ -394,4 +426,13 @@ export async function mcpRefusals(cfg: Config, roles: RoleTable, ctx: McpRefusal
     }
   }
   return refusals;
+}
+
+/** One seat that named MCP servers: a role, or a review finder in the reviewer's job. */
+interface Grantee {
+  role: Role;
+  /** The setting's path, as a refusal names it. */
+  subject: string;
+  provider: 'claude' | 'codex';
+  servers: readonly string[];
 }

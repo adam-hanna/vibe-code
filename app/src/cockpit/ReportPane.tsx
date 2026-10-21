@@ -5,14 +5,14 @@ import { Button } from '@/ui/button';
 import { cn } from '@/lib/utils';
 import { Counts } from './Counts';
 import { Caret, Section } from './Disclosure';
-import { ofKind, readReport } from './artifacts';
+import { foundByLine, ofKind, readReport } from './artifacts';
 import { SEVERITIES } from './model';
 import { DOCUMENT, EMPTY, FILE, HEAD, LABEL, NOTE, PANE } from './pane';
 import { useArtifact, useArtifacts, noText } from './useArtifacts';
 import { sizeOf } from './PlansPane';
 import type { Severity } from '../design';
 import type { Classified, FullFinding } from './artifacts';
-import type { Census, FindingRow } from './model';
+import type { Census, FinderMerge, FindingRow } from './model';
 import type { RoundCard } from './rounds';
 
 /**
@@ -168,7 +168,16 @@ function Reproducer({ outcomes }: { outcomes: FindingRow['reproducer'] }) {
  * no detail"* reads as what it is, which is a reviewer that wrote a title and
  * stopped.
  */
-function Finding({ finding, row }: { finding: FullFinding; row: FindingRow | null }) {
+function Finding({
+  finding,
+  row,
+  reported,
+}: {
+  finding: FullFinding;
+  row: FindingRow | null;
+  /** How many finders reported this round, or null when no merge frame said. */
+  reported: number | null;
+}) {
   const [open, setOpen] = useState(false);
   const w = weight(finding.severity);
   return (
@@ -192,6 +201,9 @@ function Finding({ finding, row }: { finding: FullFinding; row: FindingRow | nul
             ) : (
               <Badge>raised by {finding.raisedBy}</Badge>
             )}
+            {/* Who found it, behind the fold and never on the row (#388 Part B).
+                A finding with no `foundBy` adds nothing here. */}
+            {finding.foundBy !== null && <Badge>{foundByLine(finding.foundBy, reported)}</Badge>}
             {finding.deferred && <Badge>deferred — real, and for separate work</Badge>}
             {/* The guards' downgrade, which is a fact about the severity above
                 and has to be readable beside it. Never rewritten and never
@@ -280,6 +292,7 @@ function ReportBody({
   runId,
   name,
   census,
+  finders,
   revision,
 }: {
   dir: string;
@@ -287,6 +300,8 @@ function ReportBody({
   name: string;
   /** What the gate made of this round, or null when nothing narrated one. */
   census: Census | null;
+  /** What this round's review finders came to, or null when nothing narrated one. */
+  finders: FinderMerge | null;
   revision: number;
 }) {
   const { read, failure, loading } = useArtifact(dir, runId, name, revision);
@@ -364,6 +379,7 @@ function ReportBody({
             // round of an earlier session - the prose is still there, and what
             // is missing is what happened to the finding afterwards.
             row={census?.findings.find((r) => r.id === f.id) ?? null}
+            reported={finders?.reported ?? null}
           />
         ))
       )}
@@ -440,6 +456,12 @@ export function ReportPane({
     const card = rounds.find((c) => c.cycle === kind && c.round === round);
     return card?.census ?? null;
   };
+  // The finder merge for a round, matched the same way and for the same reason.
+  const findersFor = (round: number | null): FinderMerge | null => {
+    if (round === null) return null;
+    const card = rounds.find((c) => c.cycle === kind && c.round === round);
+    return card?.finders ?? null;
+  };
 
   useEffect(() => {
     if (reports.length === 0) return;
@@ -513,6 +535,7 @@ export function ReportPane({
             runId={runId}
             name={report.name}
             census={censusFor(report.round)}
+            finders={findersFor(report.round)}
             revision={revision}
           />
         </Section>
