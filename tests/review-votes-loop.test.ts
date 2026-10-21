@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
-import { Escalation, EXIT, orchestrate, writeEscalation } from '@src/orchestrator.js';
+import { attachSpend, Escalation, EXIT, orchestrate, writeEscalation } from '@src/orchestrator.js';
 import { acceptMoves } from '@src/raise.js';
 import * as log from '@src/log.js';
 import type { Narration } from '@src/log.js';
@@ -401,4 +401,68 @@ test('a verifier turn that fails names its seat; a role turn still names its rol
     ),
     (err: unknown) => err instanceof Error && err.message === 'boom [this turn ran roles.reviewer.model = "reviewer-model"]',
   );
+});
+
+/**
+ * A failed seat turn that crosses `budget.maxTokens` ends the run (fix round 1).
+ * `chargeFailure` charges what the failure spent but *returns* the ceiling,
+ * and the retry helper rethrows the original error - so a seat's catch, which
+ * absorbs ordinary failures, has to enforce the ceiling before it does.
+ */
+function overBudget(over: Partial<ReviewConfig>): Config {
+  return withReview(over, { budget: { ...DEFAULTS.budget, planShare: 0, maxTokens: 100_000 } });
+}
+
+test('a failed vote turn that crosses the token ceiling stops the run instead of becoming a ballot', async () => {
+  const state = reviewingRun({ prefix: 'vibe-votes-ceiling-' });
+  const calls: string[] = [];
+  await assert.rejects(
+    drive(
+      state,
+      overBudget({ verifiers: THREE }),
+      voting([blocker('the-claim')], () => {
+        throw attachSpend(new Error('verifier fell over'), { costUsd: null, tokens: 200_000 });
+      }),
+      calls,
+    ),
+    (err: unknown) => err instanceof Escalation && err.code === EXIT.BUDGET,
+  );
+  assert.deepEqual(calls.filter((l) => l.startsWith('vote-')), ['vote-0-1-v1'], 'no vote bought past the ceiling');
+  assert.equal(state.events.some((e) => e.type === 'review_votes_tallied'), false);
+});
+
+test('an ordinary failed vote turn under the ceiling is still a cannot-tell ballot', async () => {
+  const state = reviewingRun({ prefix: 'vibe-votes-under-ceiling-' });
+  await drive(
+    state,
+    overBudget({ verifiers: THREE }),
+    voting([blocker('the-claim')], (label) => {
+      if (label === 'vote-0-1-v1') throw attachSpend(new Error('verifier fell over'), { costUsd: null, tokens: 100 });
+      return REAL;
+    }),
+  );
+  const votes = artifact(state)[0]?.votes as Votes;
+  assert.equal(votes.ballots[0]?.counted, 'cannot-tell');
+  assert.equal(votes.outcome, 'confirmed');
+});
+
+test('a failed finder turn that crosses the token ceiling stops the run too', async () => {
+  const state = reviewingRun({ prefix: 'vibe-finders-ceiling-' });
+  const calls: string[] = [];
+  await assert.rejects(
+    drive(
+      state,
+      overBudget({ finders: ['codex', 'codex'] }),
+      {
+        codex: (label) => {
+          if (label === 'review-0-f1') throw attachSpend(new Error('finder fell over'), { costUsd: null, tokens: 200_000 });
+          return report([]);
+        },
+      },
+      calls,
+    ),
+    (err: unknown) => err instanceof Escalation && err.code === EXIT.BUDGET,
+  );
+  assert.equal(calls.includes('review-0-f2'), false, 'no finder bought past the ceiling');
+  assert.equal(state.events.some((e) => e.type === 'review_finder_failed'), false);
 });

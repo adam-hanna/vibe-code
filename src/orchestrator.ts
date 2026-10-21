@@ -4640,6 +4640,11 @@ async function runReview(
         // A stop, a ceiling, a rate limit waited out past its cap: the round
         // ends exactly as it would for the first finder.
         if (err instanceof Escalation || err instanceof Cancelled) throw err;
+        // And a ceiling this failure itself crossed. `chargeFailure` charged it
+        // and *returned* the ceiling rather than throwing it, so that a role's
+        // failure reaches cli.ts as itself - but a seat's failure is about to be
+        // absorbed here, and absorbing it must not absorb the brake with it.
+        enforceCeilings(state, cfg, f.setting.provider === 'claude');
         // Anything else costs this finder only. Losing an extra seat can only
         // leave out what that seat alone would have raised, so the round falls
         // back to what a default config does - and the record says so.
@@ -4804,6 +4809,11 @@ async function runReview(
         } catch (err: unknown) {
           // A stop, a ceiling, a rate limit waited out past its cap: not a vote.
           if (err instanceof Escalation || err instanceof Cancelled) throw err;
+          // Nor a ceiling this failed turn itself crossed: `chargeFailure` has
+          // already charged it and held the ceiling rather than throwing it, and
+          // counting the failure as a ballot would go on to buy the next vote
+          // over the budget. Cost only for a Claude seat, `applyCharge`'s rule.
+          enforceCeilings(state, cfg, v.setting.provider === 'claude');
           // Anything else is a vote not cast, and counts as one: `cannot-tell`,
           // which can only keep the finding blocking. Too few usable votes must
           // never let a finding through.
