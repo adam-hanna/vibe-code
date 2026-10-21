@@ -483,3 +483,19 @@ contract tests over `tests/fixtures/cli/` are what catch a changed event shape, 
 cannot show. Recording one spawns real agents, and the suite never calls an agent; and a
 sandboxed vibe turn spawning agents hangs or is blocked. So the run that built this could not
 record them, and set `VIBE_CLI_FIXTURES=pending` on its own gate.
+
+## More finders, and a vote (#388)
+
+**Part A is configuration only, and no run reads it.** `review` in `DEFAULTS` holds the
+additional finders, the verifiers, the quorum and what an unconfirmed P0 does. It is validated
+by `validateReview` in `src/config.ts`, and each seat goes through `roleSetting`, the reader
+`roles.<role>` uses, which now takes a config path (`review.finders[1]`) for its messages.
+The settings screen edits it (`app/src/cockpit/seatform.ts`) and `vibe doctor` lists it,
+marked *not used yet*. `runReview`, the prompts, the labels and the artifacts are untouched,
+so a run that names seats behaves exactly as one that names none.
+
+**The slots a seat will use exist and are unused.** `fresh-claude` and `fresh-codex` in
+`src/slots.ts` never persist and store nothing; `seatSlot` picks one. A Claude seat must never
+sit on `main`, which is the implementer's own session, and no seat may resume `review` or
+`judge`. They are left out of a fork's census because they hold no conversation to fork.
+Part B seats the finders on them, and Part C the verifiers.

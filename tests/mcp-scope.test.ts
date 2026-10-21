@@ -543,18 +543,18 @@ test('dispatch: a role that named nothing passes no grant on either provider', a
 // ---- Config -----------------------------------------------------------------
 
 test('config: mcpServers is an array of names, refused by name otherwise', () => {
-  assert.deepEqual(roleSetting('reviewer', { provider: 'codex', mcpServers: ['github'] }), {
+  assert.deepEqual(roleSetting('roles.reviewer', { provider: 'codex', mcpServers: ['github'] }), {
     provider: 'codex',
     mcpServers: ['github'],
   });
   for (const bad of ['github', [''], [' '], [1], null]) {
     assert.throws(
-      () => roleSetting('reviewer', { provider: 'codex', mcpServers: bad }),
+      () => roleSetting('roles.reviewer', { provider: 'codex', mcpServers: bad }),
       /roles\.reviewer\.mcpServers is .*; must be an array of MCP server names/,
     );
   }
   assert.throws(
-    () => roleSetting('reviewer', { provider: 'codex', servers: [] }),
+    () => roleSetting('roles.reviewer', { provider: 'codex', servers: [] }),
     /provider, model, effort, timeoutMs and mcpServers/,
   );
   // A role that named none carries no key at all.

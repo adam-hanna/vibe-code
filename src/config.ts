@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   DEFAULT_ROLE_PROVIDERS,
+  FINDER_KEYS,
   patchRoles,
   providersForRoles,
   ROLE_NAMES,
@@ -28,7 +29,9 @@ import type {
   GatesConfig,
   LoadedConfig,
   PromptOverrides,
+  ReviewConfig,
   Sandbox,
+  UnconfirmedP0,
   VerifyConfig,
 } from '@src/types.js';
 
@@ -40,6 +43,12 @@ import type {
 export { EFFORTS };
 
 const SANDBOXES: readonly Sandbox[] = ['read-only', 'workspace-write', 'danger-full-access'];
+
+/** What `review.unconfirmedP0` may say (#388): the owner's three, 2026-10-20. */
+export const UNCONFIRMED_P0: readonly UnconfirmedP0[] = ['block', 'halt', 'demote'];
+
+/** The keys of the `review` section, in the order a message lists them. */
+const REVIEW_KEYS = ['finders', 'verifiers', 'quorum', 'unconfirmedP0'] as const;
 
 /**
  * The agent CLI versions this build was tested against (#298).
@@ -246,6 +255,12 @@ export const DEFAULTS: Config = {
   prompts: {},
   // Empty: nobody's instructions until somebody writes some (#273).
   instructions: { text: '' },
+  // More review seats and a vote (#388), accepted and validated and not yet
+  // read by a run. Empty lists, so a default run is byte-identical to one from
+  // before the key existed. `block` is the owner's decision (2026-10-20): an
+  // unconfirmed P0 still blocks unless somebody chooses otherwise. No
+  // recommended set of seats ships until #388's measurement has been made.
+  review: { finders: [], verifiers: [], quorum: null, unconfirmedP0: 'block' },
   toolchain: {
     // Deliberately minimal. `git` is needed in every phase because vibe commits
     // per round; node and npm only matter once something is being built or
@@ -336,6 +351,23 @@ function mergeGates(base: GatesConfig, override: unknown): GatesConfig {
   return out as unknown as GatesConfig;
 }
 
+/**
+ * Merge the review seats, keeping anything wrong for validation to name (#388).
+ *
+ * `mergeGates`' shape and reason: `mergeSection` iterates the base's keys, so a
+ * misspelt `quorom` would be dropped and `"review": null` swallowed - a vote the
+ * user believes they configured, silently not there. A key's value is replaced
+ * whole, so a project's `finders` replaces the global file's list rather than
+ * appending to it, and a `quorum` the project does not name is left standing.
+ */
+function mergeReview(base: ReviewConfig, override: unknown): ReviewConfig {
+  if (override === undefined) return base;
+  if (!isRecord(override)) return override as ReviewConfig;
+  const out: Record<string, unknown> = { ...base };
+  for (const [key, value] of Object.entries(override)) setOwn(out, key, value);
+  return out as unknown as ReviewConfig;
+}
+
 export function mergeConfig(base: Config, override: unknown): Config {
   if (!isRecord(override)) return base;
   return {
@@ -353,6 +385,7 @@ export function mergeConfig(base: Config, override: unknown): Config {
     toolchain: mergeToolchain(base.toolchain, override['toolchain']),
     prompts: mergePrompts(base.prompts, override['prompts']),
     instructions: mergeInstructions(base.instructions, override['instructions']),
+    review: mergeReview(base.review, override['review']),
   };
 }
 
@@ -520,6 +553,7 @@ const SECTIONS = [
   'progress',
   'prompts',
   'instructions',
+  'review',
 ] as const;
 
 /**
@@ -703,7 +737,7 @@ function validateRoles(raw: unknown): void {
     // Through the one reader, so what a config accepts and what `tableFor`
     // accepts are the same statement rather than two that have to be kept in
     // step. It throws, naming the role and what is wrong with it.
-    roleSetting(role, raw[role]);
+    roleSetting(`roles.${role}`, raw[role]);
   }
 }
 
@@ -848,6 +882,71 @@ function validate(cfg: Config): void {
   // instruction is a good one, and a length limit would be a number with
   // nothing behind it - the same answer `validatePrompts` gives (#273).
   if (typeof cfg.instructions.text !== 'string') throw new Error('instructions.text must be a string');
+  validateReview(cfg.review);
+}
+
+/**
+ * The `review` section (#388), refused by name and by index.
+ *
+ * Each seat goes through `roleSetting`, the one reader `roles.<role>` uses, so
+ * what a seat may say and what a role may say cannot drift apart - only the
+ * path in the message and the key list differ. A finder's `focus` is the one
+ * key `roleSetting` permits without checking, so it is checked here.
+ *
+ * The quorum is checked against the list in the same config, which is why it
+ * is refused after the seats are read: "2 but there are only 1 verifiers" is
+ * only a true sentence about a list that is itself legal.
+ */
+function validateReview(review: unknown): void {
+  const takes = `review takes ${REVIEW_KEYS.slice(0, -1).join(', ')} and ${REVIEW_KEYS[REVIEW_KEYS.length - 1] ?? ''}`;
+  if (!isRecord(review)) {
+    throw new Error(`review must be an object with finders, verifiers, quorum and unconfirmedP0`);
+  }
+  for (const key of Object.keys(review)) {
+    if (!(REVIEW_KEYS as readonly string[]).includes(key)) {
+      throw new Error(`review.${key} is not a setting; ${takes}`);
+    }
+  }
+  const finders: unknown = review['finders'];
+  const verifiers: unknown = review['verifiers'];
+  if (!Array.isArray(finders)) throw new Error('review.finders must be a list of seats, or [] for none');
+  if (!Array.isArray(verifiers)) throw new Error('review.verifiers must be a list of seats, or [] for none');
+  finders.forEach((entry: unknown, i) => {
+    const where = `review.finders[${i}]`;
+    roleSetting(where, entry, { keys: FINDER_KEYS, noun: 'a finder' });
+    if (isRecord(entry) && Object.prototype.hasOwnProperty.call(entry, 'focus')) {
+      const focus = entry['focus'];
+      // Blank is refused rather than read as "no focus": absent already says
+      // that, and a key holding nothing is a setting somebody meant to write.
+      if (typeof focus !== 'string' || focus.trim() === '') {
+        throw new Error(
+          `${where}.focus is ${JSON.stringify(focus) ?? String(focus)}; must be a non-empty string, ` +
+            'or absent for the shared prompt',
+        );
+      }
+    }
+  });
+  verifiers.forEach((entry: unknown, i) => {
+    roleSetting(`review.verifiers[${i}]`, entry, { noun: 'a verifier' });
+  });
+  const quorum: unknown = review['quorum'];
+  if (quorum !== null) {
+    if (typeof quorum !== 'number' || !Number.isInteger(quorum) || quorum < 1) {
+      throw new Error('review.quorum must be a positive whole number of verifiers, or null for a majority');
+    }
+    if (verifiers.length === 0) {
+      throw new Error(
+        `review.quorum is ${quorum} but review.verifiers is empty; a quorum needs verifiers to count`,
+      );
+    }
+    if (quorum > verifiers.length) {
+      throw new Error(`review.quorum is ${quorum} but there are only ${verifiers.length} verifiers`);
+    }
+  }
+  const p0: unknown = review['unconfirmedP0'];
+  if (typeof p0 !== 'string' || !UNCONFIRMED_P0.includes(p0 as UnconfirmedP0)) {
+    throw new Error(`review.unconfirmedP0 must be one of ${UNCONFIRMED_P0.join(', ')}`);
+  }
 }
 
 const PHASES: readonly Phase[] = ['plan', 'implement', 'review'];

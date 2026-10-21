@@ -1,5 +1,5 @@
-import type { RoleProviders } from '@src/roles.js';
-import type { EnvironmentFacts, ToolchainContract } from '@src/runtime.js';
+import type { RoleProviders, RoleSetting } from '@src/roles.js';
+import type { AgentProvider, EnvironmentFacts, ToolchainContract } from '@src/runtime.js';
 import type { Liveness } from '@src/lock.js';
 import type { SlotName } from '@src/slots.js';
 
@@ -779,6 +779,42 @@ export interface Config {
    * none is byte-identical to one that predates the key.
    */
   instructions: { text: string };
+  /**
+   * More review seats than the one reviewer, and a vote before a finding blocks
+   * (#388).
+   *
+   * **Accepted and validated, and not yet read by a run.** This is the
+   * groundwork release (#388 Part A): the section, its refusals, the settings
+   * lists and `vibe doctor`'s listing, with the loop untouched - so a run that
+   * names seats here behaves exactly as one that names none. Part B seats the
+   * finders and Part C the verifiers.
+   *
+   * Settable in the global file as well as a project's, like `roles`: it is a
+   * review policy and a list of model seats, not a fact about how one
+   * repository builds, so it is not in `PROJECT_ONLY`.
+   */
+  review: ReviewConfig;
+}
+
+/** What a P0 that the vote did not confirm does (#388). The owner's three, 2026-10-20. */
+export type UnconfirmedP0 = 'block' | 'halt' | 'demote';
+
+/**
+ * An additional finder: a role's settings, plus what to look at hardest (#388,
+ * ⚑1). `focus` reaches no prompt yet; from Part B it is appended to that
+ * finder's prompt, and absent means exactly the shared one.
+ */
+export type FinderSeat = RoleSetting & { focus?: string | undefined };
+
+/** The `review` section (#388). See `Config.review`. */
+export interface ReviewConfig {
+  /** Finders beyond `roles.reviewer`, which stays the first. A provider name or a seat object. */
+  finders: (AgentProvider | FinderSeat)[];
+  /** The seats that vote on each blocking finding. Exactly a role's keys. */
+  verifiers: (AgentProvider | RoleSetting)[];
+  /** How many `real` votes confirm a finding; null is a majority, floor(n/2)+1. */
+  quorum: number | null;
+  unconfirmedP0: UnconfirmedP0;
 }
 
 /** Block name to replacement text. Open-ended keys, checked against the real list. */
