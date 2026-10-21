@@ -12,7 +12,8 @@
  * through the refusal banner in the core's own words, and a second copy of
  * those rules here would be a second answer to *what is a legal seat*.
  *
- * In this release no run reads these lists (#388 Part A); the screen says so.
+ * Finders are run since #388 Part B; the verifiers, the quorum and
+ * `unconfirmedP0` are still read by no run, and the screen says so.
  */
 
 /** A seat as the core holds it. Mirrors `RoleSetting` / `FinderSeat` in `src/`. */

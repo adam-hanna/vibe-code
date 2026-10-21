@@ -18,6 +18,7 @@ src/run.ts           run state, artifacts, checkpoints, convergence maths (asses
 src/scorecard.ts     what the run archive says about the loop, and what it cannot
 src/fork.ts          `vibe fork`: preflight that only reads, then a commit phase that creates
 src/similarity.ts    the one similarity metric, its threshold, and the censuses behind it
+src/finder-merge.ts  one review round's reports across finders, merged by claim, with foundBy (#388)
 src/questions.ts     when two wordings are one question: the threshold, and REPHRASED.md
 src/raise.ts         what a person does to a run's findings: raise one, move a severity
 src/roles.ts         who does what: the role table, refusals, warnings
@@ -36,7 +37,7 @@ src/appserver.ts     Codex app-server JSON-RPC client (rate limits only)
 src/ratelimits.ts    rate-limit windows and the brake
 src/charge.ts        the one seam every token and dollar is charged through
 src/slots.ts         session-slot lifecycle (main = Claude, judge + review = Codex, write = one-shot Codex,
-                     fresh-claude + fresh-codex = one-shot read-only review seats, unused until #388 Part B)
+                     fresh-claude + fresh-codex = one-shot read-only review seats, where finders sit)
 src/context.ts       context measurement, compaction, session rotation
 src/preflight.ts     toolchain contract enforcement, `vibe doctor`
 src/cliversions.ts   the installed claude/codex against the tested versions, and the flags vibe passes

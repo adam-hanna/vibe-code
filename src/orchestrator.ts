@@ -37,11 +37,15 @@ import {
   modelFor,
   modelSource,
   roleEnabled,
+  readFinders,
   rolesFor,
+  seatTable,
   slotForRole,
   turnTimeoutMs,
 } from '@src/roles.js';
-import type { Access, Role, RoleSpec, RoleTable } from '@src/roles.js';
+import type { Access, FinderEntry, Role, RoleSpec, RoleTable } from '@src/roles.js';
+import { mergeAcrossFinders } from '@src/finder-merge.js';
+import type { FinderReport } from '@src/finder-merge.js';
 import { claudeMcpDefinitions, resolveClaudeGrants } from '@src/mcp.js';
 import {
   clearSlotFork,
@@ -49,6 +53,7 @@ import {
   markSlotStarted,
   noteSlotForkAttempt,
   noteSlotRegistered,
+  perTurnSlot,
   recordSlotOccupancy,
   recoverDeadSlot,
   slotContinuity,
@@ -106,6 +111,7 @@ import {
   readEvidence,
   reproducerOutcomesOf,
   reproductionAt,
+  SEVERITY_RANK,
 } from '@src/validate.js';
 import {
   attachVerdicts,
@@ -162,7 +168,6 @@ import type {
   RunStart,
   RunState,
   RunSummary,
-  Severity,
   TurnActivity,
 } from '@src/types.js';
 
@@ -3289,7 +3294,14 @@ async function claudeDispatch(
   // for the turn about to use it, and the reset that follows has to tag the
   // model the next measurement will be taken under. Where the planner and the
   // implementer name different models this is the boundary that fires once.
-  if (shouldRotate(state, cfg, roles, model)) {
+  //
+  // Never for a turn on a slot that holds no conversation of the run (#388
+  // Part B). A finder on `fresh-claude` is not about to use `main`, and asked
+  // under its own model - one `main` was never measured under - `shouldRotate`
+  // answers "unmeasured, so rotate", which would compact the implementer's
+  // session in the middle of a review it takes no part in.
+  const perTurn = perTurnSlot(slot);
+  if (!perTurn && shouldRotate(state, cfg, roles, model)) {
     await rotateSession(state, cfg, turn, roles, model);
   }
 
@@ -3428,9 +3440,16 @@ async function claudeDispatch(
   // Tagged with the model that produced it: the ratio is a fraction of this
   // model's window and means nothing under another one. Through the shared seam
   // so the rotation turn in context.ts cannot drift out of step with this one.
-  recordTurnContext(state, model, result.usage);
+  //
+  // Not for a per-turn slot: `contextModel` / `contextRatio` are the record of
+  // how full `main` is, which rotation and every `ctx%` read, and a fresh
+  // finder's occupancy written there would replace the implementer's (#388).
+  if (!perTurn) recordTurnContext(state, model, result.usage);
 
-  const measured = measuredRatio(state, model);
+  // A per-turn slot's figure is its own measurement or nothing - never the
+  // stored one, which is `main`'s and would be reported as this turn's whenever
+  // the two share a model.
+  const measured = perTurn ? (result.usage?.ratio ?? null) : measuredRatio(state, model);
   const ctx = result.usage ? `, ctx ${(result.usage.ratio * 100).toFixed(0)}%` : '';
   applyCharge(state, cfg, {
     costUsd: result.costUsd,
@@ -4430,13 +4449,189 @@ async function runReview(
   // Per part, because a verdict only counts from the part that listed the file.
   const listedPerPart: FileChange[][] = [];
   const verdictsPerPart: RawVerdict[][] = [];
-  for (const [i, chunk] of chunks.entries()) {
-    // Only this part's judge files. A rename is listed wherever either of its
-    // paths is shown, since `chunk.files` names both sides (`--no-renames`).
-    const listed = judged.filter(
+  const chunked = chunks.length > 1;
+  // Only a part's judge files. A rename is listed wherever either of its
+  // paths is shown, since `chunk.files` names both sides (`--no-renames`).
+  const listedFor = (chunk: (typeof chunks)[number]): FileChange[] =>
+    judged.filter(
       (c) =>
         chunk.files.includes(c.path) || (c.oldPath !== null && chunk.files.includes(c.oldPath)),
     );
+  // One part's review prompt. The first finder and every additional finder are
+  // handed the same arguments (#388 Part B): an additional finder differs only
+  // in having no memory, which a memoryless reviewer already renders.
+  const reviewPromptFor = (i: number, hasMemory: boolean, carriesEarlierParts: boolean): string => {
+    const chunk = chunks[i];
+    if (chunk === undefined) throw new Error(`review part ${i + 1} does not exist`);
+    const listed = listedFor(chunk);
+    return P.reviewPrompt(
+      chunk.diff,
+      chunk.files,
+      plan.plan_md,
+      plan.out_of_scope,
+      state.reviewRound + 1,
+      hasMemory,
+      state.environment,
+      roles,
+      // The snapshot, and deliberately not `?? []`: the reviewer's rendering
+      // is three-state, so collapsing an absent bar to an empty one would
+      // have a legacy run claim done-ness is unobservable.
+      state.acceptanceCriteria,
+      // Absent for the ordinary round - one chunk, nothing cut - which is
+      // what keeps that prompt byte-identical. Present when a file was cut
+      // even in a single chunk, because that reviewer is the one that most
+      // needs telling to go and read the rest.
+      chunked || chunk.truncated.length > 0
+        ? {
+            index: i + 1,
+            total: chunks.length,
+            files: chunk.files,
+            truncated: chunk.truncated,
+            carriesEarlierParts,
+          }
+        : undefined,
+      // Every part, deliberately - see where it is read above. Never
+      // `undefined`: that is the "no caller statement" state which renders
+      // nothing, and a real round must always say something about the
+      // report, even when the thing it says is that there is none (#50).
+      report,
+      // Absent unless this run would actually place and run one, which is
+      // what keeps a `verify.reproducers: false` review byte-identical to
+      // the one before #113. Only gates with a command: a gate the run
+      // cannot execute is not a choice the reviewer has.
+      reproducerGates(cfg, cwd),
+      // Absent unless this part shows a judge file, which is what keeps every
+      // other round's prompt byte-identical (#112).
+      listed.length > 0 ? listed : undefined,
+    );
+  };
+  /**
+   * The additional finders (#388 Part B), after the first has reviewed every
+   * part, and the merge across all of them.
+   *
+   * Each finder is a reviewer whose seat was swapped (`seatTable`): the same
+   * `runTurn`, so its timeout, charge, heartbeat and path style follow the seat.
+   * In sequence, never at once - several children of one run would need the
+   * cancel latch, the charge seam, `saveState` and the heartbeat proven safe
+   * with two, which is its own change. A finder never sees another's findings:
+   * every one is handed the same prompt the first was, memoryless.
+   */
+  const runFinders = async (
+    entries: readonly FinderEntry[],
+    firstReport: FindingsReport,
+  ): Promise<FindingsReport> => {
+    const reported: FinderReport[] = [];
+    for (const f of entries) {
+      const table = seatTable(roles, f.setting);
+      const parts: FindingsReport[] = [];
+      let label = '';
+      try {
+        for (const i of chunks.keys()) {
+          label = chunked
+            ? `review-${state.reviewRound}-f${f.k}-part${i + 1}`
+            : `review-${state.reviewRound}-f${f.k}`;
+          log.step(`${holderLabel('reviewer', table)} is reviewing the implementation (finder ${f.k})`, {
+            id: 'turn_started',
+            data: { role: 'reviewer', kind: 'review', round: state.reviewRound, finder: f.k, seat: f.path },
+          });
+          const outcome = await runTurn(
+            state,
+            cfg,
+            {
+              role: 'reviewer',
+              prompt: P.withFocus(reviewPromptFor(i, false, false), f.focus),
+              cwd,
+              label,
+            },
+            turns,
+            table,
+          );
+          // Judged by what this turn did, attributed to the role it played. Its
+          // test verdicts are parsed by nothing here and so dropped: the first
+          // finder owns the round's `testChanges` and `reviewCoverage`, because
+          // two judges' verdicts on one file would need a rule for disagreeing,
+          // and inventing one is out of scope (#388 decision 6).
+          parts.push(
+            groundAndRecord(
+              state,
+              cwd,
+              'reviewer',
+              table,
+              parseFindings(readStructured(outcome)),
+              outcome.activity,
+            ),
+          );
+        }
+      } catch (err: unknown) {
+        // A stop, a ceiling, a rate limit waited out past its cap: the round
+        // ends exactly as it would for the first finder.
+        if (err instanceof Escalation || err instanceof Cancelled) throw err;
+        // Anything else costs this finder only. Losing an extra seat can only
+        // leave out what that seat alone would have raised, so the round falls
+        // back to what a default config does - and the record says so.
+        const message = err instanceof Error ? err.message : String(err);
+        const error = message.split(/\r?\n/)[0] ?? '';
+        const provider = f.setting.provider;
+        const model = f.setting.model ?? 'default';
+        recordAndSay(
+          state,
+          'warn',
+          'review_finder_failed',
+          `Review finder ${f.k} (${f.path}, ${provider}/${model}) failed on ${label}: ${error}`,
+          { round: state.reviewRound, finder: f.k, seat: f.path, label, error },
+        );
+        continue;
+      }
+      const [single] = parts;
+      reported.push({
+        k: f.k,
+        seat: f.path,
+        provider: f.setting.provider,
+        model: f.setting.model ?? 'default',
+        report: parts.length === 1 && single !== undefined ? single : mergeReviewReports(parts),
+      });
+    }
+
+    const all: FinderReport[] = [
+      {
+        k: 0,
+        seat: 'roles.reviewer',
+        provider: roles.reviewer.provider,
+        model: roles.reviewer.model ?? 'default',
+        report: firstReport,
+      },
+      ...reported,
+    ];
+    const merge = mergeAcrossFinders(all);
+    const seats = entries.length + 1;
+    const raised = all.reduce((n, r) => n + r.report.findings.length, 0);
+    // Recorded, not narration only: this is the one account of how many
+    // finders reported in the attempt that wrote this round's artifact. A
+    // resumed round re-reviews from scratch, so a failure from an attempt that
+    // never got here leaves no merge event behind - the summary and the window
+    // read this, never a tally of failures.
+    recordAndSay(
+      state,
+      'info',
+      'review_finders_merged',
+      `review round ${state.reviewRound + 1}: ${seats} finders × ${chunks.length} part(s), ` +
+        `${all.length} of ${seats} reported, ${raised} findings → ${merge.report.findings.length} ` +
+        `after merge (${merge.byCitation} merged by citation, ${merge.byTitle} by title)`,
+      {
+        round: state.reviewRound,
+        finders: seats,
+        parts: chunks.length,
+        reported: all.length,
+        findings: raised,
+        merged: merge.report.findings.length,
+        byCitation: merge.byCitation,
+        byTitle: merge.byTitle,
+      },
+    );
+    return merge.report;
+  };
+  for (const [i, chunk] of chunks.entries()) {
+    const listed = listedFor(chunk);
     // Read inside the loop: the slot is marked started by the turn that
     // succeeds, so with a persistent thread part 1 is memoryless and parts 2..n
     // continue the conversation without anything new (#45).
@@ -4446,52 +4641,12 @@ async function runReview(
     // *this* round, and telling it not to repeat findings for them would ask it
     // to stay quiet about a diff it was never shown.
     const carriesEarlierParts = i > 0 && hasMemory;
-    const chunked = chunks.length > 1;
     const outcome = await runTurn(
       state,
       cfg,
       {
         role: 'reviewer',
-        prompt: P.reviewPrompt(
-          chunk.diff,
-          chunk.files,
-          plan.plan_md,
-          plan.out_of_scope,
-          state.reviewRound + 1,
-          hasMemory,
-          state.environment,
-          roles,
-          // The snapshot, and deliberately not `?? []`: the reviewer's rendering
-          // is three-state, so collapsing an absent bar to an empty one would
-          // have a legacy run claim done-ness is unobservable.
-          state.acceptanceCriteria,
-          // Absent for the ordinary round - one chunk, nothing cut - which is
-          // what keeps that prompt byte-identical. Present when a file was cut
-          // even in a single chunk, because that reviewer is the one that most
-          // needs telling to go and read the rest.
-          chunked || chunk.truncated.length > 0
-            ? {
-                index: i + 1,
-                total: chunks.length,
-                files: chunk.files,
-                truncated: chunk.truncated,
-                carriesEarlierParts,
-              }
-            : undefined,
-          // Every part, deliberately - see where it is read above. Never
-          // `undefined`: that is the "no caller statement" state which renders
-          // nothing, and a real round must always say something about the
-          // report, even when the thing it says is that there is none (#50).
-          report,
-          // Absent unless this run would actually place and run one, which is
-          // what keeps a `verify.reproducers: false` review byte-identical to
-          // the one before #113. Only gates with a command: a gate the run
-          // cannot execute is not a choice the reviewer has.
-          reproducerGates(cfg, cwd),
-          // Absent unless this part shows a judge file, which is what keeps every
-          // other round's prompt byte-identical (#112).
-          listed.length > 0 ? listed : undefined,
-        ),
+        prompt: reviewPromptFor(i, hasMemory, carriesEarlierParts),
         cwd,
         // Unchanged when there is one chunk: this string is Codex's output name
         // and the retry label, and a round that did not need splitting must look
@@ -4568,7 +4723,11 @@ async function runReview(
   }
 
   const [only] = reports;
-  const merged = reports.length === 1 && only !== undefined ? only : mergeReviewReports(reports);
+  const first = reports.length === 1 && only !== undefined ? only : mergeReviewReports(reports);
+  // With no additional finder, exactly the report of every round before #388:
+  // no extra turn, no `foundBy`, no event.
+  const finders = readFinders(cfg);
+  const merged = finders.length === 0 ? first : await runFinders(finders, first);
   // Inside `runReview` and after the merge, which are two separate decisions
   // (#113).
   //
@@ -4703,14 +4862,6 @@ async function proveFindings(
   recordDowngrades(state, applied.downgraded);
   return applied.report;
 }
-
-/** Most blocking first, so a later chunk can only ever raise a finding's severity. */
-const SEVERITY_RANK = {
-  P0: 0,
-  P1: 1,
-  P2: 2,
-  P3: 3,
-} satisfies Record<Severity, number>;
 
 /**
  * Several parts of one round, read as one report.

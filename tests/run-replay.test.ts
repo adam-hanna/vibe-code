@@ -115,6 +115,67 @@ test('a chunked review turn is one review round, not a round per part', () => {
   assert.equal(seatOf('review-3')?.round, 3);
 });
 
+test('an additional finder is the same review round, told apart by finder', () => {
+  // #388 Part B: the first finder - `roles.reviewer` - carries no `finder` key.
+  assert.deepEqual(seatOf('review-2-f1'), { ...seatOf('review-2'), finder: 1 });
+  assert.deepEqual(seatOf('review-2-f1-part3'), { ...seatOf('review-2'), finder: 1 });
+  assert.equal(seatOf('review-2-f12')?.finder, 12);
+  assert.equal('finder' in (seatOf('review-2') ?? {}), false);
+  assert.equal('finder' in (seatOf('review-2-part3') ?? {}), false);
+});
+
+test("the finder labels the orchestrator builds are the two spellings seatOf reads", () => {
+  // Source-read, for the reason the case above it gives. The finder labels are
+  // assigned to a variable rather than written at a `label:` site, so they get
+  // their own pin: a respelling in `orchestrator.ts` fails here, not in a
+  // replay that silently files a finder's turn as the first finder's.
+  let at = path.dirname(fileURLToPath(import.meta.url));
+  while (!existsSync(path.join(at, 'src', 'orchestrator.ts')) && path.dirname(at) !== at) {
+    at = path.dirname(at);
+  }
+  const source = readFileSync(path.join(at, 'src', 'orchestrator.ts'), 'utf8');
+  const templates = [...source.matchAll(/`(review-\$\{[^}]+\}-f\$\{[^}]+\}(?:-part\$\{[^}]+\})?)`/g)].map(
+    (m) => m[1] ?? '',
+  );
+  const single = templates.filter((t) => !t.includes('-part'));
+  const chunked = templates.filter((t) => t.includes('-part'));
+  assert.equal(single.length, 1, `one single-part finder label, found ${single.join(', ') || 'none'}`);
+  assert.equal(chunked.length, 1, `one chunked finder label, found ${chunked.join(', ') || 'none'}`);
+  for (const template of templates) {
+    const label = template.replace(/\$\{[^}]+\}/g, '2');
+    assert.equal(seatOf(label)?.finder, 2, `${label} is not read as finder 2`);
+    assert.equal(seatOf(label)?.round, 2);
+  }
+});
+
+test("a finder round's merge and failure frames are replayed with their own data", () => {
+  // The findings pane's denominator is the merge frame's `reported`, so a
+  // replay without it would draw every opened run's provenance without one.
+  const merged = { round: 0, finders: 3, parts: 1, reported: 2, findings: 4, merged: 3, byCitation: 1, byTitle: 0 };
+  const failed = { round: 0, finder: 2, seat: 'review.finders[1]', label: 'review-0-f2', error: 'boom' };
+  const state = stateWith({
+    events: [
+      { at: iso(60_000), type: 'codex_turn', label: 'review-0', tokens: 100 },
+      { at: iso(61_000), type: 'codex_turn', label: 'review-0-f1', tokens: 100 },
+      { at: iso(62_000), type: 'review_finder_failed', ...failed },
+      { at: iso(63_000), type: 'review_finders_merged', ...merged },
+    ],
+  });
+  const steps = replayRun(state, NOTHING).steps;
+  const frame = steps.find((s) => s.narration.id === 'review_finders_merged');
+  assert.deepEqual(frame?.narration.data, merged);
+  assert.equal(frame?.at, NOW + 63_000);
+  const failure = steps.find((s) => s.narration.id === 'review_finder_failed');
+  assert.deepEqual(failure?.narration.data, failed);
+  // After the turns it summarises, in time order.
+  const order = ids(steps);
+  assert.ok(order.lastIndexOf('codex_turn') < order.indexOf('review_finders_merged'));
+  // The finder's turn frame names it, as the live frame does.
+  const finderTurn = steps.filter((s) => s.narration.id === 'turn_started')[1];
+  assert.equal(finderTurn?.narration.data?.['finder'], 1);
+  assert.equal(finderTurn?.narration.data?.['seat'], 'review.finders[0]');
+});
+
 test('a label this build does not know is placed nowhere rather than guessed', () => {
   // The rule `phase_started` already follows for a phase it cannot place. Its
   // charge is still emitted, which the replay case below pins.

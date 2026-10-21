@@ -47,7 +47,7 @@ import {
   DEFAULT_ROLE_PROVIDERS,
   effortFor,
   modelFor,
-  FINDER_KEYS,
+  readFinders,
   ROLE_NAMES,
   roleSetting,
   rolesFor,
@@ -55,13 +55,14 @@ import {
   seatResolved,
   turnTimeoutMs,
 } from '@src/roles.js';
-import type { RolePatches } from '@src/roles.js';
+import type { RolePatches, RoleSetting } from '@src/roles.js';
 import { setOwn } from '@src/runtime.js';
 import { claudeBin, setSessionArgs } from '@src/claude.js';
 import { codexBin } from '@src/codex.js';
 import { resetUnrecognisedCodexItems } from '@src/progress.js';
 import { detectCliVersions } from '@src/cliversions.js';
 import { describeMcp, mcpRefusals } from '@src/mcp.js';
+import { chargedTurns, seatOf } from '@src/replay.js';
 import { run as runChild } from '@src/proc.js';
 // The accounting seam, from the leaf it lives in: orchestrator.js re-exports
 // applyCharge but not fmtTokens, and charge.js imports nothing that imports this.
@@ -1479,8 +1480,10 @@ export type RunLoop = (state: RunState, cfg: Config, resume: boolean) => Promise
  * Compared and printed through the table rather than off the raw value, because
  * a role's value may be an object (#46): `!==` would call every role changed and
  * template interpolation would print `[object Object]`.
+ *
+ * Exported so a test can read the lines without starting a run.
  */
-function reportRoles(cfg: Config): void {
+export function reportRoles(cfg: Config): void {
   const table = rolesFor(cfg);
   const changed = ROLE_NAMES.filter(
     (role) => JSON.stringify(cfg.roles[role]) !== JSON.stringify(DEFAULT_ROLE_PROVIDERS[role]),
@@ -1508,6 +1511,19 @@ function reportRoles(cfg: Config): void {
       );
     });
     log.info(`Roles:   ${named.join(' ')}`);
+  }
+  // The additional review finders (#388 Part B), in the same spelling as a
+  // changed role, and only when there are any: a run that seats none prints
+  // what it always has.
+  const finders = readFinders(cfg);
+  if (finders.length > 0) {
+    const seated = finders.map(
+      ({ setting }) =>
+        `${setting.provider}` +
+        `${setting.model === undefined ? '' : `@${setting.model}`}` +
+        `${setting.effort === undefined ? '' : `/${setting.effort}`}`,
+    );
+    log.info(`Finders: ${seated.join(' ')}`);
   }
   for (const warning of roleWarnings(cfg)) log.warn(warning);
 }
@@ -1548,45 +1564,47 @@ function reportResolvedRoles(cfg: Config): void {
  * all when it names none, so doctor under the defaults prints what it always
  * has.
  *
- * Marked *not used yet* on its first line, because that is the whole truth of
- * this release: the lists are accepted and validated, and no run reads them.
- * A seat's figures come through `seatResolved`, the rule a turn would be
- * spawned with, so the line already says what Part B will run.
+ * Two blocks, because they are two different truths since #388 Part B. The
+ * finders are used: each reviews every chunk after `roles.reviewer`, at one
+ * extra turn per chunk per finder. The verifiers, the quorum and
+ * `unconfirmedP0` are still accepted, validated and read by no run, and keep
+ * *not used yet* on their first line until Part C. A seat's figures come
+ * through `seatResolved`, the rule a turn is spawned with.
  *
  * The majority is printed as the definition it is - more than half - and not
  * as a recommendation.
  */
 function reportReviewSeats(cfg: Config): void {
-  const { finders, verifiers, quorum, unconfirmedP0 } = cfg.review;
+  const { verifiers, quorum, unconfirmedP0 } = cfg.review;
+  const finders = readFinders(cfg);
   if (finders.length === 0 && verifiers.length === 0) return;
+  const seat = (setting: RoleSetting, focus?: string): string => {
+    const r = seatResolved(setting, cfg);
+    const shown = focus === undefined ? '' : `  focus: ${JSON.stringify(focus)}`;
+    return `${setting.provider.padEnd(6)}  ${r.model} / ${r.effort} / ${r.timeoutMs}ms${shown}`;
+  };
+  const print = (rows: readonly [string, string][]): void => {
+    const width = Math.max(...rows.map(([label]) => label.length));
+    for (const [label, text] of rows) log.info(`    ${label.padEnd(width)}  ${text}`);
+  };
+  if (finders.length > 0) {
+    log.info('  review finders (each reviews every chunk; one extra turn per chunk per finder):');
+    print(finders.map((f): [string, string] => [`finder ${f.k}`, seat(f.setting, f.focus)]));
+  }
+  if (verifiers.length === 0) return;
   log.info('  review seats (not used yet: accepted and validated, no run reads them in this version):');
   const rows: [string, string][] = [];
-  const seat = (where: string, entry: unknown, keys?: readonly string[]): string => {
-    // Validated already; read through the same reader so a string entry is a seat.
-    const setting = roleSetting(where, entry, keys === undefined ? {} : { keys });
-    const r = seatResolved(setting, cfg);
-    const focus =
-      typeof entry === 'object' && entry !== null && typeof (entry as Record<string, unknown>)['focus'] === 'string'
-        ? `  focus: ${JSON.stringify((entry as Record<string, unknown>)['focus'])}`
-        : '';
-    return `${setting.provider.padEnd(6)}  ${r.model} / ${r.effort} / ${r.timeoutMs}ms${focus}`;
-  };
-  finders.forEach((entry, i) => {
-    rows.push([`finder ${i + 1}`, seat(`review.finders[${i}]`, entry, FINDER_KEYS)]);
-  });
   verifiers.forEach((entry, i) => {
-    rows.push([`verifier ${i + 1}`, seat(`review.verifiers[${i}]`, entry)]);
+    // Validated already; read through the same reader so a string entry is a seat.
+    rows.push([`verifier ${i + 1}`, seat(roleSetting(`review.verifiers[${i}]`, entry))]);
   });
-  if (verifiers.length > 0) {
-    const n = verifiers.length;
-    rows.push([
-      'quorum',
-      quorum === null ? `${Math.floor(n / 2) + 1} of ${n} (a majority)` : `${quorum} of ${n}`,
-    ]);
-  }
+  const n = verifiers.length;
+  rows.push([
+    'quorum',
+    quorum === null ? `${Math.floor(n / 2) + 1} of ${n} (a majority)` : `${quorum} of ${n}`,
+  ]);
   rows.push(['unconfirmed P0', unconfirmedP0]);
-  const width = Math.max(...rows.map(([label]) => label.length));
-  for (const [label, text] of rows) log.info(`    ${label.padEnd(width)}  ${text}`);
+  print(rows);
 }
 
 /**
@@ -2604,6 +2622,54 @@ export function reportDeferred(state: RunState): void {
 }
 
 /**
+ * What the additional review finders cost and how many reported (#388 Part B),
+ * as one summary line - and nothing at all on a run that seated none.
+ *
+ * Called from `summary`, the one function every way out of a run reaches, so a
+ * run that escalated or failed after a finder round still says what it spent.
+ *
+ * **Both halves are read, never estimated.** The cost is the charges: every
+ * finder-labelled `claude_turn`, `codex_turn` and `turn_failed`, through the
+ * same `chargedTurns` a replay reads, so a finder that failed after spending is
+ * counted with what `chargeFailure` recorded. The count is the last recorded
+ * `review_finders_merged` event, which only an attempt that finished its merge
+ * writes - not a tally of `review_finder_failed`, which a resumed round would
+ * leave behind from an attempt whose results were thrown away. A run with
+ * finder charges and no merge says the cost and claims no count.
+ *
+ * Exported for the reason `reportDeferred` is: `execute` cannot be reached from
+ * a test without spawning real agents.
+ */
+export function reportReviewFinders(state: RunState): void {
+  let turns = 0;
+  let failed = 0;
+  let tokens = 0;
+  for (const t of chargedTurns(state)) {
+    if (seatOf(t.label)?.finder === undefined) continue;
+    turns += 1;
+    if (t.failed) failed += 1;
+    const spent = t.data['tokens'];
+    if (typeof spent === 'number' && Number.isFinite(spent)) tokens += spent;
+  }
+  let merge: Record<string, unknown> | null = null;
+  for (const e of state.events) if (e.type === 'review_finders_merged') merge = e;
+  if (turns === 0 && merge === null) return;
+
+  const cost =
+    `additional finders took ${turns} turn(s)` +
+    (failed > 0 ? ` (${failed} failed)` : '') +
+    `, ${fmtTokens(tokens)} tokens across the run`;
+  const round = merge?.['round'];
+  const reported = merge?.['reported'];
+  const seats = merge?.['finders'];
+  if (merge === null || typeof round !== 'number' || typeof reported !== 'number' || typeof seats !== 'number') {
+    log.info(`Finders:  ${cost}; no review round completed its merge.`);
+    return;
+  }
+  log.info(`Finders:  review round ${round + 1}: ${reported} of ${seats} reported; ${cost}.`);
+}
+
+/**
  * The Claude share, or null when the state cannot support one.
  *
  * The one reader of the subtraction, and belt and braces beside rule D
@@ -2688,6 +2754,7 @@ function summary(state: RunState, started: number, recovery?: RecoveryReport): v
   log.info(
     `Rounds:   ${state.planRound} plan revision(s)${asked}, ${state.reviewRound} fix round(s)`,
   );
+  reportReviewFinders(state);
   if (state.sessionRotations > 0) log.info(`Compacted: ${state.sessionRotations} time(s)`);
   // A record of what `forkedFrom` holds, never a computation over it: the totals
   // above include the inherited spend, and this is what says so. Nothing here
@@ -2932,7 +2999,7 @@ async function cmdDoctor(args: readonly string[]): Promise<ExitCode> {
     // (#138), in the words `src/mcp.ts` keeps for every surface that says it.
     log.info('  mcp:');
     const table = rolesFor(cfg);
-    for (const line of describeMcp(table)) log.info(`    ${line}`);
+    for (const line of describeMcp(table, readFinders(cfg))) log.info(`    ${line}`);
     const mcpBlocked = await mcpRefusals(cfg, table, {
       cwd: targetDir,
       repoDir: targetDir,

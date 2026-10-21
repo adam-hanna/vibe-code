@@ -135,6 +135,8 @@ interface Seat {
    * `turn_started` carries, while its group is the code round that ran the gate.
    */
   turnRound?: number;
+  /** Which additional review finder took the turn (#388 Part B); absent for the first. */
+  finder?: number;
 }
 
 /**
@@ -185,7 +187,19 @@ export function seatOf(label: string): Seat | null {
   // happened under, which the checkpoint timeline supplies.
   if (answers !== null) return { role: 'answerer', kind: 'answer', phase: 'planning', round: null };
   const review = numbered('review');
-  if (review !== null) return { role: 'reviewer', kind: 'review', phase: 'review', round: review };
+  if (review !== null) {
+    // `review-2-f1` and `review-2-f1-part3` are additional finders' turns in
+    // the same round (#388 Part B): the same seat, told apart by `finder`. The
+    // first finder - `roles.reviewer` - carries no `finder` key at all.
+    const finder = /^review-\d+-f(\d+)(?:-part\d+)?$/.exec(label)?.[1];
+    return {
+      role: 'reviewer',
+      kind: 'review',
+      phase: 'review',
+      round: review,
+      ...(finder === undefined ? {} : { finder: Number.parseInt(finder, 10) }),
+    };
+  }
   const fix = numbered('fix');
   if (fix !== null) {
     return { role: 'implementer', kind: 'review-fix', phase: 'implementing', round: fix };
@@ -215,7 +229,7 @@ function ms(iso: string | null | undefined): number | null {
 }
 
 /** One turn as the archive holds it. */
-interface ChargedTurn {
+export interface ChargedTurn {
   at: number;
   label: string;
   type: 'claude_turn' | 'codex_turn';
@@ -224,7 +238,7 @@ interface ChargedTurn {
   failed: boolean;
 }
 
-function chargedTurns(state: RunState): ChargedTurn[] {
+export function chargedTurns(state: RunState): ChargedTurn[] {
   const out: ChargedTurn[] = [];
   for (const event of state.events) {
     // **`turn_failed` counts too, and leaving it out was a hole** (#223). A turn
@@ -432,6 +446,11 @@ export function replayRun(state: RunState, sources: ReplaySources): Replay {
           role: seat.role,
           kind: seat.kind,
           round: seat.turnRound ?? round,
+          // An additional finder's frame says which one, as the live frame does
+          // (#388 Part B). The first finder's frame is unchanged.
+          ...(seat.finder === undefined
+            ? {}
+            : { finder: seat.finder, seat: `review.finders[${String(seat.finder - 1)}]` }),
           // Told, never inferred. A window that guessed which turns had a
           // measured start would guess wrong on the ones that matter.
           unmeasured: start === null,
@@ -498,6 +517,21 @@ export function replayRun(state: RunState, sources: ReplaySources): Replay {
       if (typeof data['gate'] !== 'string') continue;
       push(at, say('verify_started', `Verifying: ${data['gate']}`, { gate: data['gate'], round: data['round'] ?? null }));
     }
+    push(at, say(id, id, data));
+  }
+
+  // **What each finder round reported, and what failed** (#388 Part B). Both
+  // are durable events, carried whole at their own time: the merge frame is
+  // the only record of how many finders *reported* in the attempt that wrote
+  // the round's artifact, and the findings pane's denominator is read off it -
+  // never off the configured count. A replay without it would draw every
+  // finding's provenance with no denominator.
+  for (const event of state.events) {
+    const id = event.type;
+    if (id !== 'review_finders_merged' && id !== 'review_finder_failed') continue;
+    const at = ms(typeof event['at'] === 'string' ? event['at'] : null);
+    if (at === null) continue;
+    const { at: _at, type: _type, ...data } = event;
     push(at, say(id, id, data));
   }
 

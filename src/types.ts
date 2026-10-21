@@ -1099,6 +1099,14 @@ export interface ReproducerOutcome {
   archived: string | null;
 }
 
+/** One finder's share of a finding's provenance. See `Finding.foundBy`. */
+export interface FoundBy {
+  seat: string;
+  provider: AgentProvider;
+  model: string;
+  id: string;
+}
+
 export interface Finding {
   id: string;
   severity: Severity;
@@ -1118,6 +1126,23 @@ export interface Finding {
    * over a bad label would delete a claim to protect a caption.
    */
   raisedBy?: FindingAuthor;
+  /**
+   * Which review finders raised this defect, in finder order (#388 Part B).
+   *
+   * **Absent unless at least one additional finder was configured** - and then
+   * present on every finding of the round, including one only `roles.reviewer`
+   * raised. A default run's artifacts carry no such key, byte for byte. Written
+   * only by `mergeAcrossFinders`.
+   *
+   * `seat` is the config path (`roles.reviewer`, `review.finders[0]`); `model`
+   * is the configured string or `"default"` - never the model a default was
+   * guessed to resolve to; `id` is the id that finder itself used, which a
+   * re-key on collision may have changed above and which that finder's own
+   * `finding_downgraded` events still name. Rides through `readFinding`
+   * unvalidated, as `raisedBy` and `evidence` do: a malformed caption must not
+   * delete a claim.
+   */
+  foundBy?: FoundBy[];
   /**
    * Where this finding says to look. At least one entry, per the schema.
    *

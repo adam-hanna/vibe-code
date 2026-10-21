@@ -156,8 +156,60 @@ export interface FullFinding {
   suggestedFix: string | null;
   citations: readonly Citation[];
   raisedBy: string | null;
+  /**
+   * Which review finders raised it (#388 Part B), or null - which is every
+   * finding of a run that seated no additional finder, and must render as
+   * exactly what it did before.
+   */
+  foundBy: readonly FoundBy[] | null;
   deferred: boolean;
   downgraded: { from: string; reason: string } | null;
+}
+
+/** One finder's share of a finding's provenance, as the report file has it. */
+export interface FoundBy {
+  seat: string;
+  provider: string;
+  model: string;
+  id: string;
+}
+
+/**
+ * The finders a report says raised a finding, dropping an entry this build
+ * cannot read rather than the list - the rule `readCitations` follows. Null when
+ * there is no list, or nothing in it survives: a caption naming no finder is
+ * not one to draw.
+ */
+function readFoundBy(v: unknown): FoundBy[] | null {
+  if (!Array.isArray(v)) return null;
+  const out: FoundBy[] = [];
+  for (const item of v as unknown[]) {
+    const row = record(item);
+    if (row === null) continue;
+    const seat = str(row['seat']);
+    const provider = str(row['provider']);
+    const model = str(row['model']);
+    const id = str(row['id']);
+    if (seat === null || provider === null || model === null || id === null) continue;
+    out.push({ seat, provider, model, id });
+  }
+  return out.length === 0 ? null : out;
+}
+
+/**
+ * The provenance sentence: *"found by 2 of 3 finders: codex/gpt-5.5, claude/default"*.
+ *
+ * `reported` is the number of finders that reported that round, off the
+ * round's `review_finders_merged` frame - never the configured count, which
+ * would count a seat that failed as one that looked and saw nothing. Without
+ * a frame (a replay of an older core) the sentence states the numerator only.
+ */
+export function foundByLine(foundBy: readonly FoundBy[], reported: number | null): string {
+  const who = foundBy.map((f) => `${f.provider}/${f.model}`).join(', ');
+  const n = String(foundBy.length);
+  return reported === null
+    ? `found by ${n} finder${foundBy.length === 1 ? '' : 's'}: ${who}`
+    : `found by ${n} of ${String(reported)} finders: ${who}`;
 }
 
 function readCitations(v: unknown): Citation[] {
@@ -224,6 +276,7 @@ export function readReport(text: string): Report | null {
         suggestedFix: str(row['suggested_fix']),
         citations: readCitations(row['evidence']),
         raisedBy: str(row['raisedBy']),
+        foundBy: readFoundBy(row['foundBy']),
         // `=== true`, so a report that does not carry the field is not read as
         // having said no. It means the same thing here, and the coercion is the
         // one that cannot become wrong later.

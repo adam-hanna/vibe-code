@@ -12,9 +12,10 @@ process.env['VIBE_CLAUDE_BIN'] = process.execPath;
 process.env['VIBE_CODEX_BIN'] = process.execPath;
 
 /**
- * `vibe doctor` lists the review seats (#388 Part A), marked *not used yet*,
- * and says nothing extra under the defaults - so doctor's output for every
- * config that names no seat is what it was.
+ * `vibe doctor` lists the review seats (#388), and says nothing extra under the
+ * defaults - so doctor's output for every config that names no seat is what it
+ * was. Finders are used since Part B and are listed as such; verifiers, the
+ * quorum and `unconfirmedP0` are still marked *not used yet*.
  *
  * The fixture makes each figure distinguishable: one finder names everything,
  * one names nothing and so takes Claude's read timeout, and a verifier names
@@ -58,7 +59,7 @@ function line(lines: readonly string[], label: string): string {
   return found[0] as string;
 }
 
-test('doctor lists each seat as it would run, under "not used yet"', async () => {
+test('doctor lists finders as used and verifiers under "not used yet"', async () => {
   const { code, lines } = await doctor(
     targetDir({
       finders: [
@@ -70,7 +71,19 @@ test('doctor lists each seat as it would run, under "not used yet"', async () =>
     }),
   );
   assert.equal(code, EXIT.OK);
-  assert.match(lines.join('\n'), /review seats \(not used yet: accepted and validated, no run reads them/);
+  // Finders are used since #388 Part B: their rows sit under their own header,
+  // and the *not used yet* header comes after them and covers the rest only.
+  const findersAt = lines.findIndex((l) => l.includes('review finders (each reviews every chunk'));
+  const unusedAt = lines.findIndex((l) =>
+    /review seats \(not used yet: accepted and validated, no run reads them/.test(l),
+  );
+  assert.ok(findersAt >= 0, 'a review finders header');
+  assert.ok(unusedAt > findersAt, 'the not-used-yet header follows the finders');
+  const at = (label: string): number => lines.indexOf(line(lines, label));
+  assert.ok(at('finder 1') > findersAt && at('finder 2') < unusedAt, 'finders are not under "not used yet"');
+  for (const label of ['verifier 1', 'verifier 3', 'quorum', 'unconfirmed P0']) {
+    assert.ok(at(label) > unusedAt, `${label} is still under "not used yet"`);
+  }
   assert.match(line(lines, 'finder 1'), /codex\s+finder-fixture \/ max \/ 555000ms {2}focus: "security"$/);
   assert.match(line(lines, 'finder 2'), /claude\s+claude-fixture \/ low \/ 333000ms$/);
   assert.match(line(lines, 'verifier 1'), /codex\s+gpt-fixture \/ medium \/ 111000ms$/);

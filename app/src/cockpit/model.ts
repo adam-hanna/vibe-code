@@ -363,6 +363,30 @@ export interface Census {
   seq: number;
 }
 
+/**
+ * What a review round's finders came to (#388 Part B), off `review_finders_merged`.
+ *
+ * Carried for one number above all: `reported`, the finders that actually
+ * reported that round, which is the only honest denominator for a finding's
+ * *"found by 2 of 3"*. The configured count is not it - a finder that failed
+ * contributed nothing, and counting it would claim a seat looked and saw nothing.
+ * Absent on a round with no additional finder, which writes no such frame.
+ */
+export interface FinderMerge {
+  /** The core's raw round, the number `code-review-<n>.json` is named by. Null when unsaid. */
+  round: number | null;
+  /** Every finder of the round, `roles.reviewer` included. */
+  finders: number;
+  reported: number;
+  parts: number | null;
+  /** Findings before the merge and after it, as the core counted them. */
+  findings: number | null;
+  merged: number | null;
+  at: number;
+  /** Arrival order, as a census has it (#285): what attaches it to a round. */
+  seq: number;
+}
+
 /** One turn's charge, as the seam that charged it reported (#223, `5e`). */
 export interface Charge {
   label: string;
@@ -631,6 +655,8 @@ export interface Run {
    * rounds behind it. Empty until a round reports one.
    */
   censuses: readonly Census[];
+  /** Every finder round's merge, oldest first (#388 Part B). Empty without finders. */
+  finderMerges: readonly FinderMerge[];
   /** What the run has spent, from the one seam every token goes through. */
   spend: Spend;
   /** Every compaction, oldest first. Empty until one happens (`5e`). */
@@ -841,6 +867,7 @@ export function emptyRun(): Run {
     rateLimit: null,
     verify: [],
     censuses: [],
+    finderMerges: [],
     spend: { tokens: null, costUsd: null, codexTokens: null, charges: [] },
     compactions: [],
     baseSha: null,
@@ -1853,6 +1880,31 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
           compactions: [
             ...next.compactions,
             { slot, model: str(data['model']), measured: num(data['measured']), at },
+          ],
+        };
+      }
+
+      case 'review_finders_merged': {
+        // Dropped rather than guessed when either count is missing: a
+        // denominator this window invented is the claim the frame exists to
+        // replace.
+        const finders = num(data['finders']);
+        const reported = num(data['reported']);
+        if (finders === null || reported === null) return next;
+        return {
+          ...next,
+          finderMerges: [
+            ...next.finderMerges,
+            {
+              round: num(data['round']),
+              finders,
+              reported,
+              parts: num(data['parts']),
+              findings: num(data['findings']),
+              merged: num(data['merged']),
+              at,
+              seq: id(),
+            },
           ],
         };
       }
