@@ -62,6 +62,28 @@ Each case below has to have an answer:
   committing to the wrong branch. So the rename needs a durable intent written before it
   (`state.branchRename = { from, to }`). A resume settles it by looking at which of the two
   refs exists.
+
+  **Where it is settled matters as much as how.** It must be the first thing a resume does
+  with git, before preflight's worktree block, not in `prepareGit`. That block
+  (`src/cli.ts`, after `git.baseRef` is resolved) reads `runBranch(cfg, state)`, which is
+  `state.branch`. After a kill between `git branch -m` and the save, that is still the
+  old name. The block finds no ref by that name, so it creates one at the home checkout's HEAD,
+  and when the worktree has been pruned it rebuilds the worktree on that ref. By the time
+  `prepareGit` ran, both refs would exist, possibly at different commits. A check of
+  which one exists would then have no answer. The PR #398 review reproduced this with the real
+  `runPreflight(…, { resume: true })`: before preflight only the new ref existed, and after it
+  both did, at different SHAs.
+
+  So one function, `settleBranchRename(state)`, runs at the top of preflight on every resume
+  that has a `branchRename`, before any ref or worktree is created:
+  - **Only `to` exists:** the rename happened. Save `state.branch = to` and clear the intent.
+  - **Only `from` exists:** it did not happen. Clear the intent, and the rename is attempted
+    again on the next pass into `implementing`.
+  - **Both exist, or neither does:** something else touched the refs. Refuse the resume by
+    name, with both refs and their SHAs, and spend nothing. Guessing which one holds the run's
+    commits is the defect this rule exists to prevent.
+
+  `prepareGit` then reads a `state.branch` that names a branch that exists, as it always has.
 - *A plan-only run.* It never reaches implementation. Doing the rename on the first pass into
   `implementing`, not inside the approval step, covers both paths: an ordinary run, and
   `vibe resume <id> --implement` on a plan-only run.
@@ -164,9 +186,13 @@ Each PR is green on `npm run typecheck && npm test`. The first three change noth
 default run.
 
 1. **Groundwork: the rename primitive.** `git.renameBranch`, the `branchRename` intent in state
-   with validation in `stored.ts`, resume reconciliation in `prepareGit`, and the stash notice
-   matching both names. Nothing calls the rename yet. Tests cover a kill before and after
-   `git branch -m`, and a rename inside a linked worktree.
+   with validation in `stored.ts`, `settleBranchRename` run first in preflight on a resume (not in
+   `prepareGit`; see section 2), and the stash notice
+   matching both names. Nothing calls the rename yet. Tests cover:
+   - a kill before and after `git branch -m`, each resumed through the real `runPreflight(…,
+     { resume: true })`, with the worktree still there and with it pruned;
+   - the case where both refs exist, refused before anything is created;
+   - a rename inside a linked worktree.
 2. **Groundwork: the validator.** `checkBranchName` covers every check in section 3. It is pure
    apart from git reads, it is tested, and nothing calls it yet.
 3. **`--branch <name>`.** It is validated in preflight and refuses by name, since a person
