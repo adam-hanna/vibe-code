@@ -315,6 +315,14 @@ The block names are `respond with JSON`, `review breadth`, `fix breadth`, `simpl
 |---|---|---|
 | `instructions.text` | `""` | Your own standing instructions, put in front of every turn of every role, on both agents, and given to the desktop pilot. Set it once in the global file, or per project. |
 
+## `updates`
+
+| Key | Default | Meaning |
+|---|---|---|
+| `updates.check` | `true` | At the end of `vibe run`, `vibe plan` and `vibe doctor` in a terminal, say when npm has a newer vibe: `vibe X is available (you have Y): npm install -g @adam-hanna/vibe-code`. `false` turns it off. |
+
+The check is one request to `https://registry.npmjs.org/@adam-hanna/vibe-code/latest`, made at most once a day and cached in `update-check.json` next to the global config file. It sends no identifier, cookie or credential. It is bounded by a two-second timeout, runs only after the command has finished, and never changes an exit code. A check that fails or times out prints nothing. It is also off when `CI` is set, when stdout is not a terminal, when `VIBE_NO_UPDATE_CHECK=1` is set, and when `VIBE_GLOBAL_CONFIG` is empty, since there is then nowhere to record it. The desktop app never makes it.
+
 ## `toolchain`
 
 `toolchain` is the contract each agent's environment must meet. Before the first turn, vibe runs each probe inside each agent's own shell and refuses the run (exit 6) if a required tool is missing. `vibe doctor` runs the same check.

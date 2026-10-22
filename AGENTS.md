@@ -7,10 +7,19 @@ people *using* `vibe`; this file is for people *changing* it.
 
 A TypeScript CLI that automates the plan → critique → implement → review loop between the
 Claude Code CLI and the Codex CLI. It installs neither; it shells out to both and inherits
-whatever you are already logged into. There is no server, no daemon and no network code in
-the core — every external call `src/` makes is a child process. The desktop app has two
-network clients of its own, both in Rust under `app/`: the pilot's vendor adapters and the
-updater (#299).
+whatever you are already logged into. There is no server and no daemon in the core, and every
+external call `src/` makes is a child process **with one exception: `src/updatecheck.ts`**, a
+single unauthenticated GET of npm's public metadata for this package (#323). The desktop app
+has two network clients of its own, both in Rust under `app/`: the pilot's vendor adapters and
+the updater (#299).
+
+**That exception reverses a rule this file used to state**, *no network code in the core*, by
+the owner's decision on #323 (2026-10-20): a GET rather than `npm view` as a child, so the check
+does not depend on `npm` being on PATH and does not start a second Node process. It is one GET
+with no identifier, cookie or credential, through Node's own `fetch` with no dependency, bounded,
+once a day, terminal only, and `update-check-guard.test.ts` fails on any other `fetch(` or network
+import in `src/`. Anything more is a new decision, not an extension of this one; the reasoning and
+the limits are in [`docs/agents/processes.md`](docs/agents/processes.md).
 
 ## Commands
 
@@ -157,7 +166,7 @@ file for its area, not here. Keep this file to rules that apply to every change.
 - [`docs/agents/core-and-window.md`](docs/agents/core-and-window.md) — narration promoted from events, the read frames, sync between clients, artifacts, spend and silence ceilings, how a run ends and how a death is told apart.
 - [`docs/agents/run-worktrees.md`](docs/agents/run-worktrees.md) — `src/worktree.ts`: home versus work directory, the setup script, `git.baseRef`.
 - [`docs/agents/phone.md`](docs/agents/phone.md) — iroh, the bridge and the hub, `remote.json`, the phone app, pairing and reconnecting.
-- [`docs/agents/processes.md`](docs/agents/processes.md) — two front ends over one core, one host per run, several live runs in one window, one run per checkout, no shell in the webview.
+- [`docs/agents/processes.md`](docs/agents/processes.md) — two front ends over one core, one host per run, several live runs in one window, one run per checkout, no shell in the webview, the update check (the one network request in `src/`).
 - [`docs/agents/pilot.md`](docs/agents/pilot.md) — commands it may run, its tools, keys, the two backends and two roads per vendor, its context, its sandbox, the network code, its ledger.
 - [`docs/agents/loop.md`](docs/agents/loop.md) — gates and pauses, stop, question rounds, findings and severities, verification gates, reproducers, judge files, links under `.vibe/runs`, the scorecard, CLI versions.
 - [`docs/agents/updater-and-host-lifecycle.md`](docs/agents/updater-and-host-lifecycle.md) — `update.rs`, the reaper, a closed stdin, where the logs are.

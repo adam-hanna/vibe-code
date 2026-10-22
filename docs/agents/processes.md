@@ -211,6 +211,45 @@ in `repo/sub/.vibe/runs`, by the settled rule that `.vibe/runs` lives where the 
 given, and finding it from `repo` would need an unbounded walk of descendant archives and
 a second answer to which runs a directory holds.
 
+**The update check is the terminal's alone, and the core's one network request** (#323).
+AGENTS.md used to say the core has no network code and that every external call is a child
+process. The owner's decision on #323 (2026-10-20) reversed that for exactly one thing: at the
+end of `vibe run`, `vibe plan` and `vibe doctor`, a terminal user is told when npm has a newer
+vibe, and the version is asked for with an HTTP GET in `src/updatecheck.ts` rather than with
+`npm view` as a child. Why the GET: a child process depends on `npm` being on PATH, which a vibe
+installed by another package manager, or run under a version manager's node, need not have; and
+`npm view` starts a second Node process, measured on the dev machine (2026-10-22) at 0.59-0.95s
+over three tries, where the GET took 0.24-0.34s over five.
+
+How narrow the exception is, and every part of it is what makes it acceptable:
+
+- **One unauthenticated GET of public metadata**,
+  `https://registry.npmjs.org/@adam-hanna/vibe-code/latest`. No query, no identifier, no
+  cookie, no credential, an `Accept` header and nothing else.
+- **Node's own `fetch`, no dependency.** `app/src/pilot/keys.test.ts` still pins the core's
+  `dependencies` to `{}` and its lockfile to nothing outside `devDependencies`.
+- **Bounded**: a 2-second `AbortSignal.timeout`, about six times the slowest GET measured, and
+  at most one request a day, cached in `update-check.json` next to the global config
+  (`globalConfigPath`'s directory). A failed request is cached too, so a machine with no
+  network pays the timeout once a day. A corrupt cache is no cache. With the global layer
+  switched off (`VIBE_GLOBAL_CONFIG` empty, as `npm test` sets it) there is nowhere to record
+  a check, so none is made.
+- **After the command, in the terminal's entry only.** `src/main.ts` calls `runWithNotice`,
+  which sets the exit code from `main()` before the check starts, so it can neither delay a
+  run's first output nor change how it ended. It is **not** in `main()`, because the host calls
+  `main()` too, and a line printed there would land on the protocol's stdout. Nothing imports
+  `main.ts`, so `hostmain.ts → serve.ts → cli.ts` cannot reach the check, and no frame can carry
+  it; `update-check-guard.test.ts` asserts both, and that no other file in `src/` calls `fetch(`
+  or imports `http`, `https`, `http2`, `net`, `tls`, `dgram` or `undici`.
+- **Off** under `CI`, when stdout is not a TTY, with `VIBE_NO_UPDATE_CHECK=1`, with
+  `updates.check: false`, and when the config cannot be read (fail closed). Each of these
+  stops the request, not only the line.
+
+A version is compared by semver 2.0.0 precedence (`compareVersions`, no dependency): a
+pre-release sorts below its release and above the release before it, build metadata is
+ignored, and anything that does not parse is never newer, so an odd registry answer prints
+nothing rather than a wrong line.
+
 The webview is given **no shell permission at all**. The host is spawned from Rust with a
 path Rust resolved, and `host_send` writes one line to a process that is already running.
 No Tauri command takes a program name, and none ever should: a window that could spawn is a
