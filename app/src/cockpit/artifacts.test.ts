@@ -93,6 +93,7 @@ describe('the names are the loop’s, and the loop is read to prove it', () => {
     expect(writes('`code-review-${state.reviewRound}.json`')).toBe(true);
     expect(writes('`answers-${state.questionRound}.json`')).toBe(true);
     expect(writes("'PLAN.md'")).toBe(true);
+    expect(writes('`fix-dispositions-${round}.json`')).toBe(true);
   });
 
   test('and this module places what those templates produce', () => {
@@ -102,6 +103,7 @@ describe('the names are the loop’s, and the loop is read to prove it', () => {
     expect(classify(file('plan-critique-3.json')).kind).toBe('critique');
     expect(classify(file('code-review-3.json')).kind).toBe('review');
     expect(classify(file('answers-3.json')).kind).toBe('answers');
+    expect(classify(file('fix-dispositions-3.json')).kind).toBe('dispositions');
   });
 });
 

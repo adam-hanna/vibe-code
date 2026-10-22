@@ -547,10 +547,19 @@ export function replayRun(state: RunState, sources: ReplaySources): Replay {
   // never off the configured count. A replay without it would draw every
   // finding's provenance with no denominator.
   // The vote's tally (#388 Part C) rides the same loop, for the same reason:
-  // it is the one account of what a round's vote came to.
+  // it is the one account of what a round's vote came to. So do a fix round's
+  // dispositions and the warning that they could not be read (#393): the
+  // findings pane says "not recorded" off the second.
+  const carried = new Set([
+    'review_finders_merged',
+    'review_finder_failed',
+    'review_votes_tallied',
+    'fix_dispositions',
+    'fix_dispositions_unreadable',
+  ]);
   for (const event of state.events) {
     const id = event.type;
-    if (id !== 'review_finders_merged' && id !== 'review_finder_failed' && id !== 'review_votes_tallied') continue;
+    if (!carried.has(id)) continue;
     const at = ms(typeof event['at'] === 'string' ? event['at'] : null);
     if (at === null) continue;
     const { at: _at, type: _type, ...data } = event;

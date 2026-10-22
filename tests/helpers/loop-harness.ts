@@ -253,12 +253,15 @@ export function agents(handlers: Handlers, calls: string[]): AgentTurns {
     },
     codex: (options) => {
       calls.push(options.schemaName);
-      const structured = handlers.codex?.(options.schemaName, options) ?? report([]);
+      const produced = handlers.codex?.(options.schemaName, options) ?? report([]);
       const activity = handlers.activity?.(options.schemaName);
+      // A writer turn whose text did not parse, as #407's adapter returns it.
+      const raw = rawText(produced);
+      const structured = raw === null ? produced : null;
       return Promise.resolve({
         ...(activity === undefined ? {} : { activity }),
         structured,
-        raw: JSON.stringify(structured),
+        raw: raw ?? JSON.stringify(structured),
         // Not `?? 'thread-1'`: a handler that returns null is saying this turn
         // named no thread, which is a different fact from having no handler.
         sessionId:
@@ -269,6 +272,23 @@ export function agents(handlers: Handlers, calls: string[]): AgentTurns {
       });
     },
   };
+}
+
+const RAW = Symbol('codex raw text');
+
+/**
+ * What a Codex handler returns for a turn whose last message was not JSON: the
+ * fake hands back `structured: null` and this text, which is what the adapter
+ * returns for a writer under `unparseable: 'raw'` (#407).
+ */
+export function codexRaw(text: string): object {
+  return { [RAW]: text };
+}
+
+function rawText(v: unknown): string | null {
+  if (typeof v !== 'object' || v === null || !(RAW in v)) return null;
+  const text: unknown = (v as Record<symbol, unknown>)[RAW];
+  return typeof text === 'string' ? text : null;
 }
 
 /** A judge that fails the case if it is asked twice. */

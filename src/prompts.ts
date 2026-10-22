@@ -1402,6 +1402,14 @@ export function fixPrompt(
   acceptanceCriteria?: readonly AcceptanceCriterion[] | undefined,
   /** The approved plan and boundary travel on every fix, including verification. */
   plan?: Plan | null | undefined,
+  /**
+   * Ask for the report and a disposition per finding as `FIX_SCHEMA` JSON (#393).
+   *
+   * True only on the two review fix turns. `verify-fix` passes nothing - its one
+   * finding is a gate failure, not a reviewer's claim - and its prompt is
+   * byte-identical to what it was, as is every rendering with this false.
+   */
+  dispositions = false,
 ): string {
   return `A code reviewer found issues in your implementation. This is fix round ${round}.
 
@@ -1418,7 +1426,25 @@ ${plan == null ? '' : `## Approved plan of record\n\n${plan.plan_md}\n\n## Out o
 Re-run the project's tests after fixing. If you believe a finding is incorrect, fix nothing for it but explain why in your final message - do not silently skip it.
 
 Do not commit - the orchestrator handles git.
-${implementerCriteria(acceptanceCriteria)}${reportRequest(acceptanceCriteria, 'fix')}`;
+${implementerCriteria(acceptanceCriteria)}${reportRequest(acceptanceCriteria, 'fix')}${
+    dispositions ? dispositionsRequest(findings) : ''
+  }`;
+}
+
+/**
+ * The one addition a review fix turn's prompt carries (#393): return the report
+ * and the dispositions as `FIX_SCHEMA` JSON, one entry per id it was shown.
+ *
+ * Appended after the report request rather than woven into `FIX_BREADTH`, which
+ * is shared with the implement turn and overridable, so neither of those moves.
+ */
+function dispositionsRequest(findings: readonly Finding[]): string {
+  const ids = findings.map((f) => `\`${f.id}\``).join(', ');
+  return `
+## Dispositions
+
+Return your final message as JSON in the response schema. \`report\` holds the whole report described above, with its five headings: it is what the next reviewer reads. \`dispositions\` has one entry for each finding id listed above (${ids}): \`disposition\` is \`fixed\`, \`rebutted\`, \`deferred\` or \`not-addressed\`, and \`reason\` says why in a sentence or two. Use only those ids.
+`;
 }
 
 /**

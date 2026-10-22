@@ -6,6 +6,7 @@ import type {
   Assumption,
   CheckKind,
   Confidence,
+  Disposition,
   Evidence,
   EvidenceKind,
   Finding,
@@ -311,6 +312,38 @@ export function parseTestVerdicts(raw: unknown): RawVerdict[] {
     out.push({ file, justified, reason });
   }
   return out;
+}
+
+const DISPOSITIONS: readonly Disposition[] = ['fixed', 'rebutted', 'deferred', 'not-addressed'];
+
+/** A review fix turn's output, as `FIX_SCHEMA` shapes it (#393). */
+export interface FixOutput {
+  report: string;
+  dispositions: { id: string; disposition: Disposition; reason: string }[];
+}
+
+/**
+ * A review fix turn's report and dispositions, or a throw.
+ *
+ * Strict, and deliberately so: one malformed entry fails the whole output
+ * rather than being dropped. The caller reads a throw as *unreadable* and
+ * records nothing for the round - a partly read answer would turn the entries
+ * it could not read into findings the fixer appeared to have left out, which
+ * is the invented `not-addressed` the record exists to refuse.
+ */
+export function parseFixOutput(raw: unknown): FixOutput {
+  const o = record(raw, 'fix', raw);
+  const report = str(o, 'report', 'fix', raw);
+  const dispositions = arr(o, 'dispositions', 'fix', raw).map((d, i) => {
+    const path = `fix.dispositions[${String(i)}]`;
+    const e = record(d, path, raw);
+    return {
+      id: str(e, 'id', path, raw),
+      disposition: oneOf(e, 'disposition', DISPOSITIONS, path, raw),
+      reason: str(e, 'reason', path, raw),
+    };
+  });
+  return { report, dispositions };
 }
 
 export function parseAnswers(raw: unknown): AnswersReport {

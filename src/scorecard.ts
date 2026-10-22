@@ -47,9 +47,10 @@ import type { RunSummary } from '@src/types.js';
 /**
  * Bumped when a field here changes meaning, so a reader can refuse a shape it does not know.
  *
- * Still 1 after `turns.byKind` and `turns.unplaced` arrived (#114): adding a
- * field changes the meaning of none that were already here, and a reader that
- * does not know the new ones can ignore them.
+ * Still 1 after `turns.byKind` and `turns.unplaced` arrived (#114), and after
+ * `findings.outcomes` (#393): adding a field changes the meaning of none that
+ * were already here, and a reader that does not know the new ones can ignore
+ * them.
  */
 export const SCORECARD_VERSION = 1;
 
@@ -118,6 +119,64 @@ export interface KindTokens {
   p90: number | null;
 }
 
+/**
+ * What the fixer said it did with a set of review findings (#393).
+ *
+ * Every figure travels with the others and with `of`, and is never rendered as
+ * a percentage: a rebuttal count read alone is the shape that gets mistaken for
+ * a verdict on the reviewer, and it is not one - the fixer can be wrong too.
+ */
+export interface DispositionRow {
+  of: number;
+  fixed: number;
+  rebutted: number;
+  deferred: number;
+  notAddressed: number;
+}
+
+/**
+ * Review findings by what the fixer did with them, from `fix_dispositions`
+ * events (#393). Only findings a reviewer raised are scored; a person's (#141)
+ * and vibe's own are counted in `excluded` and nowhere else.
+ */
+export interface FixOutcomes {
+  /**
+   * Review fix rounds (`fix-N`, `final-fix-N`): matched where dispositions were
+   * recorded, measured where either that or the unreadable warning was, and
+   * unmeasured where neither was - every run recorded before #393, and a round
+   * that stopped before its record.
+   */
+  rounds: Measure;
+  /** Rounds whose dispositions could not be read: `fix_dispositions_unreadable`. */
+  unreadable: number;
+  /** Each scored finding once per fix round, by id - never once per seat. */
+  total: DispositionRow;
+  /** The severity the fixer was shown, each finding once. */
+  bySeverity: Record<string, DispositionRow>;
+  /**
+   * Keyed `provider/model`. A finding several seats raised counts once in each
+   * of their rows, so these rows add up to more than `total`, and that is
+   * expected.
+   */
+  bySeat: Record<string, DispositionRow>;
+  /** Scored findings no seat could be credited with: counted in `total` only. */
+  unattributed: number;
+  /** Findings whose reproducer reproduced at review. */
+  reproduced: DispositionRow;
+  /** Carried P1s of a final fix round, by the reproducer's `final-fix` verdict. */
+  finalFixReproducer: Tally;
+  /**
+   * Findings of a `fix-N` round whose id the next review raised again, over the
+   * findings whose next `code-review-N.json` could be read. A missing or
+   * unreadable artifact is unmeasured, never "not raised again".
+   */
+  raisedAgain: Measure;
+  /** Findings of a final fix round, which by design nothing reviews again. */
+  notReviewedAgain: number;
+  /** Findings recorded but not scored, by who raised them. */
+  excluded: Tally;
+}
+
 export interface Scorecard {
   version: number;
   archive: {
@@ -169,6 +228,8 @@ export interface Scorecard {
     byFrom: Tally;
     /** The evidence kinds each offered, as a sorted comma-joined key - `""` for a finding that offered none. */
     byKinds: Tally;
+    /** What the fixer did with each review finding (#393). */
+    outcomes: FixOutcomes;
   };
   turns: {
     total: number;
@@ -218,7 +279,10 @@ export const UNMEASURABLE: readonly { dimension: string; why: string }[] = [
   },
   {
     dimension: 'finding precision',
-    why: 'finding_downgraded gives the UNGROUNDED rate, not the WRONG rate - a finding can be perfectly grounded and false, which is #44',
+    why:
+      'finding_downgraded gives the UNGROUNDED rate, not the WRONG rate - a finding can be perfectly ' +
+      'grounded and false, which is #44. The nearest proxy is the count rebutted by the fixer above, and ' +
+      'it is not precision: the fixer can be wrong too, and a rebuttal records what happened, not a verdict',
   },
   {
     dimension: 'reviewer uplift',
@@ -256,6 +320,26 @@ function observe(m: Measure, value: boolean | null): void {
   }
   m.measured += 1;
   if (value) m.matched += 1;
+}
+
+function row(): DispositionRow {
+  return { of: 0, fixed: 0, rebutted: 0, deferred: 0, notAddressed: 0 };
+}
+
+function outcomes(): FixOutcomes {
+  return {
+    rounds: measure(),
+    unreadable: 0,
+    total: row(),
+    bySeverity: {},
+    bySeat: {},
+    unattributed: 0,
+    reproduced: row(),
+    finalFixReproducer: {},
+    raisedAgain: measure(),
+    notReviewedAgain: 0,
+    excluded: {},
+  };
 }
 
 function census(): RoundCensus {
@@ -308,7 +392,7 @@ export function scoreArchive(targetDir: string): Scorecard {
     rounds: { plan: census(), question: census(), review: census(), verify: census() },
     finalFix: measure(),
     gates: { recorded: measure(), byName: {}, attempts: {}, repeatedFailure: measure() },
-    findings: { downgraded: 0, byFrom: {}, byKinds: {} },
+    findings: { downgraded: 0, byFrom: {}, byKinds: {}, outcomes: outcomes() },
     turns: { total: 0, byLabel: {}, inert: measure(), byKind: {}, unplaced: 0 },
     questions: {
       asking: measure(),
@@ -350,7 +434,7 @@ export function scoreArchive(targetDir: string): Scorecard {
       continue;
     }
     card.archive.read += 1;
-    countRun(card, raw, samples);
+    countRun(card, raw, samples, path.join(targetDir, RUNS_DIR, row.id));
   }
   card.turns.byKind = finishKinds(samples);
   return card;
@@ -371,7 +455,12 @@ function skipReason(row: RunSummary): string | null {
   return null;
 }
 
-function countRun(card: Scorecard, raw: Record<string, unknown>, samples: Map<string, number[]>): void {
+function countRun(
+  card: Scorecard,
+  raw: Record<string, unknown>,
+  samples: Map<string, number[]>,
+  runDir: string,
+): void {
   const status = raw['status'];
   bump(card.endings.byStatus, typeof status === 'string' ? status : 'unrecorded');
 
@@ -431,6 +520,149 @@ function countRun(card: Scorecard, raw: Record<string, unknown>, samples: Map<st
 
   countGates(card, raw['gateOutcomes']);
   countQuestions(card, raw);
+  countOutcomes(card.findings.outcomes, raw, events, runDir);
+}
+
+/** The labels of review fix turns - never `verify-fix-N`, whose one finding is a gate failure. */
+const FIX_LABEL = /^(final-)?fix-\d+$/;
+
+const DISPOSITIONS = new Set(['fixed', 'rebutted', 'deferred', 'not-addressed']);
+
+/**
+ * One run's fix rounds, by what the fixer did with each review finding (#393).
+ *
+ * The population of rounds is every successful review fix turn the run was
+ * charged for, plus any round an event names: a run recorded before the event
+ * existed ran fix rounds that said nothing, and they are counted as rounds that
+ * could not say rather than left out - leaving them out would make missing data
+ * look like a smaller sample.
+ *
+ * "Same id raised again next round" reads the next round's `code-review-N.json`
+ * from the run directory - read-only, so this module still writes nothing - and
+ * is beside the disposition, never folded into it.
+ */
+function countOutcomes(
+  out: FixOutcomes,
+  raw: Record<string, unknown>,
+  events: readonly unknown[],
+  runDir: string,
+): void {
+  const labels = new Set<string>();
+  const recorded = new Map<string, Record<string, unknown>>();
+  const unreadable = new Set<string>();
+  for (const e of events) {
+    if (!isRecord(e)) continue;
+    const type = e['type'];
+    const label = e['label'];
+    if (typeof label !== 'string' || !FIX_LABEL.test(label)) continue;
+    if (type === 'claude_turn' || type === 'codex_turn') labels.add(label);
+    else if (type === 'fix_dispositions') {
+      labels.add(label);
+      if (!recorded.has(label)) recorded.set(label, e);
+    } else if (type === 'fix_dispositions_unreadable') {
+      labels.add(label);
+      unreadable.add(label);
+    }
+  }
+  for (const label of labels) {
+    if (recorded.has(label)) observe(out.rounds, true);
+    else if (unreadable.has(label)) {
+      observe(out.rounds, false);
+      out.unreadable += 1;
+    } else observe(out.rounds, null);
+  }
+
+  const outstanding = new Map<string, Record<string, unknown>>();
+  const carried = raw['outstanding'];
+  if (Array.isArray(carried)) {
+    for (const f of carried) if (isRecord(f) && typeof f['id'] === 'string') outstanding.set(f['id'], f);
+  }
+
+  for (const [label, e] of recorded) {
+    const final = label.startsWith('final-');
+    const round = counter(e['round']);
+    const list = Array.isArray(e['dispositions']) ? e['dispositions'] : [];
+    // Read once per round and only when a finding needs it.
+    let next: Set<string> | null | undefined;
+    const seen = new Set<string>();
+    for (const d of list) {
+      if (!isRecord(d)) continue;
+      const id = d['id'];
+      const severity = d['severity'];
+      const disposition = d['disposition'];
+      const raisedBy = d['raisedBy'];
+      if (typeof id !== 'string' || typeof severity !== 'string' || typeof disposition !== 'string') continue;
+      if (!DISPOSITIONS.has(disposition)) continue;
+      if (raisedBy !== 'reviewer') {
+        bump(out.excluded, typeof raisedBy === 'string' ? raisedBy : 'not recorded');
+        continue;
+      }
+      // Once per round, by id: the totals must not count a finding twice.
+      if (seen.has(id)) continue;
+      seen.add(id);
+
+      tallyRow(out.total, disposition);
+      tallyRow((out.bySeverity[severity] ??= row()), disposition);
+      const seats = seatKeys(d['seats']);
+      if (seats.length === 0) out.unattributed += 1;
+      for (const key of seats) tallyRow((out.bySeat[key] ??= row()), disposition);
+      if (d['reproducer'] === 'reproduced') tallyRow(out.reproduced, disposition);
+
+      if (final) {
+        out.notReviewedAgain += 1;
+        const f = outstanding.get(id);
+        if (f !== undefined) bump(out.finalFixReproducer, finalFixVerdict(f) ?? 'no final-fix observation');
+      } else {
+        if (next === undefined) next = round === null ? null : reviewedIds(runDir, round);
+        observe(out.raisedAgain, next === null ? null : next.has(id));
+      }
+    }
+  }
+}
+
+function tallyRow(r: DispositionRow, disposition: string): void {
+  r.of += 1;
+  if (disposition === 'fixed') r.fixed += 1;
+  else if (disposition === 'rebutted') r.rebutted += 1;
+  else if (disposition === 'deferred') r.deferred += 1;
+  else r.notAddressed += 1;
+}
+
+/** The distinct `provider/model` keys a finding is credited to; none when `seats` is null or unreadable. */
+function seatKeys(v: unknown): string[] {
+  if (!Array.isArray(v)) return [];
+  const keys = new Set<string>();
+  for (const s of v) {
+    if (!isRecord(s)) continue;
+    const provider = s['provider'];
+    const model = s['model'];
+    if (typeof provider === 'string' && typeof model === 'string') keys.add(`${provider}/${model}`);
+  }
+  return [...keys];
+}
+
+/** The last `at: 'final-fix'` reproducer verdict on a carried finding, or null. */
+function finalFixVerdict(f: Record<string, unknown>): string | null {
+  const list = f['reproducerOutcomes'];
+  if (!Array.isArray(list)) return null;
+  let verdict: string | null = null;
+  for (const o of list) {
+    if (isRecord(o) && o['at'] === 'final-fix' && typeof o['verdict'] === 'string') verdict = o['verdict'];
+  }
+  return verdict;
+}
+
+/** The finding ids in `code-review-<round>.json`, or null when it is missing or unreadable. */
+function reviewedIds(runDir: string, round: number): Set<string> | null {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(path.join(runDir, `code-review-${round}.json`), 'utf8'));
+    if (!isRecord(parsed) || !Array.isArray(parsed['findings'])) return null;
+    const ids = new Set<string>();
+    for (const f of parsed['findings']) if (isRecord(f) && typeof f['id'] === 'string') ids.add(f['id']);
+    return ids;
+  } catch {
+    return null;
+  }
 }
 
 function countDowngrade(card: Scorecard, e: Record<string, unknown>): void {
@@ -630,6 +862,8 @@ export function renderScorecard(card: Scorecard): string[] {
     out.push(`  ${pad(`evidence ${kinds === '' ? 'none' : kinds}`)} ${n}`);
   }
 
+  renderOutcomes(out, card.findings.outcomes);
+
   out.push('', 'Questions');
   out.push(`  ${pad('runs that asked')} ${rate(card.questions.asking, 'run', 'runs')}`);
   out.push(`  ${pad('answered')} ${card.questions.answered}`);
@@ -640,6 +874,60 @@ export function renderScorecard(card: Scorecard): string[] {
   out.push('', 'Not measured, and not estimated');
   for (const u of card.unmeasurable) out.push(`  ${pad(u.dimension)} ${u.why}`);
   return out;
+}
+
+/**
+ * The fixer's dispositions, every figure beside the others and the `of` (#393).
+ *
+ * No percentage anywhere in it, and the word for a rebuttal is "rebutted by the
+ * fixer": the figures say what was counted, and a rebuttal is the fixer's call,
+ * not a verdict on the finding.
+ */
+function renderOutcomes(out: string[], o: FixOutcomes): void {
+  out.push('', "Review findings, by what the fixer did  (reviewer findings only; a rebuttal is the fixer's call, not a verdict)");
+  const rounds = o.rounds.measured + o.rounds.unmeasured;
+  if (rounds === 0) {
+    out.push(`  ${pad('fix rounds')} no review fix round in any run`);
+    return;
+  }
+  const missing = rounds - o.rounds.matched;
+  const why = `${o.unreadable} unreadable, ${o.rounds.unmeasured} recorded nothing`;
+  if (o.rounds.matched === 0) {
+    out.push(`  ${pad('fix rounds')} dispositions not recorded for any of ${rounds} fix round(s) (${why})`);
+    return;
+  }
+  out.push(
+    `  ${pad('fix rounds')} dispositions recorded for ${o.rounds.matched} of ${rounds} fix round(s)` +
+      (missing === 0 ? '' : `; not recorded for ${missing} (${why})`),
+  );
+  out.push(`  ${pad('all seats')} ${describeRow(o.total)}`);
+  for (const [seat, r] of Object.entries(o.bySeat).sort((a, b) => b[1].of - a[1].of || a[0].localeCompare(b[0]))) {
+    out.push(`  ${pad(seat)} ${describeRow(r)}`);
+  }
+  if (o.unattributed > 0) out.push(`  ${pad('credited to no seat')} ${o.unattributed}`);
+  for (const [sev, r] of Object.entries(o.bySeverity).sort((a, b) => a[0].localeCompare(b[0]))) {
+    out.push(`  ${pad(sev)} ${describeRow(r)}`);
+  }
+  if (o.reproduced.of > 0) out.push(`  ${pad('reproducer reproduced')} ${describeRow(o.reproduced)}`);
+  if (Object.keys(o.finalFixReproducer).length > 0) {
+    out.push(
+      `  ${pad('carried P1, after final fix')} reproducer ${sorted(o.finalFixReproducer)
+        .map(([v, n]) => `${n} ${v}`)
+        .join(', ')}`,
+    );
+  }
+  out.push(`  ${pad('same id raised again')} ${rate(o.raisedAgain, 'finding', 'findings')} (next round)`);
+  if (o.notReviewedAgain > 0) out.push(`  ${pad('not reviewed again')} ${o.notReviewedAgain} (final fix round)`);
+  if (Object.keys(o.excluded).length > 0) {
+    out.push(`  ${pad('not scored, raised by')} ${sorted(o.excluded).map(([who, n]) => `${who} ${n}`).join(', ')}`);
+  }
+}
+
+function describeRow(r: DispositionRow): string {
+  return (
+    `${r.fixed} fixed, ${r.rebutted} rebutted by the fixer, ${r.deferred} deferred, ` +
+    `${r.notAddressed} not addressed, of ${r.of}`
+  );
 }
 
 function pad(s: string): string {

@@ -35,7 +35,7 @@ import type { ArtifactEntry } from '../host';
  */
 
 /** Which pane an artifact belongs behind. `other` is drawn, never hidden. */
-export type ArtifactKind = 'plan' | 'critique' | 'review' | 'answers' | 'other';
+export type ArtifactKind = 'plan' | 'critique' | 'review' | 'answers' | 'dispositions' | 'other';
 
 export interface Classified {
   name: string;
@@ -62,6 +62,9 @@ export interface Classified {
 const PATTERNS: readonly { kind: ArtifactKind; re: RegExp }[] = [
   { kind: 'critique', re: /^plan-critique-(\d+)\.json$/ },
   { kind: 'review', re: /^code-review-(\d+)\.json$/ },
+  // A review fix round's dispositions (#393). Its round is the FIX round, so it
+  // answers `code-review-<round - 1>.json`; no tab lists it on its own.
+  { kind: 'dispositions', re: /^fix-dispositions-(\d+)\.json$/ },
   { kind: 'answers', re: /^answers-(\d+)\.json$/ },
   { kind: 'plan', re: /^plan-(\d+)\.json$/ },
 ];
@@ -314,6 +317,83 @@ function readCitations(v: unknown): Citation[] {
       ref: str(row['ref']),
     });
   }
+  return out;
+}
+
+/** One finding's disposition, as `fix-dispositions-<n>.json` has it (#393). */
+export interface RecordedDisposition {
+  disposition: string;
+  reason: string;
+}
+
+/** A review fix round's dispositions file, at the density the findings pane needs. */
+export interface DispositionsFile {
+  round: number | null;
+  label: string | null;
+  /** A `final-fix-<n>` round, which by design nothing reviews again. */
+  final: boolean;
+  byId: ReadonlyMap<string, RecordedDisposition>;
+}
+
+/**
+ * The dispositions a fix round recorded, or null when the file is not JSON. An
+ * entry this build cannot read is dropped alone, as `readReport` drops a
+ * finding; the finding it was about then simply says nothing.
+ */
+export function readDispositions(text: string): DispositionsFile | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text) as unknown;
+  } catch {
+    return null;
+  }
+  const root = record(parsed);
+  if (root === null) return null;
+  const byId = new Map<string, RecordedDisposition>();
+  const list: unknown = root['dispositions'];
+  for (const item of Array.isArray(list) ? (list as unknown[]) : []) {
+    const row = record(item);
+    if (row === null) continue;
+    const id = str(row['id']);
+    const disposition = str(row['disposition']);
+    if (id === null || disposition === null || byId.has(id)) continue;
+    // `str` reads `''` as absent, and an empty reason is what a left-out finding has.
+    byId.set(id, { disposition, reason: typeof row['reason'] === 'string' ? row['reason'] : '' });
+  }
+  const label = str(root['label']);
+  return { round: num(root['round']), label, final: label?.startsWith('final-') ?? false, byId };
+}
+
+/** What the fixer did with one finding, as far as the run's files can say. */
+export type FixOutcome =
+  | { kind: 'recorded'; fixRound: number; final: boolean; entry: RecordedDisposition }
+  /** The round ran and its dispositions could not be read, so none were recorded. */
+  | { kind: 'not-recorded' }
+  | null;
+
+/**
+ * The outcome badges for a finding's provenance: *"fixer: rebutted - <reason>
+ * (fix round 2)"*, then *"same id raised again next round"* or *"not reviewed
+ * again"* when either is true. Nothing at all when there is nothing to say.
+ *
+ * The two later facts are their own badges, never folded into the
+ * disposition, and neither is ever "regressed" or "not fixed": a finding the
+ * next review did not raise is not confirmed fixed, so that says nothing.
+ */
+export function outcomeLine(
+  outcome: FixOutcome,
+  next: 'raised-again' | 'not-reviewed-again' | null,
+): string[] {
+  const out: string[] = [];
+  if (outcome?.kind === 'not-recorded') out.push('dispositions not recorded for this round');
+  else if (outcome?.kind === 'recorded') {
+    const what = outcome.entry.disposition.replace(/-/g, ' ');
+    const why = outcome.entry.reason === '' ? '' : ` - ${outcome.entry.reason}`;
+    const round = `${outcome.final ? 'final fix round' : 'fix round'} ${String(outcome.fixRound)}`;
+    out.push(`fixer: ${what}${why} (${round})`);
+  }
+  if (next === 'raised-again') out.push('same id raised again next round');
+  else if (next === 'not-reviewed-again') out.push('not reviewed again');
   return out;
 }
 

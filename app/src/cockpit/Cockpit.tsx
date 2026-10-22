@@ -2849,6 +2849,7 @@ export function Cockpit({
               rounds={past ? [] : cards}
               openAt={openAt}
               revision={run.artifacts.length}
+              fixDispositions={past ? [] : run.fixDispositions}
             />
           )}
           {/* **The run on screen, and its repository** (UI rework). This took
