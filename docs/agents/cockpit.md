@@ -265,6 +265,14 @@ they are waiting on. Four things in it are worth carrying:
   resume — attaches to nothing. `rounds()` is the single answer, and the loop column takes its
   census through it rather than matching one itself, so the column and the pilot's log cannot
   disagree about one round.
+- **The command palette matches by substring, and passes `cmdk` its filter to do it** (#397).
+  `shell/paletteFilter.ts` is the match: case-insensitive, whitespace folded, every hit scoring
+  1 so the rows keep the order `Palette` gave them. Leaving the `filter` prop off is not a
+  neutral default: `cmdk` then runs `command-score`, a fuzzy scorer roughly cubic in the
+  value's length, and a run's value is its id and its whole brief (6,825 to 20,386 characters
+  in this repository's archive). That froze the window for every letter typed: 360 ms for `a`,
+  11.0 s for `al` and 15.0 s for `all` over 20 runs, measured in Node. The query never leaves
+  `cmdk`'s own state, so typing does not re-render `Cockpit`; the cost was all in the filter.
 - **There is one sidebar, and the rail is its collapsed state.** A 54px rail headed `RUNS`
   beside a panel headed `Runs`, both drawing the same archive — reported in one line, *"there
   are two Runs bars on the left now"*, and it was not a rendering accident: two surfaces had
