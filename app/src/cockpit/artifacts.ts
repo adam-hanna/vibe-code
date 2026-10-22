@@ -35,7 +35,14 @@ import type { ArtifactEntry } from '../host';
  */
 
 /** Which pane an artifact belongs behind. `other` is drawn, never hidden. */
-export type ArtifactKind = 'plan' | 'critique' | 'review' | 'answers' | 'other';
+export type ArtifactKind =
+  | 'plan'
+  | 'critique'
+  | 'review'
+  | 'answers'
+  | 'dispositions'
+  | 'fix-report'
+  | 'other';
 
 export interface Classified {
   name: string;
@@ -62,6 +69,12 @@ export interface Classified {
 const PATTERNS: readonly { kind: ArtifactKind; re: RegExp }[] = [
   { kind: 'critique', re: /^plan-critique-(\d+)\.json$/ },
   { kind: 'review', re: /^code-review-(\d+)\.json$/ },
+  // A review fix round's dispositions (#393). Its round is the FIX round, so it
+  // answers `code-review-<round - 1>.json`; no tab lists it on its own.
+  { kind: 'dispositions', re: /^fix-dispositions-(\d+)\.json$/ },
+  // A review fix round's report: the evidence that the round ran, when it left
+  // no dispositions file - an unreadable answer, or a run from before #393.
+  { kind: 'fix-report', re: /^fix-report-(\d+)\.md$/ },
   { kind: 'answers', re: /^answers-(\d+)\.json$/ },
   { kind: 'plan', re: /^plan-(\d+)\.json$/ },
 ];
@@ -315,6 +328,116 @@ function readCitations(v: unknown): Citation[] {
     });
   }
   return out;
+}
+
+/** One finding's disposition, as `fix-dispositions-<n>.json` has it (#393). */
+export interface RecordedDisposition {
+  disposition: string;
+  reason: string;
+}
+
+/** A review fix round's dispositions file, at the density the findings pane needs. */
+export interface DispositionsFile {
+  round: number | null;
+  label: string | null;
+  /** A `final-fix-<n>` round, which by design nothing reviews again. */
+  final: boolean;
+  byId: ReadonlyMap<string, RecordedDisposition>;
+}
+
+/**
+ * The dispositions a fix round recorded, or null when the file is not JSON. An
+ * entry this build cannot read is dropped alone, as `readReport` drops a
+ * finding; the finding it was about then simply says nothing.
+ */
+export function readDispositions(text: string): DispositionsFile | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text) as unknown;
+  } catch {
+    return null;
+  }
+  const root = record(parsed);
+  if (root === null) return null;
+  const byId = new Map<string, RecordedDisposition>();
+  const list: unknown = root['dispositions'];
+  for (const item of Array.isArray(list) ? (list as unknown[]) : []) {
+    const row = record(item);
+    if (row === null) continue;
+    const id = str(row['id']);
+    const disposition = str(row['disposition']);
+    if (id === null || disposition === null || byId.has(id)) continue;
+    // `str` reads `''` as absent, and an empty reason is what a left-out finding has.
+    byId.set(id, { disposition, reason: typeof row['reason'] === 'string' ? row['reason'] : '' });
+  }
+  const label = str(root['label']);
+  return { round: num(root['round']), label, final: label?.startsWith('final-') ?? false, byId };
+}
+
+/** What the fixer did with one finding, as far as the run's files can say. */
+export type FixOutcome =
+  | { kind: 'recorded'; fixRound: number; final: boolean; entry: RecordedDisposition }
+  /** The round ran and its dispositions could not be read, so none were recorded. */
+  | { kind: 'not-recorded' }
+  | null;
+
+/**
+ * The outcome badges for a finding's provenance: *"fixer: rebutted - <reason>
+ * (fix round 2)"*, then *"same id raised again next round"* or *"not reviewed
+ * again"* when either is true. Nothing at all when there is nothing to say.
+ *
+ * The two later facts are their own badges, never folded into the
+ * disposition, and neither is ever "regressed" or "not fixed": a finding the
+ * next review did not raise is not confirmed fixed, so that says nothing.
+ */
+export function outcomeLine(
+  outcome: FixOutcome,
+  next: 'raised-again' | 'not-reviewed-again' | null,
+): string[] {
+  const out: string[] = [];
+  if (outcome?.kind === 'not-recorded') out.push('dispositions not recorded for this round');
+  else if (outcome?.kind === 'recorded') {
+    const what = outcome.entry.disposition.replace(/-/g, ' ');
+    const why = outcome.entry.reason === '' ? '' : ` - ${outcome.entry.reason}`;
+    const round = `${outcome.final ? 'final fix round' : 'fix round'} ${String(outcome.fixRound)}`;
+    out.push(`fixer: ${what}${why} (${round})`);
+  }
+  if (next === 'raised-again') out.push('same id raised again next round');
+  else if (next === 'not-reviewed-again') out.push('not reviewed again');
+  return out;
+}
+
+/** What the files beside one review round say about the fix round that answered it. */
+export interface AnsweringRound {
+  /** The round of the listed `fix-dispositions-<n>.json`, or null when none is listed. */
+  listed: number | null;
+  /** That file, read; null while it is loading or when it cannot be read. */
+  file: DispositionsFile | null;
+  /** The fix round ran and recorded none: an unreadable answer, or a run from before #393. */
+  unrecorded: boolean;
+  /** The ids the next review raised, or null when there is no next review to read. */
+  raised: ReadonlySet<string> | null;
+}
+
+/**
+ * The outcome badges for one finding of a review round: a read-time join,
+ * never written back onto the finding.
+ *
+ * "Not recorded" only when no dispositions file is listed at all - a listed
+ * file that is still loading, or cannot be read, says nothing rather than
+ * claiming the round recorded nothing.
+ */
+export function outcomeFor(id: string, a: AnsweringRound): string[] {
+  const entry = a.file?.byId.get(id);
+  const outcome: FixOutcome =
+    entry !== undefined && a.listed !== null
+      ? { kind: 'recorded', fixRound: a.listed, final: a.file?.final ?? false, entry }
+      : a.unrecorded && a.listed === null
+        ? { kind: 'not-recorded' }
+        : null;
+  if (outcome === null) return [];
+  const after = a.file?.final === true ? 'not-reviewed-again' : a.raised?.has(id) === true ? 'raised-again' : null;
+  return outcomeLine(outcome, after);
 }
 
 /**

@@ -499,3 +499,52 @@ export const ANSWERS_SCHEMA = {
     },
   },
 } as const satisfies object;
+
+/**
+ * A review fix turn's final message (#393): the report, and what it did with
+ * each finding.
+ *
+ * Only the two review fix turns - `fix-<n>` and `final-fix-<n>` - are given
+ * this, as a per-turn `jsonSchema`. A `verify-fix` turn's one "finding" is a
+ * gate failure, not a reviewer's claim, so it keeps its prose report.
+ *
+ * `report` is written to `fix-report-<n>.md` verbatim and read by the next
+ * reviewer exactly as the prose report always was. `dispositions` is what the
+ * prose used to say only in English. A writer's output that does not fit this
+ * is not a failed turn - its edits are already in the tree - so the caller
+ * keeps the text as the report and records no dispositions at all.
+ */
+export const FIX_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['report', 'dispositions'],
+  properties: {
+    report: {
+      type: 'string',
+      description:
+        'Your whole report, as markdown with the headings the prompt asks for. It is handed to ' +
+        'the next code reviewer as-is.',
+    },
+    dispositions: {
+      type: 'array',
+      description: 'One entry per finding id listed in the prompt, and only those ids.',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['id', 'disposition', 'reason'],
+        properties: {
+          id: { type: 'string', description: 'The finding id, exactly as listed.' },
+          disposition: {
+            type: 'string',
+            enum: ['fixed', 'rebutted', 'deferred', 'not-addressed'],
+            description:
+              'fixed = you changed the code to resolve it. rebutted = you believe it is incorrect ' +
+              'and changed nothing for it. deferred = real, but separable work you did not do here. ' +
+              'not-addressed = none of these.',
+          },
+          reason: { type: 'string', description: 'Why, in a sentence or two.' },
+        },
+      },
+    },
+  },
+} as const satisfies object;

@@ -601,3 +601,76 @@ the gate. With `review.verifiers: []` nothing runs: no turn, no `votes` key, no 
   `adjudicate`'s Codex sandbox verdict counts a Codex that only a seat uses (`seatProviders`).
   Both agents were already probed on every run. A seat's turn that fails mid-turn names its own
   line (`TurnRequest.seatPath`), not `roles.reviewer`.
+
+## What the fixer did with each finding (#393)
+
+The fixer's `fix-report-<n>.md` always said, finding by finding, whether each was fixed,
+rebutted or deferred, but only in prose, and nothing but a person or a regex over English could
+read it. Now it is data, and it is recorded per round.
+
+- **Only the two review fix turns are asked.** `fix-<n>` and `final-fix-<n>` are sent
+  `FIX_SCHEMA` (`src/schemas.ts`) as their per-turn `jsonSchema`, the #407 seam, on either
+  provider. The schema is `{ report, dispositions: [{ id, disposition, reason }] }`.
+  `fixPrompt`'s `dispositions` argument appends one `## Dispositions` block naming every id.
+  `verify-fix-<n>` passes nothing: its one "finding" is a gate failure, not a reviewer's claim,
+  so its prompt and prose report are unchanged. So are `FIX_BREADTH` (shared with the implement
+  turn, and overridable) and the implement turn.
+- **The report is still the report.** `fix-report-<n>.md` is written from `report` verbatim, and
+  the next reviewer reads it through `state.lastReport` exactly as before.
+- **Missing is a fact; unreadable is not.** Output that parses, but leaves out a finding's id,
+  records that finding `not-addressed`: the fixer answered and did not mention it. Output that
+  does not parse, or parses but fails `parseFixOutput`, records **nothing** for the round. That
+  covers a Claude text `parseStructured` cannot read, a Codex writer's `structured: null`, and
+  any malformed entry. The text becomes the report as it always did, and
+  `fix_dispositions_unreadable` is narrated and recorded. The turn is not failed and not
+  retried, because its edits are made. Recording that round as `not-addressed` would turn "we
+  could not read it" into "the fixer ignored every finding", which is a number nobody observed.
+  An id the fixer was never shown is dropped, a repeated id keeps its first answer, and the
+  narration names both.
+- **Where it is recorded.** `fix-dispositions-<n>.json`, written once by the fix round, and a
+  `fix_dispositions` event carrying the same thing: round, label, `answers` (the review round
+  it answers), and per finding its id, the severity the fixer was shown, `raisedBy`, the
+  disposition, the reason, `seats`, and the `at: 'review'` reproducer verdict.
+  `code-review-<n>.json` is never touched (#142). The outcome is joined at read time by the
+  scorecard and the findings pane, never written back onto a finding.
+- **A fix round that dies is resumed as itself.** The round's increment was always persisted
+  before its turn, and the findings consumed only after it. So a process that died anywhere in
+  between resumed by numbering a *new* round: `fix-1`'s retry ran as `fix-2`, answering a review
+  it did not answer and crediting no seat, and a final fix came back as an ordinary fix that
+  never re-ran its reproducers. `state.fixInFlight` (`{ round, final }`) is set with the
+  increment and cleared with the pending findings. A resume that finds it reuses the round, and
+  a final one goes back through `runFinalFix`. Both sites record the report, then the
+  dispositions, and only then consume the findings. So no stop can leave a consumed round
+  without its record: a stop after the record redoes the same round under the same label, and
+  that retry is the record. The artifact is rewritten, an unreadable retry removes the earlier
+  file, and the scorecard and the window read the last event for the round.
+- **Attribution.** A finding is credited to every seat in `foundBy` (#388 Part B), so a finding
+  two finders raised counts for both. Without `foundBy`, it is credited to the seat that took
+  that review round's own turn. `reviewPhase` stamps that seat on `state.reviewSeat` (round,
+  provider, model or `"default"`) when it writes the round's artifact, because `resume_config`
+  can change `roles.reviewer` between the review and the fix, and today's config would credit a
+  model that never looked. A stamp for any other round, or none, credits nobody: `seats: null`.
+  Only `raisedBy: 'reviewer'` findings are scored. A person's (#141) and vibe's own are recorded
+  but excluded from every figure. Verifiers are not scored.
+- **Later evidence sits beside the disposition, never folded into it.** For a carried P1, the
+  `at: 'final-fix'` reproducer verdict `confirmFixed` appends is read from `state.outstanding`.
+  "Same id raised again next round" reads the next `code-review-<n>.json`. A final fix round is
+  never re-reviewed, so its findings read "not reviewed again", which is not "not raised again".
+  A missing or unreadable next artifact is not recorded. The words are never "regressed" or
+  "not fixed".
+- **Why the scorecard says "rebutted by the fixer", and never precision.** A rebuttal records
+  what happened, not a verdict: the fixer can be wrong too. So `vibe stats` names each figure for
+  what was counted, prints every figure beside the others and the total ("56 fixed, 7 rebutted
+  by the fixer, 3 deferred, 1 not addressed, of 67"), and prints no percentage for them. Totals
+  and by-severity rows count each finding once per round. Per-seat rows count a multi-seat
+  finding in each seat, so they add up to more. Fix rounds that recorded nothing, whether
+  unreadable or from before this existed, are counted and said ("not recorded for 2 of 19 fix
+  rounds"), so missing data does not read as a smaller sample. "Finding precision" stays in
+  `UNMEASURABLE`, with this proxy named as the nearest and not the thing.
+- **The window.** The findings pane joins `fix-dispositions-<n+1>.json` onto a finding in
+  `code-review-<n>.json` and draws `outcomeLine` (`app/src/cockpit/artifacts.ts`) in the
+  provenance, below `foundBy` and the vote. "Dispositions not recorded for this round" is said
+  when no dispositions file is listed and either the `fix_dispositions_unreadable` frame says so
+  (an opened run draws its own replayed frames), or `fix-report-<n+1>.md` is listed without one.
+  The second case covers a run from before #393. The decision is `outcomeFor`, a pure function. The finding row, the round
+  card and the stats view are unchanged.

@@ -2849,6 +2849,8 @@ export function Cockpit({
               rounds={past ? [] : cards}
               openAt={openAt}
               revision={run.artifacts.length}
+              // An opened run's own replayed frames: a past run is never the live one.
+              fixDispositions={past ? (opened.run?.fixDispositions ?? []) : run.fixDispositions}
             />
           )}
           {/* **The run on screen, and its repository** (UI rework). This took

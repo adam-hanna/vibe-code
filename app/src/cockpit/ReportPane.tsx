@@ -5,14 +5,14 @@ import { Button } from '@/ui/button';
 import { cn } from '@/lib/utils';
 import { Counts } from './Counts';
 import { Caret, Section } from './Disclosure';
-import { ballotLine, foundByLine, ofKind, readReport, votesLine } from './artifacts';
+import { ballotLine, foundByLine, ofKind, outcomeFor, readDispositions, readReport, votesLine } from './artifacts';
 import { SEVERITIES } from './model';
 import { DOCUMENT, EMPTY, FILE, HEAD, LABEL, NOTE, PANE } from './pane';
 import { useArtifact, useArtifacts, noText } from './useArtifacts';
 import { sizeOf } from './PlansPane';
 import type { Severity } from '../design';
 import type { Classified, FullFinding } from './artifacts';
-import type { Census, FinderMerge, FindingRow } from './model';
+import type { Census, FinderMerge, FindingRow, FixDispositionsFrame } from './model';
 import type { RoundCard } from './rounds';
 
 /**
@@ -184,11 +184,14 @@ function Finding({
   finding,
   row,
   reported,
+  outcome,
 }: {
   finding: FullFinding;
   row: FindingRow | null;
   /** How many finders reported this round, or null when no merge frame said. */
   reported: number | null;
+  /** What the fixer did with it and what came after, as `outcomeLine` says it (#393). */
+  outcome: readonly string[];
 }) {
   const [open, setOpen] = useState(false);
   // The report file says the vote moved it; the census row only says a guard did (#388 Part C).
@@ -221,6 +224,11 @@ function Finding({
             {/* The vote, below who found it and never on the row (#388 Part C).
                 A finding nobody voted on adds nothing here. */}
             {finding.votes !== null && <Badge>{votesLine(finding.votes)}</Badge>}
+            {/* What the fixer did with it, below the vote and beside the
+                severity history (#393). Later evidence is its own badge. */}
+            {outcome.map((line) => (
+              <Badge key={line}>{line}</Badge>
+            ))}
             {finding.deferred && <Badge>deferred — real, and for separate work</Badge>}
             {/* The guards' downgrade, which is a fact about the severity above
                 and has to be readable beside it. Never rewritten and never
@@ -322,6 +330,9 @@ function ReportBody({
   census,
   finders,
   revision,
+  dispositions = null,
+  nextReview = null,
+  notRecorded = false,
 }: {
   dir: string;
   runId: string;
@@ -331,9 +342,21 @@ function ReportBody({
   /** What this round's review finders came to, or null when nothing narrated one. */
   finders: FinderMerge | null;
   revision: number;
+  /** The fix round's `fix-dispositions-<n+1>.json` answering this review, or null (#393). */
+  dispositions?: Classified | null;
+  /** The next review's `code-review-<n+1>.json`, or null. */
+  nextReview?: Classified | null;
+  /** The fix round answering this review ran and recorded no dispositions. */
+  notRecorded?: boolean;
 }) {
   const { read, failure, loading } = useArtifact(dir, runId, name, revision);
   const missing = noText(read, failure);
+  const fixed = useArtifact(dir, runId, dispositions?.name ?? null, revision);
+  const next = useArtifact(dir, runId, nextReview?.name ?? null, revision);
+  const file = fixed.read?.kind === 'text' ? readDispositions(fixed.read.text) : null;
+  const raised =
+    next.read?.kind === 'text' ? new Set(readReport(next.read.text)?.findings.map((f) => f.id) ?? []) : null;
+  const answering = { listed: dispositions?.round ?? null, file, unrecorded: notRecorded, raised };
 
   if (loading && read === null && missing === null) {
     return <p className={NOTE}>reading {name}…</p>;
@@ -408,6 +431,7 @@ function ReportBody({
             // is missing is what happened to the finding afterwards.
             row={census?.findings.find((r) => r.id === f.id) ?? null}
             reported={finders?.reported ?? null}
+            outcome={outcomeFor(f.id, answering)}
           />
         ))
       )}
@@ -444,6 +468,7 @@ export function ReportPane({
   rounds,
   openAt,
   revision = 0,
+  fixDispositions = [],
 }: {
   dir: string;
   runId: string | null;
@@ -467,9 +492,31 @@ export function ReportPane({
    * unless the run says so.
    */
   revision?: number;
+  /**
+   * The run's fix-round dispositions frames (#393): what says a round's
+   * dispositions could not be read, which no file on disk can say.
+   */
+  fixDispositions?: readonly FixDispositionsFrame[];
 }) {
   const { entries, failure, loading, reload } = useArtifacts(dir, runId, revision);
   const reports = ofKind(entries, kind);
+  // Classified out of the listing, never composed from a round: the fix round
+  // that answers `code-review-<n>.json` is `n + 1`, and so is the next review.
+  const answering = (round: number | null): Classified | null =>
+    kind !== 'review' || round === null
+      ? null
+      : (ofKind(entries, 'dispositions').find((c) => c.round === round + 1) ?? null);
+  const nextReviewOf = (round: number | null): Classified | null =>
+    kind !== 'review' || round === null ? null : (reports.find((c) => c.round === round + 1) ?? null);
+  // A round that ran and recorded nothing: the frame that says its answer could
+  // not be read, or - for a run from before #393, or an archive opened without
+  // its frames - the round's report with no dispositions file beside it.
+  const unrecordedFor = (round: number | null): boolean =>
+    kind === 'review' &&
+    round !== null &&
+    // The last frame for the round: a round redone after a stop says again.
+    (fixDispositions.filter((d) => d.answers === round).at(-1)?.recorded === false ||
+      ofKind(entries, 'fix-report').some((c) => c.round === round + 1));
   const [open, setOpen] = useState<string | null>(null);
   /** See `PlansPane`: the pane follows the run until the reader touches it. */
   const touched = useRef(false);
@@ -565,6 +612,9 @@ export function ReportPane({
             census={censusFor(report.round)}
             finders={findersFor(report.round)}
             revision={revision}
+            dispositions={answering(report.round)}
+            nextReview={nextReviewOf(report.round)}
+            notRecorded={unrecordedFor(report.round)}
           />
         </Section>
       ))}

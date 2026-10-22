@@ -29,6 +29,7 @@ import type {
   QuestionKind,
   ResolvedQuestion,
   ReviewCoverage,
+  ReviewSeat,
   FileChangeStatus,
   JudgeFile,
   TestChanges,
@@ -1363,6 +1364,30 @@ function readTestChanges(raw: unknown, ctx: ReadContext): TestChanges | undefine
   return { round: raw['round'], patterns: [...(raw['patterns'] as string[])], files };
 }
 
+/**
+ * The seat that took the last recorded review round's turn, or nothing (#393).
+ *
+ * Dropped whole rather than repaired, for `readTestChanges`'s reason: a
+ * fix's dispositions are credited to this seat, and a repaired value would
+ * credit a seat nobody recorded. `isCounter` rather than `isPositiveInt`,
+ * because round 0 is the first review round's own number.
+ */
+function readReviewSeat(raw: unknown, ctx: ReadContext): ReviewSeat | undefined {
+  if (raw === undefined) return undefined;
+  if (
+    !isRecord(raw) ||
+    !isCounter(raw['round']) ||
+    !isString(raw['provider']) ||
+    raw['provider'] === '' ||
+    !isString(raw['model']) ||
+    raw['model'] === ''
+  ) {
+    ctx.repairs.dropped('reviewSeat', 'reviewSeat');
+    return undefined;
+  }
+  return { round: raw['round'], provider: raw['provider'], model: raw['model'] };
+}
+
 /** A full object id, never an abbreviation. The same rule `src/git.ts` applies. */
 const FULL_SHA = /^[0-9a-f]{40}$/;
 
@@ -1912,6 +1937,19 @@ const READERS = {
   // Absent stays absent: a round that touched no judge file records nothing,
   // and a damaged record is dropped rather than guessed into one (#112).
   testChanges: (raw, ctx) => readTestChanges(raw, ctx),
+  // Absent stays absent: a run from before #393, or one that has not recorded a
+  // review round. A damaged value is dropped, so its round credits no seat.
+  reviewSeat: (raw, ctx) => readReviewSeat(raw, ctx),
+  // Absent stays absent: no fix round is in flight. A damaged marker is dropped,
+  // which resumes the way every run did before it existed - a new round.
+  fixInFlight: (raw, ctx) => {
+    if (raw === undefined) return undefined;
+    if (isRecord(raw) && isPositiveInt(raw['round']) && isBool(raw['final'])) {
+      return { round: raw['round'], final: raw['final'] };
+    }
+    ctx.repairs.dropped('fixInFlight', 'fixInFlight');
+    return undefined;
+  },
   // Absent stays absent again, and a present value is checked rather than
   // trusted: this one becomes a path under the run directory and its contents
   // are rendered into a prompt, so a stored `../../something` would read a file

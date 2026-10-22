@@ -410,6 +410,27 @@ export interface VoteTally {
   seq: number;
 }
 
+/**
+ * A review fix round's dispositions (#393), off `fix_dispositions` - or the
+ * warning that they could not be read, off `fix_dispositions_unreadable`.
+ *
+ * Carried for the second above all: the findings pane says *"dispositions not
+ * recorded for this round"* off it, which a missing file alone cannot tell from
+ * a round that has not run yet. The dispositions themselves are read from
+ * `fix-dispositions-<round>.json`, never from here.
+ */
+export interface FixDispositionsFrame {
+  /** The fix round, the number its report and its dispositions file carry. */
+  round: number;
+  /** The review round it answers: `code-review-<answers>.json`. */
+  answers: number;
+  label: string | null;
+  /** False when the fixer's answer could not be read and nothing was recorded. */
+  recorded: boolean;
+  at: number;
+  seq: number;
+}
+
 /** One turn's charge, as the seam that charged it reported (#223, `5e`). */
 export interface Charge {
   label: string;
@@ -682,6 +703,8 @@ export interface Run {
   finderMerges: readonly FinderMerge[];
   /** Every round's vote tally, oldest first (#388 Part C). Empty without verifiers. */
   voteTallies: readonly VoteTally[];
+  /** Every review fix round's dispositions frame, oldest first (#393). */
+  fixDispositions: readonly FixDispositionsFrame[];
   /** What the run has spent, from the one seam every token goes through. */
   spend: Spend;
   /** Every compaction, oldest first. Empty until one happens (`5e`). */
@@ -894,6 +917,7 @@ export function emptyRun(): Run {
     censuses: [],
     finderMerges: [],
     voteTallies: [],
+    fixDispositions: [],
     spend: { tokens: null, costUsd: null, codexTokens: null, charges: [] },
     compactions: [],
     baseSha: null,
@@ -1954,6 +1978,29 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
               unconfirmed: num(data['unconfirmed']),
               undecided: num(data['undecided']),
               reproduced: num(data['reproduced']),
+              at,
+              seq: id(),
+            },
+          ],
+        };
+      }
+
+      case 'fix_dispositions':
+      case 'fix_dispositions_unreadable': {
+        // Dropped rather than guessed when either round is missing, as the
+        // finders' merge frame is: the pane joins on them.
+        const round = num(data['round']);
+        const answers = num(data['answers']);
+        if (round === null || answers === null) return next;
+        return {
+          ...next,
+          fixDispositions: [
+            ...next.fixDispositions,
+            {
+              round,
+              answers,
+              label: str(data['label']),
+              recorded: frame.id === 'fix_dispositions',
               at,
               seq: id(),
             },

@@ -19,7 +19,8 @@ import {
   groundVoteEvidence,
   refusePlaceholderPlan,
 } from '@src/evidence.js';
-import { VOTE_SCHEMA } from '@src/schemas.js';
+import { FIX_SCHEMA, VOTE_SCHEMA } from '@src/schemas.js';
+import { dispositionSummary, settleDispositions } from '@src/dispositions.js';
 import { countBallot, describeVotes, failedBallot, tally } from '@src/vote.js';
 import { describeOutcome, observe } from '@src/reproducer.js';
 import { gateMode } from '@src/gates.js';
@@ -111,6 +112,7 @@ import {
   gate,
   parseAnswers,
   parseFindings,
+  parseFixOutput,
   parseTestVerdicts,
   parsePlan,
   parseVote,
@@ -119,6 +121,7 @@ import {
   reproductionAt,
   SEVERITY_RANK,
 } from '@src/validate.js';
+import type { FixOutput } from '@src/validate.js';
 import {
   attachVerdicts,
   judgeChanges,
@@ -295,6 +298,83 @@ function recordReport(state: RunState, name: string, text: string): void {
   artifact(state, name, text);
   state.lastReport = name;
   saveState(state);
+}
+
+/**
+ * A review fix turn's output, read once (#393): the report to record, and the
+ * dispositions when they could be read.
+ *
+ * `readStructured` throws for a Claude turn whose text is not JSON, and for a
+ * Codex writer turn #407 returned as `structured: null`; `parseFixOutput`
+ * throws for JSON that is not `FIX_SCHEMA`'s shape. Every one of those is the
+ * same outcome and none of them fails the turn - the fixer's edits are already
+ * in the tree - so the text becomes the report exactly as it always did, and
+ * the round records no dispositions at all.
+ */
+type FixRead = { report: string; parsed: FixOutput } | { report: string; parsed: null; error: string };
+
+function readFixOutput(outcome: TurnOutcome): FixRead {
+  try {
+    const parsed = parseFixOutput(readStructured(outcome));
+    return { report: parsed.report, parsed };
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    return { report: outcome.text, parsed: null, error: message.split(/\r?\n/)[0] ?? '' };
+  }
+}
+
+/**
+ * The round's dispositions on disk and in the event log, or the warning that
+ * there are none (#393).
+ *
+ * Called by both review fix sites after the report and *before*
+ * `clearPendingFindings`, so a round is never consumed without its record. A
+ * process that dies in between resumes the same round under the same label
+ * (`fixInFlight`) and records it again. That retry is the round's record of
+ * record: the artifact is rewritten, an unreadable retry removes the earlier
+ * attempt's artifact, and the scorecard and the window read the last event per
+ * round.
+ *
+ * Unreadable is never `not-addressed`. That would turn "this run could not read
+ * the answer" into "the fixer ignored every finding", which is a number nobody
+ * observed. It records its own event so the scorecard can count it.
+ */
+function recordDispositions(
+  state: RunState,
+  read: FixRead,
+  findings: readonly Finding[],
+  label: string,
+): void {
+  const round = state.reviewRound;
+  const answers = round - 1;
+  if (read.parsed === null) {
+    recordAndSay(
+      state,
+      'warn',
+      'fix_dispositions_unreadable',
+      `${label}: the fixer's dispositions could not be read, so none are recorded for this round - ` +
+        'its report is kept as written',
+      { round, label, answers, reason: 'error' in read ? read.error : '' },
+    );
+    // A retried round whose earlier attempt was readable must not keep that
+    // attempt's file beside this attempt's warning.
+    removeArtifact(state, `fix-dispositions-${round}.json`);
+    return;
+  }
+  const settled = settleDispositions(findings, read.parsed.dispositions, {
+    round,
+    label,
+    answers,
+    reviewSeat: state.reviewSeat,
+  });
+  artifact(state, `fix-dispositions-${round}.json`, settled);
+  recordAndSay(
+    state,
+    settled.dropped.length + settled.duplicates.length > 0 ? 'warn' : 'info',
+    'fix_dispositions',
+    dispositionSummary(settled),
+    { ...settled },
+  );
 }
 
 /**
@@ -1250,6 +1330,13 @@ async function reviewPhase(
         );
       }
       firstPass = false;
+      // A final fix round that died inside its turn is resumed as itself.
+      const inFlight = state.fixInFlight;
+      if (inFlight?.final === true && inFlight.round === state.reviewRound) {
+        const tolerated = Array.isArray(state.outstanding) ? state.outstanding.filter(hasFindingShape) : [];
+        await runFinalFix(state, cfg, cwd, plan, carried, tolerated, roles, turns, true);
+        continue;
+      }
       await runFixRound(state, cfg, cwd, carried, roles, turns, host);
       // No OUTSTANDING.md here, even when these were the final round's
       // findings: the artifact says the fix ran *and verification still
@@ -1358,6 +1445,14 @@ async function reviewPhase(
       async () => {
         const { report: found, unconfirmedP0 } = await runReview(state, cfg, cwd, plan, roles, turns);
         artifact(state, `code-review-${state.reviewRound}.json`, found);
+        // Who took this round's own turn, saved by `recordPendingFindings`
+        // below (#393). The fix that answers this round credits its findings
+        // to this seat, and a resume may change `roles.reviewer` in between.
+        state.reviewSeat = {
+          round: state.reviewRound,
+          provider: roles.reviewer.provider,
+          model: roles.reviewer.model ?? 'default',
+        };
         collectDeferred(state, found.findings);
         writeFollowUps(state, plan);
         // In here for the same reason as the artifact, and as in the plan
@@ -1413,92 +1508,7 @@ async function reviewPhase(
       // The result is deliberately not re-reviewed: that is what bounds this.
       // Another review round could raise something new and the loop would never
       // end, which is the situation the tolerance exists to escape.
-      state.reviewRound += 1;
-      state.finalFixDone = true;
-      state.outstanding = decision.tolerated;
-      saveState(state);
-      beginReport(state);
-
-      announceFixRound(state);
-      log.step(
-        `Incorporating ${decision.tolerated.length} carried P1(s), then finishing: ` +
-          decision.tolerated.map((f) => f.id).join(', '),
-        {
-          id: 'turn_started',
-          data: {
-            role: 'implementer',
-            kind: 'final-fix',
-            carried: decision.tolerated.map((f) => f.id),
-          },
-        },
-      );
-      for (const f of decision.tolerated) log.info(`  ~ ${f.title}`);
-
-      const finalFix = await writeTurn(
-        state,
-        cfg,
-        cwd,
-        {
-          role: 'implementer',
-          prompt: P.fixPrompt(review.findings, state.reviewRound, state.acceptanceCriteria, plan),
-          planInPrompt: true,
-          cwd,
-          label: `final-fix-${state.reviewRound}`,
-        },
-        turns,
-        roles,
-      );
-      recordReport(state, `fix-report-${state.reviewRound}.md`, finalFix.text);
-      // The moment the fix stops being worth buying again, and therefore the
-      // moment to drop the carry: the turn is done and its report is on disk.
-      // Everything after this - the record, three git invocations - can fail
-      // without making a second fix round useful, and the record is not lost by
-      // going first: `recoverOutstanding` rebuilds it from `state.outstanding`
-      // once the gate has passed. Same order as `runFixRound`.
-      clearPendingFindings(state);
-
-      // After the fix and before the artifact that describes it. This is the
-      // round the loop deliberately never reviews again, so OUTSTANDING.md has
-      // always had to say the findings were "worked on, and nobody has confirmed
-      // they are gone" - and for a finding that carried a reproducer, running it
-      // once more is the only thing that has ever been able to replace that
-      // sentence with a fact (#113).
-      const settled = await confirmFixed(state, cfg, cwd, roles, decision.tolerated);
-      state.outstanding = settled;
-      saveState(state);
-
-      // Written `pending`: the gate has not run yet at this point in the loop,
-      // so the file cannot say how it went. `finaliseOutstanding` rewrites it
-      // from the completion branch once it has.
-      const file = artifact(state, 'OUTSTANDING.md', renderOutstanding(state, settled, 'pending'));
-      log.info(`Carried findings and what was done about them: ${path.relative(cwd, file)}`);
-
-      writeCheckpoint(
-        state,
-        'final-fix',
-        await maybeCommit(cfg, cwd, `vibe: address carried review findings (final round)`),
-      );
-      // No hold here, and it is the one boundary that lost one (#140). The
-      // checkpoint stays - a fork of this point is worth having - but `final-fix`
-      // has no row in the matrix, so `holdAt` could only ever have returned. Two
-      // lines below is `continue`, which takes the loop back to the top so the
-      // verification gate proves this fix broke nothing; stopping in between is
-      // the same decision with less information behind it. See `UNGATEABLE`.
-      // Said as well as recorded (#223). The clean branch above has announced
-      // itself since #133 and this one never did, so the two ways a review can
-      // approve looked different to a window for no reason anybody chose: one
-      // arrived as `review_approved`, the other as silence.
-      recordAndSay(
-        state,
-        'ok',
-        'review_approved',
-        `Review approved with ${decision.tolerated.length} carried finding(s) fixed - ` +
-          decision.tolerated.map((f) => f.id).join(', '),
-        {
-          findings: review.findings.length,
-          carriedAndFixed: decision.tolerated.map((f) => f.id),
-        },
-      );
+      await runFinalFix(state, cfg, cwd, plan, review.findings, decision.tolerated, roles, turns, false);
       // Back to the top once, so the gate proves the final fix broke nothing.
       continue;
     }
@@ -1549,6 +1559,133 @@ function announceFixRound(state: RunState): void {
 }
 
 /**
+ * The carried-P1 final fix round: the turn, its record, the reproducers run
+ * once more, OUTSTANDING.md, and the commit.
+ *
+ * A function rather than the tail of the review branch because the loop now
+ * reaches it from two directions, as `runFixRound` is reached: the review that
+ * tolerated the findings, and a resume whose process died inside this round
+ * (#393). Before that second road existed, such a resume took the ordinary fix
+ * path - a new round number, a `fix-<n>` label, no `confirmFixed` - so the round
+ * the loop never reviews again lost the one check that replaces "nobody has
+ * confirmed they are gone" with a fact.
+ *
+ * `resumed` is that second road: the round, `finalFixDone` and
+ * `state.outstanding` were already persisted by the attempt that died, so they
+ * are reused rather than bought again.
+ */
+async function runFinalFix(
+  state: RunState,
+  cfg: Config,
+  cwd: string,
+  plan: Plan,
+  findings: readonly Finding[],
+  tolerated: readonly Finding[],
+  roles: RoleTable,
+  turns: AgentTurns,
+  resumed: boolean,
+): Promise<void> {
+  if (!resumed) {
+    state.reviewRound += 1;
+    state.finalFixDone = true;
+    state.outstanding = [...tolerated];
+  }
+  // Before the turn, so a process that dies inside it resumes this round as
+  // itself rather than as the next ordinary fix (#393). See `fixInFlight`.
+  state.fixInFlight = { round: state.reviewRound, final: true };
+  saveState(state);
+  beginReport(state);
+
+  announceFixRound(state);
+  log.step(
+    `Incorporating ${tolerated.length} carried P1(s), then finishing: ` +
+      tolerated.map((f) => f.id).join(', '),
+    {
+      id: 'turn_started',
+      data: {
+        role: 'implementer',
+        kind: 'final-fix',
+        carried: tolerated.map((f) => f.id),
+      },
+    },
+  );
+  for (const f of tolerated) log.info(`  ~ ${f.title}`);
+
+  const finalFix = await writeTurn(
+    state,
+    cfg,
+    cwd,
+    {
+      role: 'implementer',
+      prompt: P.fixPrompt(findings, state.reviewRound, state.acceptanceCriteria, plan, true),
+      planInPrompt: true,
+      cwd,
+      label: `final-fix-${state.reviewRound}`,
+      jsonSchema: FIX_SCHEMA,
+    },
+    turns,
+    roles,
+  );
+  const finalRead = readFixOutput(finalFix);
+  recordReport(state, `fix-report-${state.reviewRound}.md`, finalRead.report);
+  // The moment the fix stops being worth buying again, and therefore the
+  // moment to drop the carry: the turn is done and its report is on disk.
+  // Everything after this - the record, three git invocations - can fail
+  // without making a second fix round useful, and the record is not lost by
+  // going first: `recoverOutstanding` rebuilds it from `state.outstanding`
+  // once the gate has passed. Same order as `runFixRound`.
+  // Before the findings are consumed, as in `runFixRound`, and before
+  // `confirmFixed`, so the carried P1s' `at: 'final-fix'` verdict lands on
+  // `state.outstanding` beside a record that already exists.
+  recordDispositions(state, finalRead, findings, `final-fix-${state.reviewRound}`);
+  delete state.fixInFlight;
+  clearPendingFindings(state);
+
+  // After the fix and before the artifact that describes it. This is the
+  // round the loop deliberately never reviews again, so OUTSTANDING.md has
+  // always had to say the findings were "worked on, and nobody has confirmed
+  // they are gone" - and for a finding that carried a reproducer, running it
+  // once more is the only thing that has ever been able to replace that
+  // sentence with a fact (#113).
+  const settled = await confirmFixed(state, cfg, cwd, roles, tolerated);
+  state.outstanding = settled;
+  saveState(state);
+
+  // Written `pending`: the gate has not run yet at this point in the loop,
+  // so the file cannot say how it went. `finaliseOutstanding` rewrites it
+  // from the completion branch once it has.
+  const file = artifact(state, 'OUTSTANDING.md', renderOutstanding(state, settled, 'pending'));
+  log.info(`Carried findings and what was done about them: ${path.relative(cwd, file)}`);
+
+  writeCheckpoint(
+    state,
+    'final-fix',
+    await maybeCommit(cfg, cwd, `vibe: address carried review findings (final round)`),
+  );
+  // No hold here, and it is the one boundary that lost one (#140). The
+  // checkpoint stays - a fork of this point is worth having - but `final-fix`
+  // has no row in the matrix, so `holdAt` could only ever have returned. Two
+  // lines below is `continue`, which takes the loop back to the top so the
+  // verification gate proves this fix broke nothing; stopping in between is
+  // the same decision with less information behind it. See `UNGATEABLE`.
+  // Said as well as recorded (#223). The clean branch above has announced
+  // itself since #133 and this one never did, so the two ways a review can
+  // approve looked different to a window for no reason anybody chose: one
+  // arrived as `review_approved`, the other as silence.
+  recordAndSay(
+    state,
+    'ok',
+    'review_approved',
+    `Review approved with ${tolerated.length} carried finding(s) fixed - ` +
+      tolerated.map((f) => f.id).join(', '),
+    {
+      findings: findings.length,
+      carriedAndFixed: tolerated.map((f) => f.id),
+    },
+  );
+}
+
+/**
  * One fix round: the turn, its report, and the commit.
  *
  * A function rather than the tail of the review loop because the loop now
@@ -1565,7 +1702,13 @@ async function runFixRound(
   turns: AgentTurns,
   host?: Host,
 ): Promise<void> {
-  state.reviewRound += 1;
+  // A process that died inside this round's turn persisted the increment and
+  // the marker, and resumes the same round rather than numbering a new one:
+  // a renumbered round would answer the wrong review and credit no seat (#393).
+  if (!(state.fixInFlight?.final === false && state.fixInFlight.round === state.reviewRound)) {
+    state.reviewRound += 1;
+  }
+  state.fixInFlight = { round: state.reviewRound, final: false };
   saveState(state);
   beginReport(state);
 
@@ -1585,19 +1728,26 @@ async function runFixRound(
     cwd,
     {
       role: 'implementer',
-      prompt: P.fixPrompt(findings, state.reviewRound, state.acceptanceCriteria, state.plan),
+      prompt: P.fixPrompt(findings, state.reviewRound, state.acceptanceCriteria, state.plan, true),
       planInPrompt: state.plan !== null,
       cwd,
       label: `fix-${state.reviewRound}`,
+      jsonSchema: FIX_SCHEMA,
     },
     turns,
     roles,
   );
-  recordReport(state, `fix-report-${state.reviewRound}.md`, fix.text);
+  const read = readFixOutput(fix);
+  recordReport(state, `fix-report-${state.reviewRound}.md`, read.report);
   // Consumed once the turn's report is on disk, and before the commit: a commit
   // that fails must not buy this turn a second time. Everything before this
   // point leaves them outstanding, which is what makes a died-mid-turn resume
   // retry the fix rather than skip it.
+  // The record before the consumption, so no stop can leave a consumed round
+  // without one: a resume finds the findings still pending and `fixInFlight`
+  // still set, and redoes this same round and label, record included (#393).
+  recordDispositions(state, read, findings, `fix-${state.reviewRound}`);
+  delete state.fixInFlight;
   clearPendingFindings(state);
   writeCheckpoint(
     state,
@@ -2999,9 +3149,9 @@ export interface TurnRequest {
   timeoutMs?: number | undefined;
   /**
    * The response schema the turn is constrained to, on either provider, or
-   * absent for the role's own (`RoleSpec.schema`). No caller sets one yet
-   * (#393); a writer given one gets its output back as text when it does not
-   * parse - see `CodexTurnOptions.unparseable`.
+   * absent for the role's own (`RoleSpec.schema`). The two review fix turns
+   * set `FIX_SCHEMA` (#393); a writer given one gets its output back as text
+   * when it does not parse - see `CodexTurnOptions.unparseable`.
    */
   jsonSchema?: object | undefined;
   /** Claude only: the tools the turn may use. */

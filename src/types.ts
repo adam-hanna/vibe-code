@@ -1140,6 +1140,58 @@ export interface Votes {
   ballots: Ballot[];
 }
 
+/** What the fixer said it did with one review finding (#393). */
+export type Disposition = 'fixed' | 'rebutted' | 'deferred' | 'not-addressed';
+
+/** One seat a finding is credited to, in the shape `FoundBy` writes it. */
+export interface DispositionSeat {
+  seat: string;
+  provider: string;
+  model: string;
+}
+
+/** One finding's disposition, with the provenance it was handed to the fixer with (#393). */
+export interface FindingDisposition {
+  id: string;
+  /** The severity the fixer was shown. */
+  severity: Severity;
+  /** Null when the finding carried no author. */
+  raisedBy: FindingAuthor | null;
+  disposition: Disposition;
+  /** The fixer's reason; `''` for a finding it left out, which says nothing. */
+  reason: string;
+  /** Every seat credited with the finding, or null when none can be established. */
+  seats: DispositionSeat[] | null;
+  /** The `at: 'review'` reproducer verdict, or null when there was none. */
+  reproducer: ReproducerVerdict | null;
+}
+
+/**
+ * One review fix round's dispositions: `fix-dispositions-<round>.json` and the
+ * `fix_dispositions` event carry this shape (#393).
+ */
+export interface FixDispositions {
+  /** The fix round, the number in its label and its report's name. */
+  round: number;
+  /** `fix-<round>` or `final-fix-<round>`. */
+  label: string;
+  /** The review round it answers: `code-review-<answers>.json`. */
+  answers: number;
+  /** One per finding the fixer was shown, in the order it was shown them. */
+  dispositions: FindingDisposition[];
+  /** Ids the fixer answered that were not in its prompt, dropped. */
+  dropped: string[];
+  /** Ids the fixer answered more than once; the first answer was kept. */
+  duplicates: string[];
+}
+
+/** Who took a review round's own turn. See `RunState.reviewSeat`. */
+export interface ReviewSeat {
+  round: number;
+  provider: string;
+  model: string;
+}
+
 export interface Finding {
   id: string;
   severity: Severity;
@@ -1882,6 +1934,31 @@ export interface RunState {
    * touched no judge file, or no part has completed - never an empty record.
    */
   testChanges?: TestChanges | undefined;
+  /**
+   * Who took the most recent review round's own turn (#393): `roles.reviewer`'s
+   * provider and model as they were when that round's artifact was written.
+   *
+   * Stamped once per recorded round, because the seat that reviewed is the one
+   * a fix round's dispositions are credited to, and `resume_config` can change
+   * `roles.reviewer` between the review and the fix. `round` is the raw round
+   * of `code-review-<round>.json`; a fix that answers any other round credits
+   * nobody rather than whoever holds the seat now. Absent on every run recorded
+   * before it existed, and a damaged value is dropped, never guessed.
+   */
+  reviewSeat?: ReviewSeat | undefined;
+  /**
+   * The review fix round whose turn has started and whose findings are not yet
+   * consumed (#393): set with the round's increment, before the turn, and
+   * cleared with the pending findings.
+   *
+   * What lets a resume tell "this round's turn died" from "the next round is
+   * due". Without it a resume numbered a new round on top of the one that died,
+   * so `fix-1`'s retry ran as `fix-2` answering a review it did not answer, and
+   * a final fix came back as an ordinary fix that never re-ran its reproducers.
+   * `final` says which of the two rounds it was. Absent on every run between
+   * rounds, and on every run recorded before it existed.
+   */
+  fixInFlight?: { round: number; final: boolean } | undefined;
   /**
    * The **basename** of the most recent write turn's report artifact.
    *
