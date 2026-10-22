@@ -2997,7 +2997,12 @@ export interface TurnRequest {
    * does. Still accepted, for a caller that has a reason of its own.
    */
   timeoutMs?: number | undefined;
-  /** Claude only: the response schema the turn is constrained to. */
+  /**
+   * The response schema the turn is constrained to, on either provider, or
+   * absent for the role's own (`RoleSpec.schema`). No caller sets one yet
+   * (#393); a writer given one gets its output back as text when it does not
+   * parse - see `CodexTurnOptions.unparseable`.
+   */
   jsonSchema?: object | undefined;
   /** Claude only: the tools the turn may use. */
   tools?: readonly string[] | undefined;
@@ -4026,7 +4031,15 @@ async function codexDispatch(
       await checkCodexLimits(state, cfg, req.cwd, req.label);
       return turn({
         prompt,
-        schema: spec.schema,
+        // The request's, which `runTurn` has already resolved to the role's
+        // where the caller named none - so a role turn sends exactly what it
+        // always did, and a caller with a per-turn schema reaches Codex as it
+        // already reached Claude (#393). Reading `spec.schema` here dropped it.
+        schema: req.jsonSchema ?? spec.schema,
+        // Stated here rather than inferred in the adapter: a writer's edits are
+        // made before its last message is read, so output that does not parse
+        // comes back as text; every read-only seat keeps failing the turn.
+        unparseable: spec.access === 'write' ? 'raw' : 'throw',
         schemaName: req.label,
         artifactDir: artifactDir(state, 'codex'),
         // As with effort below: the role's where it named one, this provider's

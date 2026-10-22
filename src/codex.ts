@@ -52,6 +52,22 @@ export interface CodexTurnOptions {
    * `--output-schema` only constrains what goes in it.
    */
   schema?: object | undefined;
+  /**
+   * What to do when `schema` was given and the final message does not parse
+   * (#393). Omitted means `'throw'`, which is what every turn did before this
+   * option existed and what a judge must keep doing: a verdict that cannot be
+   * read is not a verdict.
+   *
+   * `'raw'` is for a turn whose product is the working tree. By the time its
+   * last message is read the edits are made, so failing the turn would report
+   * work that happened as work that did not, and a retry would buy it twice.
+   * The result then carries `structured: null` with the text in `raw`, the
+   * turn's tokens as on any success, and the caller decides what an unreadable
+   * report means. Set explicitly by the dispatch from the role's access - never
+   * inferred here from `sandbox` - so a read-only seat cannot reach this path
+   * by accident.
+   */
+  unparseable?: 'throw' | 'raw' | undefined;
   schemaName: string;
   artifactDir: string;
   model: string;
@@ -83,7 +99,10 @@ export interface CodexTurnOptions {
 }
 
 export interface CodexTurnResult {
-  /** The parsed output, or null for a turn that was given no schema. */
+  /**
+   * The parsed output, or null for a turn that was given no schema - and for a
+   * `unparseable: 'raw'` turn whose output did not parse, with the text in `raw`.
+   */
   structured: unknown;
   raw: string;
   /** Thread id for this turn, to be passed back on the next call. */
@@ -437,6 +456,7 @@ export async function codexTurn(
 ): Promise<CodexTurnResult> {
   const { prompt, schema, schemaName, artifactDir, model, effort, sandbox, cwd, timeoutMs, sessionId, forkFrom } =
     options;
+  const unparseable = options.unparseable ?? 'throw';
 
   const schemaFile = path.join(artifactDir, `${schemaName}.schema.json`);
   const outFile = path.join(artifactDir, `${schemaName}.out.json`);
@@ -699,15 +719,25 @@ export async function codexTurn(
     // a report in prose, and demanding JSON of it would fail a turn that did
     // exactly what it was told - the same distinction `structured: null` states.
     let structured: unknown = null;
+    let parsed = true;
     if (schema !== undefined) {
       try {
         structured = JSON.parse(raw) as unknown;
       } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        throw attachSpend(
-          new Error(`codex output was not valid JSON: ${message}\n${raw.slice(0, 1500)}`),
-          spent,
-        );
+        // A writing turn's edits are already in the tree (see `unparseable`):
+        // returned as text, with its tokens, for the caller to judge. The spend
+        // is the success path's - the same `events.tokens` - so an unreadable
+        // report costs the run exactly what a readable one does.
+        if (unparseable === 'raw') {
+          parsed = false;
+          structured = null;
+        } else {
+          const message = err instanceof Error ? err.message : String(err);
+          throw attachSpend(
+            new Error(`codex output was not valid JSON: ${message}\n${raw.slice(0, 1500)}`),
+            spent,
+          );
+        }
       }
     }
 
@@ -715,8 +745,12 @@ export async function codexTurn(
       // Logged, not thrown: see the exit-status note above, and the matching one
       // in claude.ts for why the signal is named rather than folded into the
       // exit code (#131).
+      // Worded for what was actually accepted: a `'raw'` turn whose output did
+      // not parse wrote output, but not schema-conformant output.
       warn(
-        `codex ${describeEnding({ code, signal })} but wrote schema-conformant output; accepting it.`,
+        parsed
+          ? `codex ${describeEnding({ code, signal })} but wrote schema-conformant output; accepting it.`
+          : `codex ${describeEnding({ code, signal })} and its output did not parse; returning it as text.`,
       );
     }
 
