@@ -14,14 +14,14 @@
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import * as log from '@src/log.js';
-import { livenessOf } from '@src/lock.js';
+import { describeLiveness, livenessOf } from '@src/lock.js';
 import { fillAnswers, unanswered } from '@src/answers.js';
 import type { FilledAnswer } from '@src/answers.js';
 import { replayRun } from '@src/replay.js';
 import type {
   CheckpointView,
+  OpenedReplay,
   QuestionRoundSize,
-  Replay,
   RoundCensus,
 } from '@src/replay.js';
 import type { ActivityObservation } from '@src/progress.js';
@@ -1777,14 +1777,30 @@ export function answerQuestions(
  * cannot be read is simply absent from the reconstruction rather than fatal to
  * it: a run whose critique artifact was deleted still has its turns.
  */
-export function readRunReplay(targetDir: string, runId: string): Replay {
+export function readRunReplay(targetDir: string, runId: string): OpenedReplay {
   const state = loadRun(targetDir, runId);
   const dir = path.join(targetDir, RUNS_DIR, runId);
-  return replayRun(state, {
+  const replay = replayRun(state, {
     checkpoints: readCheckpointViews(dir),
     censuses: readRoundCensuses(dir),
     questions: readQuestionSizes(dir),
   });
+  // The lock, for the one question the record cannot answer (#396): whether a
+  // run with no ending is still being run. `livenessOf` never throws and never
+  // writes, which is what lets it sit on a read - `listRuns` relies on the same.
+  const verdict = livenessOf(dir, state);
+  const gone = verdict.liveness === 'interrupted' || verdict.liveness === 'not-running';
+  return {
+    ...replay,
+    liveness: verdict.liveness,
+    // The lock's own sentence, so the window says what `vibe list` would rather
+    // than a verdict of its own. The status is quoted because it is where the
+    // record stops, and it is the only reason there is no exit to show.
+    lost:
+      replay.exit === null && gone
+        ? `Its record stops at "${state.status}" with no ending, and the lock check says: ${describeLiveness(verdict)}`
+        : null,
+  };
 }
 
 /** One artifact, parsed, or null for every way that can fail. */

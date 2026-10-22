@@ -1,5 +1,6 @@
 import type { Level, Narration } from '@src/log.js';
 import type { GateContext } from '@src/host.js';
+import type { Liveness } from '@src/lock.js';
 import { readOrigin } from '@src/host.js';
 import type { ArtifactRead, Effort, RunArtifact, RunSummary } from '@src/types.js';
 import { EFFORTS } from '@src/types.js';
@@ -358,6 +359,11 @@ export type Outbound =
    * is not narration — it is the frame that answers a request, and the window
    * applies it as one. Null is a status this build does not recognise, which
    * has not said the run succeeded.
+   *
+   * `liveness` and `lost` are the lock's half (#396): a run with no exit is
+   * either still being run or has lost its process, and only the lock can say
+   * which. `lost` is the sentence the window shows when it is the second. See
+   * `OpenedReplay`.
    */
   | {
       type: 'replay';
@@ -366,6 +372,8 @@ export type Outbound =
       runId: string;
       steps: readonly { at: number; narration: Narration }[];
       exit: number | null;
+      liveness: Liveness;
+      lost: string | null;
     }
   /**
    * A run that is gone, in reply to a `delete_run` request (#223).

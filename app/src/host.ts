@@ -402,6 +402,17 @@ export interface ReplayFrame {
    * a phrase invented for it.
    */
   exit: number | null;
+  /** `livenessOf`'s verdict on the run's lock (#396). Absent from a host older than it. */
+  liveness?: string;
+  /**
+   * Why nothing is running this run, in the core's words, or null (#396).
+   *
+   * Set only for a run with no exit whose lock rules out a live process - the
+   * core's decision, not the window's, for the reason `forcing` gives: the
+   * verdict is `livenessOf`'s. Absent from an older host, which is read as null
+   * and draws what it always drew.
+   */
+  lost?: string | null;
 }
 /**
  * The standing instruction blocks each turn is given (#223).
@@ -1371,6 +1382,7 @@ export async function artifact(
 export async function replay(dir: string, runId: string): Promise<{
   steps: ReplayFrame['steps'];
   exit: number | null;
+  lost: string | null;
 }> {
   const id = nextRequestId();
   const frame = await ask<ReplayFrame>(
@@ -1379,7 +1391,7 @@ export async function replay(dir: string, runId: string): Promise<{
     'replay',
     'the host did not answer with the run',
   );
-  return { steps: frame.steps, exit: frame.exit };
+  return { steps: frame.steps, exit: frame.exit, lost: frame.lost ?? null };
 }
 
 /**

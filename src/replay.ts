@@ -1,3 +1,4 @@
+import type { Liveness } from '@src/lock.js';
 import type { Narration } from '@src/log.js';
 import type { RunState } from '@src/types.js';
 
@@ -27,6 +28,12 @@ import type { RunState } from '@src/types.js';
  * `turn_started` here is followed by the thing that closes it, the sequence
  * ends with the ending the run actually had, and `run.running` is null when the
  * fold finishes. Nothing pulses, because nothing is open.
+ *
+ * **Except where the record has no ending** (#396). A run whose status is still
+ * mid-loop has no exit, so the turn it was on stays open after the fold. That is
+ * true of a run some process is still running and false of one whose process
+ * has gone, and only the lock tells them apart - so `readRunReplay` asks it, and
+ * `OpenedReplay.lost` is the ending the window applies instead.
  *
  * ## Everything here is read, and the two things that are not are said
  *
@@ -70,6 +77,36 @@ export interface Replay {
    * us it succeeded.
    */
   exit: number | null;
+}
+
+/**
+ * A run somebody opened, with what its lock says (#396).
+ *
+ * **The steps cannot say whether a run is still going, and the lock can.** A
+ * run whose status is mid-loop - `planning`, `implementing`, `reviewing` - has
+ * no exit to apply, so the turn it was on stayed open in the window and pulsed
+ * for good. That is right while a process holds the run and false once nothing
+ * does: the machine shut down under a run held at `implemented`, and the
+ * relaunched window drew its implement turn running, with Pause and Stop that
+ * did nothing and no Resume. Waiting at a gate is deliberately not recorded, so
+ * nothing in the record could have said otherwise.
+ *
+ * Beside the replay rather than inside `replayRun`, which is pure over the
+ * record: only the reader of the run's directory can ask the lock.
+ */
+export interface OpenedReplay extends Replay {
+  /** `livenessOf`'s verdict on the run's lock, never one derived here. */
+  liveness: Liveness;
+  /**
+   * Why nothing is running this run, or null when the replay does not say so.
+   *
+   * Set only when the record has no exit **and** the lock rules out a live
+   * process (`interrupted`, `not-running`). An `unknown` lock is left alone,
+   * by `src/lock.ts`'s own rule: a lock vibe cannot read, or one held on
+   * another machine, cannot rule out a live process, and telling somebody the
+   * run's process has gone would be the claim that rule refuses to make.
+   */
+  lost: string | null;
 }
 
 /**
