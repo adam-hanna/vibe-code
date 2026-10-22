@@ -639,9 +639,11 @@ read it. Now it is data, and it is recorded per round.
   it did not answer and crediting no seat, and a final fix came back as an ordinary fix that
   never re-ran its reproducers. `state.fixInFlight` (`{ round, final }`) is set with the
   increment and cleared with the pending findings. A resume that finds it reuses the round, and
-  a final one goes back through `runFinalFix`. Both sites record the report, clear the pending
-  findings, and then write the dispositions. A death after the clear leaves a round with a
-  report and no record, which the scorecard counts as *not recorded*, never as a second record.
+  a final one goes back through `runFinalFix`. Both sites record the report, then the
+  dispositions, and only then consume the findings. So no stop can leave a consumed round
+  without its record: a stop after the record redoes the same round under the same label, and
+  that retry is the record. The artifact is rewritten, an unreadable retry removes the earlier
+  file, and the scorecard and the window read the last event for the round.
 - **Attribution.** A finding is credited to every seat in `foundBy` (#388 Part B), so a finding
   two finders raised counts for both. Without `foundBy`, it is credited to the seat that took
   that review round's own turn. `reviewPhase` stamps that seat on `state.reviewSeat` (round,

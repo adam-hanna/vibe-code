@@ -514,7 +514,8 @@ export function ReportPane({
   const unrecordedFor = (round: number | null): boolean =>
     kind === 'review' &&
     round !== null &&
-    (fixDispositions.some((d) => d.answers === round && !d.recorded) ||
+    // The last frame for the round: a round redone after a stop says again.
+    (fixDispositions.filter((d) => d.answers === round).at(-1)?.recorded === false ||
       ofKind(entries, 'fix-report').some((c) => c.round === round + 1));
   const [open, setOpen] = useState<string | null>(null);
   /** See `PlansPane`: the pane follows the run until the reader touches it. */

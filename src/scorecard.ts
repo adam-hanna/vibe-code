@@ -281,8 +281,9 @@ export const UNMEASURABLE: readonly { dimension: string; why: string }[] = [
     dimension: 'finding precision',
     why:
       'finding_downgraded gives the UNGROUNDED rate, not the WRONG rate - a finding can be perfectly ' +
-      'grounded and false, which is #44. The nearest proxy is the count rebutted by the fixer above, and ' +
-      'it is not precision: the fixer can be wrong too, and a rebuttal records what happened, not a verdict',
+      'grounded and false, which is #44. The nearest proxy is the fixer\'s rebuttal rate - rebutted by the fixer ' +
+      'above, over the findings it was shown - and it is not precision: the fixer can be wrong too, and a ' +
+      'rebuttal records what happened, not a verdict',
   },
   {
     dimension: 'reviewer uplift',
@@ -556,13 +557,18 @@ function countOutcomes(
     const type = e['type'];
     const label = e['label'];
     if (typeof label !== 'string' || !FIX_LABEL.test(label)) continue;
+    // The LAST of the two per label: a round redone after a stop is recorded
+    // again, and the retry is the round's record - the artifact it rewrote says
+    // the same thing.
     if (type === 'claude_turn' || type === 'codex_turn') labels.add(label);
     else if (type === 'fix_dispositions') {
       labels.add(label);
-      if (!recorded.has(label)) recorded.set(label, e);
+      recorded.set(label, e);
+      unreadable.delete(label);
     } else if (type === 'fix_dispositions_unreadable') {
       labels.add(label);
       unreadable.add(label);
+      recorded.delete(label);
     }
   }
   for (const label of labels) {

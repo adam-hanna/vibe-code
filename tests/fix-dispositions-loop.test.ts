@@ -535,3 +535,34 @@ test('a final fix that dies resumes as the final fix, and still re-runs the carr
   assert.equal(existsSync(path.join(state.dir, 'OUTSTANDING.md')), true);
   assert.equal(state.fixInFlight, undefined);
 });
+
+test('a round stopped after its record but before its findings were consumed is redone as itself, and the retry is its record', async () => {
+  // The state such a stop leaves: the record written, the findings still pending,
+  // the round still in flight.
+  const state = carrying([{ ...p1('reviewer-said'), raisedBy: 'reviewer' }], { round: 0, provider: 'codex', model: 'm' });
+  state.reviewRound = 1;
+  state.fixInFlight = { round: 1, final: false };
+  writeFileSync(path.join(state.dir, 'fix-dispositions-1.json'), '{"round":1,"label":"fix-1","dispositions":[]}', 'utf8');
+  state.events.push({ at: new Date().toISOString(), type: 'fix_dispositions', round: 1, label: 'fix-1', answers: 0, dispositions: [] });
+  saveState(state);
+
+  const calls: string[] = [];
+  await run(
+    state,
+    config({ p1Tolerance: 0, maxReviewRounds: 3 }),
+    agents(
+      {
+        claude: (label) => {
+          work(state, `${label}.txt`);
+          return 'prose this time';
+        },
+      },
+      calls,
+    ),
+  );
+  assert.deepEqual(calls, ['fix-1', 'review-1']);
+  assert.equal(existsSync(path.join(state.dir, 'fix-dispositions-1.json')), false, 'no stale record beside the warning');
+  const card = scoreArchive(state.targetDir).findings.outcomes;
+  assert.deepEqual(card.rounds, { matched: 0, measured: 1, unmeasured: 0 }, 'the retry is the round');
+  assert.equal(card.unreadable, 1);
+});

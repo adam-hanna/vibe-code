@@ -142,7 +142,7 @@ test('"precision" appears only in the UNMEASURABLE entry', () => {
   const lines = renderScorecard(scoreArchive(dir));
   const mentions = lines.filter((l) => /precision/i.test(l));
   assert.equal(mentions.length, 1);
-  assert.match(mentions[0] ?? '', /finding precision:.*rebutted by the fixer.*not a verdict/);
+  assert.match(mentions[0] ?? '', /finding precision:.*the fixer's rebuttal rate.*the fixer can be wrong too.*not a verdict/);
 });
 
 test('same id raised again, not reviewed again, and not recorded are three different answers', () => {
@@ -220,4 +220,15 @@ test('an entry with a severity outside P0-P3 is skipped whole, not tallied under
   assert.equal(o.total.of, 1);
   assert.deepEqual(Object.keys(o.bySeverity), ['P1']);
   assert.equal(o.bySeat['codex/gpt-x']?.of, 1);
+});
+
+test('a round recorded twice is counted once, as its last record says', () => {
+  const dir = archive({
+    readableLast: { state: { events: [charge('fix-1'), unreadable(1), charge('fix-1'), recorded(1, [entry('x')])] } },
+    unreadableLast: { state: { events: [charge('fix-1'), recorded(1, [entry('y')]), charge('fix-1'), unreadable(1)] } },
+  });
+  const o = scoreArchive(dir).findings.outcomes;
+  assert.deepEqual(o.rounds, { matched: 1, measured: 2, unmeasured: 0 });
+  assert.equal(o.unreadable, 1);
+  assert.equal(o.total.of, 1, 'only the readable retry is scored');
 });

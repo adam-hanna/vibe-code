@@ -327,13 +327,13 @@ function readFixOutput(outcome: TurnOutcome): FixRead {
  * The round's dispositions on disk and in the event log, or the warning that
  * there are none (#393).
  *
- * Called by both review fix sites *after* `clearPendingFindings`, never before.
- * The report is recorded before that clear, exactly as on every round before
- * this existed, and the record of what the fixer said is written once the round
- * is consumed: a process that dies before the clear buys the fix again and
- * writes no record for the attempt it lost, and one that dies after it leaves a
- * round with a report and no record - which the scorecard counts as *not
- * recorded*, never as a second record for a renumbered round.
+ * Called by both review fix sites after the report and *before*
+ * `clearPendingFindings`, so a round is never consumed without its record. A
+ * process that dies in between resumes the same round under the same label
+ * (`fixInFlight`) and records it again. That retry is the round's record of
+ * record: the artifact is rewritten, an unreadable retry removes the earlier
+ * attempt's artifact, and the scorecard and the window read the last event per
+ * round.
  *
  * Unreadable is never `not-addressed`. That would turn "this run could not read
  * the answer" into "the fixer ignored every finding", which is a number nobody
@@ -356,6 +356,9 @@ function recordDispositions(
         'its report is kept as written',
       { round, label, answers, reason: 'error' in read ? read.error : '' },
     );
+    // A retried round whose earlier attempt was readable must not keep that
+    // attempt's file beside this attempt's warning.
+    removeArtifact(state, `fix-dispositions-${round}.json`);
     return;
   }
   const settled = settleDispositions(findings, read.parsed.dispositions, {
@@ -1631,11 +1634,12 @@ async function runFinalFix(
   // without making a second fix round useful, and the record is not lost by
   // going first: `recoverOutstanding` rebuilds it from `state.outstanding`
   // once the gate has passed. Same order as `runFixRound`.
+  // Before the findings are consumed, as in `runFixRound`, and before
+  // `confirmFixed`, so the carried P1s' `at: 'final-fix'` verdict lands on
+  // `state.outstanding` beside a record that already exists.
+  recordDispositions(state, finalRead, findings, `final-fix-${state.reviewRound}`);
   delete state.fixInFlight;
   clearPendingFindings(state);
-  // Before `confirmFixed`, so the carried P1s' `at: 'final-fix'` verdict
-  // lands on `state.outstanding` beside a record that already exists.
-  recordDispositions(state, finalRead, findings, `final-fix-${state.reviewRound}`);
 
   // After the fix and before the artifact that describes it. This is the
   // round the loop deliberately never reviews again, so OUTSTANDING.md has
@@ -1739,9 +1743,12 @@ async function runFixRound(
   // that fails must not buy this turn a second time. Everything before this
   // point leaves them outstanding, which is what makes a died-mid-turn resume
   // retry the fix rather than skip it.
+  // The record before the consumption, so no stop can leave a consumed round
+  // without one: a resume finds the findings still pending and `fixInFlight`
+  // still set, and redoes this same round and label, record included (#393).
+  recordDispositions(state, read, findings, `fix-${state.reviewRound}`);
   delete state.fixInFlight;
   clearPendingFindings(state);
-  recordDispositions(state, read, findings, `fix-${state.reviewRound}`);
   writeCheckpoint(
     state,
     'review-round',
