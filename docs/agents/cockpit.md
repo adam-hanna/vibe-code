@@ -1203,6 +1203,29 @@ they are waiting on. Four things in it are worth carrying:
   project shown), and each draws only what may be set there — the test command and the worktree
   for a project, `auth`, `cli`, `pilot` and the type scale for all — with a line saying where the
   rest live. The ⚙ sits on the right with `＋ −`, because the arrow on the left is the disclosure.
+- **A run a phone started, and a setting a phone saved, say so; nothing else gains a line**
+  (#365). The other half of #344's gate attribution, and the same rule: only a `phone:` origin
+  is named, read through `phoneOf` in `remote/origin.ts`, the app's one spelling of the prefix
+  (`phone-attribution.test.ts` fails on a second one). The window's own invokes and saves carry
+  no origin, and the pilot, the gate matrix and a terminal are not a person on another device,
+  so calling any of them *from this desktop* would be inventing it (the phone's *from this
+  desktop* is #347's).
+  - **A run start** is folded off `run_started`'s `origin` into `identity.startedFrom`, absent
+    rather than null as on the wire. It reads *Started from <name>*, or *Resumed from <name>*
+    when the frame is a resume, because the frame is per invoke and a phone that resumed a run
+    did not start it. It is drawn at the top of the rail, above the *Now* card, since the rail
+    is what the cockpit draws of a run and the full column's identity header (which draws it
+    too) is not on screen there. It stays for as long as the run is shown: it is a fact about
+    the run, not a notice about a moment. A later `run_started` with no origin rebuilds the
+    identity without it.
+  - **A settings save** that arrives as `changed` for the file on screen (`configWriteFor`)
+    reads *saved from <name>, and reread from the file*, under the heading where this window's
+    own *saved to* line is drawn: the same fact with a different author, so the same place and
+    weight. **It stays until something supersedes it, and never on a timer**: a save from a
+    phone is made because nobody is at the desktop, so a note that faded would be gone before
+    anybody came back to read it. It goes when the next save to that file lands (this window's,
+    or another client's, which names that phone or nobody) and when the screen is left or
+    pointed at another file, the lifetime the *saved to* line already has.
 
   Three things keep it honest. **The CLI reads it too**, through the one `loadConfig`, so a
   terminal and a window cannot disagree about what a run is configured to do; a resume layers it

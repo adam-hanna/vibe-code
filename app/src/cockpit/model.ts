@@ -860,6 +860,17 @@ export interface Run {
     /** The brief, as the run recorded it. The workstream's name. */
     task: string | null;
     resumed: boolean;
+    /**
+     * The phone that asked for this start or resume, by name (#365).
+     *
+     * `run_started` carries the invoke's `origin` only when it had one, and the
+     * bridge writes `phone:<name>` on every frame a phone sends. **Only a phone
+     * is folded**, by `decidedFrom`'s rule: the window's own invokes carry no
+     * origin, and a terminal or the pilot is not a person on another device.
+     * Absent rather than null, mirroring the wire - a run with no key here is
+     * every run that was not started from a phone, and draws nothing new.
+     */
+    startedFrom?: string;
     at: number;
   } | null;
   /**
@@ -1018,6 +1029,25 @@ function readResumedFrom(v: unknown): ResumedFrom | null {
 function decidedFrom(how: 'continued' | 'stopped', data: Record<string, unknown>): Run['decidedFrom'] {
   const phone = phoneOf(data['origin']);
   return phone === null ? null : { how, boundary: str(data['boundary']), phone };
+}
+
+/**
+ * *Started from <phone>*, or *Resumed from <phone>* on a resume, or null (#365).
+ *
+ * The verb follows `resumed` because the frame is per invoke: a phone that
+ * resumed a run the window started did not start it, and saying so would be
+ * the attribution inventing a fact. Null for every run not started from a
+ * phone, so a window or terminal start draws nothing new.
+ */
+export function startedLine(identity: Run['identity']): string | null {
+  if (identity === null || identity.startedFrom === undefined) return null;
+  return `${identity.resumed ? 'Resumed' : 'Started'} from ${identity.startedFrom}.`;
+}
+
+/** The phone a run start came from, as a spreadable field; empty for anything else (#365). */
+function startedFrom(data: Record<string, unknown>): { startedFrom?: string } {
+  const phone = phoneOf(data['origin']);
+  return phone === null ? {} : { startedFrom: phone };
 }
 
 function str(v: unknown): string | null {
@@ -1741,6 +1771,10 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
             workDir: str(data['workDir']),
             task: str(data['task']),
             resumed: data['resumed'] === true,
+            // Who asked, when it was a phone (#365). Each `run_started` builds the
+            // identity afresh, so a resume from this window after a phone's start
+            // says nothing about the phone: this session was not started there.
+            ...startedFrom(data),
             at,
           },
           // What earlier sessions of this run already did (#211). Null on a
