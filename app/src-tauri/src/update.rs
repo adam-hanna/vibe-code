@@ -13,7 +13,7 @@
 //! URL: the endpoint is config or `VIBE_UPDATE_ENDPOINT`, and the release page
 //! is a constant below.
 //!
-//! Five rules travel with it:
+//! Six rules travel with it:
 //!
 //! - **A check never fails on screen.** No manifest yet (a 404, which is what
 //!   the newest release answers until one ships with the updater), no network, a
@@ -24,6 +24,12 @@
 //!   in our `latest.json` is the AppImage - and would `dpkg -i` those bytes.
 //!   `action_for` refuses it, and `update_install` asks it again rather than
 //!   trusting what the window was told.
+//! - **An AppImage installs only over a file that is there** (#390). The
+//!   plugin overwrites `$APPIMAGE`, so `action_for` decides on that file - a
+//!   regular file in a folder this user can write - rather than on the
+//!   variable. `update_install` asks before the download and again after it,
+//!   before any host is stopped, and a refusal names the path and says to
+//!   download from the release page instead of a bare `os error 2`.
 //! - **A live run is never stopped without asking.** `update_install` answers
 //!   `Confirm` while `has_run_hosts()` is true - which includes a host set it
 //!   cannot read - and does nothing else until the window calls again with the
@@ -42,6 +48,8 @@
 //!   is where single-instance releases its lock and `lib.rs` runs `stop()`. A new
 //!   process started earlier would find the old one and raise its window instead.
 
+use std::ffi::OsStr;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -81,38 +89,154 @@ pub enum Action {
     Download,
 }
 
+/// What `$APPIMAGE` names, which is the file an AppImage update overwrites.
+///
+/// **The variable is not the file** (#390). The plugin points its installer at
+/// `$APPIMAGE` and begins by reading that path's metadata, so a file moved,
+/// renamed or deleted after launch - the app was started from a worktree's
+/// `target/release/bundle/appimage/` and the worktree was pruned while it ran -
+/// downloaded the whole bundle, stopped every host and then failed with a bare
+/// `No such file or directory (os error 2)`. Linux keeps the open file alive for
+/// the process using it, so nothing else looked wrong. A directory this user
+/// cannot write fails the same way with another error: the plugin renames the
+/// old file aside and writes the new one in its place, and both need the folder.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AppImageFile {
+    /// Unset or empty: the AppImage runtime did not start this process.
+    Unset,
+    /// A regular file, in a directory this process can write.
+    Ready(PathBuf),
+    /// Nothing that is a regular file is at the path any more.
+    Missing(PathBuf),
+    /// The file is there, but its directory cannot be written.
+    ReadOnly(PathBuf),
+}
+
+/// Read what `var` names through the two probes. Its own function so the
+/// decision is tested without a filesystem; `read_appimage` passes the real ones.
+pub fn appimage_file(
+    var: Option<&OsStr>,
+    is_file: impl Fn(&Path) -> bool,
+    dir_writable: impl Fn(&Path) -> bool,
+) -> AppImageFile {
+    let Some(path) = var.filter(|v| !v.is_empty()).map(PathBuf::from) else {
+        return AppImageFile::Unset;
+    };
+    if !is_file(&path) {
+        return AppImageFile::Missing(path);
+    }
+    // A file always has a parent; a bare name is relative to the working
+    // directory, which is where the plugin would write it.
+    let dir = match path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
+    if dir_writable(&dir) {
+        AppImageFile::Ready(path)
+    } else {
+        AppImageFile::ReadOnly(path)
+    }
+}
+
+/// This process's `$APPIMAGE`, read now. Every decision reads it again rather
+/// than once at start-up, because what goes wrong is the file changing while
+/// the app runs.
+fn read_appimage() -> AppImageFile {
+    appimage_file(
+        std::env::var_os("APPIMAGE").as_deref(),
+        |p| std::fs::metadata(p).map(|m| m.is_file()).unwrap_or(false),
+        dir_writable,
+    )
+}
+
+/// `access(W_OK)`: asked of the kernel, so a read-only mount, a folder owned
+/// by somebody else and an ACL all answer the same way, and nothing is written
+/// to find out.
+#[cfg(unix)]
+fn dir_writable(dir: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(c) = std::ffi::CString::new(dir.as_os_str().as_bytes()) else {
+        return false;
+    };
+    // SAFETY: `c` is a valid NUL-terminated string that outlives the call.
+    unsafe { libc::access(c.as_ptr(), libc::W_OK) == 0 }
+}
+
+#[cfg(not(unix))]
+fn dir_writable(_: &Path) -> bool {
+    // `APPIMAGE` only means anything on Linux; elsewhere it is never consulted.
+    false
+}
+
+/// Whether the plugin would install this build by overwriting an AppImage: a
+/// binary patched as one, or an unpatched Linux binary, which the plugin's
+/// installer dispatch sends to the same `install_appimage`.
+fn installs_as_appimage(os: &str, bundle: Option<&BundleType>) -> bool {
+    match bundle {
+        Some(BundleType::AppImage) => true,
+        None => os == "linux",
+        _ => false,
+    }
+}
+
 /// Which action an install gets, from what Tauri patched into the binary at
-/// bundle time and, on Linux, the variable the AppImage runtime sets.
+/// bundle time and, on Linux, the file `APPIMAGE` names.
 ///
 /// Fails closed: an install this cannot identify is never handed the AppImage
 /// entry or an installer. On Linux an unpatched binary is a dev build or a
 /// package somebody built by hand, and `APPIMAGE` is the AppImage runtime's own
 /// evidence; on Windows an unpatched binary is a dev build, with no installer
 /// behind it to run. macOS reports `App` even unpatched, and there is only one
-/// way to install there.
-pub fn action_for(os: &str, bundle: Option<BundleType>, appimage_env: bool) -> Action {
-    match bundle {
+/// way to install there. **An AppImage installs only when the file it would
+/// overwrite is there and its folder can be written** (#390) - and that holds
+/// for a patched AppImage binary too, because without `APPIMAGE` the plugin
+/// falls back to `current_exe()`, which is inside the read-only mount.
+pub fn action_for(os: &str, bundle: Option<BundleType>, appimage: &AppImageFile) -> Action {
+    match &bundle {
         // Even with APPIMAGE set: the plugin dispatches its installer on the
         // bundle type, so a patched `.deb` binary would `dpkg -i` the AppImage.
         Some(BundleType::Deb) | Some(BundleType::Rpm) => Action::Download,
-        Some(BundleType::AppImage) => Action::Install,
+        _ if installs_as_appimage(os, bundle.as_ref()) => match appimage {
+            AppImageFile::Ready(_) => Action::Install,
+            AppImageFile::Unset | AppImageFile::Missing(_) | AppImageFile::ReadOnly(_) => Action::Download,
+        },
         Some(BundleType::Nsis) | Some(BundleType::Msi) => Action::Install,
         Some(BundleType::App) | Some(BundleType::Dmg) => Action::Install,
-        None => match os {
+        _ => match os {
             "macos" => Action::Install,
-            "linux" if appimage_env => Action::Install,
             _ => Action::Download,
         },
     }
 }
 
+/// The sentence for an AppImage that cannot be updated in place, naming the
+/// path and what to do; `None` when the file is fine or there is none.
+pub fn appimage_problem(appimage: &AppImageFile) -> Option<String> {
+    match appimage {
+        AppImageFile::Unset | AppImageFile::Ready(_) => None,
+        AppImageFile::Missing(path) => Some(format!(
+            "This AppImage was moved or deleted after it started: {} is not there any more, so the update has nothing to replace. \
+             Download the new version from the release page, put it somewhere permanent such as ~/Applications, and start it from there.",
+            path.display()
+        )),
+        AppImageFile::ReadOnly(path) => Some(format!(
+            "This AppImage's folder cannot be written, so the update cannot replace {}. \
+             Download the new version from the release page, or move this AppImage to a folder you own, such as ~/Applications, and start it from there.",
+            path.display()
+        )),
+    }
+}
+
 /// This process's own install action.
 fn this_action() -> Action {
-    action_for(
-        std::env::consts::OS,
-        tauri::utils::platform::bundle_type(),
-        std::env::var_os("APPIMAGE").is_some(),
-    )
+    let (os, bundle) = this_os_bundle();
+    action_for(os, bundle, &read_appimage())
+}
+
+/// Why this process's AppImage cannot be updated in place, when it is one.
+fn this_appimage_problem() -> Option<String> {
+    let (os, bundle) = this_os_bundle();
+    installs_as_appimage(os, bundle.as_ref()).then(|| appimage_problem(&read_appimage())).flatten()
 }
 
 /// What `VIBE_UPDATE_ENDPOINT` says.
@@ -364,7 +488,14 @@ pub(crate) async fn check(app: &AppHandle, pending: &Pending) -> Result<Option<U
             // that began while this check was in flight keeps its update, and
             // the window goes on describing that one.
             Ok(match pending.offer(update) {
-                Offered::Stored(update) => Some(info(&update)),
+                Offered::Stored(update) => {
+                    // The window draws Download and nothing more; the log says
+                    // which file made it so (#390).
+                    if let Some(why) = this_appimage_problem() {
+                        applog::app(&format!("update {} is offered by download: {why}", update.version));
+                    }
+                    Some(info(&update))
+                }
                 Offered::Installing(installing) => installing.as_ref().map(info),
             })
         }
@@ -406,7 +537,7 @@ pub(crate) async fn install(
     if page {
         return open_page().map(|()| Outcome::Opened);
     }
-    install_refusal(this_action())?;
+    install_refusal(this_os_bundle(), &read_appimage())?;
     let hosts = app.state::<HostProcess>();
     // Held to the end; every return drops it, which thaws run starts and then
     // releases the slot. A restart never returns.
@@ -432,18 +563,28 @@ pub(crate) async fn install(
             e.to_string()
         })?;
 
+    // Asked again after the download and before anything is stopped: the
+    // download can take minutes, and a file moved in that time would otherwise
+    // be found missing only after every run had been stopped (#390).
+    if let Err(why) = install_refusal(this_os_bundle(), &read_appimage()) {
+        applog::app(&format!("update install refused after the download: {why}"));
+        return Err(why);
+    }
+
     let stopping = app.clone();
     tauri::async_runtime::spawn_blocking(move || before_install(&stopping.state::<HostProcess>()))
         .await
         .map_err(|e| format!("could not stop the hosts before installing: {e}"))?;
 
     if let Err(e) = update.install(bytes) {
+        // The raw error is for the log; the window gets a sentence when the
+        // file is what failed - the race the second check above cannot close.
         applog::app(&format!("update install failed: {e}"));
         // The runs were stopped resumably; let them start again and bring the
         // service host back so the window can read them and resume one.
         drop(held);
         let _ = host::launch(app);
-        return Err(e.to_string());
+        return Err(install_failure(this_os_bundle(), &read_appimage(), e.to_string()));
     }
     applog::app(&format!("update {} installed; restarting", update.version));
     app.restart();
@@ -489,14 +630,34 @@ impl Drop for Frozen {
     }
 }
 
+/// The OS and the bundle type Tauri patched in: the half of the install
+/// decision that cannot change while the app runs.
+fn this_os_bundle() -> (&'static str, Option<BundleType>) {
+    (std::env::consts::OS, tauri::utils::platform::bundle_type())
+}
+
 /// The refusal `update_install` gives an install that updates by download -
-/// a `.deb`, or a build this cannot identify - before anything is downloaded
-/// or stopped. Its own function so the guard is tested, not only the table.
-pub fn install_refusal(action: Action) -> Result<(), String> {
-    match action {
+/// a `.deb`, a build this cannot identify, or an AppImage whose file is gone or
+/// cannot be replaced - before anything is downloaded or stopped. Its own
+/// function so the guard is tested, not only the table.
+pub fn install_refusal((os, bundle): (&str, Option<BundleType>), appimage: &AppImageFile) -> Result<(), String> {
+    match action_for(os, bundle.clone(), appimage) {
         Action::Install => Ok(()),
-        Action::Download => Err("this install updates by download, from the release page".into()),
+        Action::Download => Err(installs_as_appimage(os, bundle.as_ref())
+            .then(|| appimage_problem(appimage))
+            .flatten()
+            .unwrap_or_else(|| "this install updates by download, from the release page".into())),
     }
+}
+
+/// What the window is told when `install()` itself fails: the AppImage
+/// sentence if the file is now gone or unwritable, otherwise the plugin's own
+/// words.
+pub fn install_failure((os, bundle): (&str, Option<BundleType>), appimage_now: &AppImageFile, raw: String) -> String {
+    installs_as_appimage(os, bundle.as_ref())
+        .then(|| appimage_problem(appimage_now))
+        .flatten()
+        .unwrap_or(raw)
 }
 
 /// The release page in the system's browser. No URL and no program from the
@@ -536,25 +697,138 @@ fn opener() -> std::process::Command {
 mod tests {
     use super::*;
 
+    fn ready() -> AppImageFile {
+        AppImageFile::Ready(PathBuf::from("/home/u/Applications/Vibe-linux-x86_64.AppImage"))
+    }
+
     #[test]
     fn a_deb_is_never_installed_and_an_unknown_install_fails_closed() {
         use BundleType::*;
-        let cases: &[(&str, Option<BundleType>, bool, Action)] = &[
-            ("linux", Some(Deb), false, Action::Download),
-            ("linux", Some(Deb), true, Action::Download),
-            ("linux", Some(Rpm), false, Action::Download),
-            ("linux", Some(AppImage), false, Action::Install),
-            ("linux", None, false, Action::Download),
-            ("linux", None, true, Action::Install),
-            ("macos", Some(App), false, Action::Install),
-            ("macos", None, false, Action::Install),
-            ("windows", Some(Nsis), false, Action::Install),
-            ("windows", Some(Msi), false, Action::Install),
-            ("windows", None, false, Action::Download),
+        let unset = AppImageFile::Unset;
+        let ok = ready();
+        let cases: &[(&str, Option<BundleType>, &AppImageFile, Action)] = &[
+            ("linux", Some(Deb), &unset, Action::Download),
+            ("linux", Some(Deb), &ok, Action::Download),
+            ("linux", Some(Rpm), &unset, Action::Download),
+            ("linux", Some(AppImage), &ok, Action::Install),
+            // Without `APPIMAGE` the plugin would overwrite `current_exe()`,
+            // which is inside the read-only mount (#390).
+            ("linux", Some(AppImage), &unset, Action::Download),
+            ("linux", None, &unset, Action::Download),
+            ("linux", None, &ok, Action::Install),
+            ("macos", Some(App), &unset, Action::Install),
+            ("macos", None, &unset, Action::Install),
+            ("windows", Some(Nsis), &unset, Action::Install),
+            ("windows", Some(Msi), &unset, Action::Install),
+            ("windows", None, &unset, Action::Download),
         ];
-        for (os, bundle, env, want) in cases {
-            assert_eq!(action_for(os, bundle.clone(), *env), *want, "{os} {bundle:?} APPIMAGE={env}");
+        for (os, bundle, appimage, want) in cases {
+            assert_eq!(action_for(os, bundle.clone(), appimage), *want, "{os} {bundle:?} {appimage:?}");
         }
+    }
+
+    #[test]
+    fn an_appimage_installs_only_when_its_file_is_there_and_its_folder_is_writable() {
+        let path = PathBuf::from("/home/u/wt/app/src-tauri/target/release/bundle/appimage/Vibe_1.6.1_amd64.AppImage");
+        let gone = AppImageFile::Missing(path.clone());
+        let locked = AppImageFile::ReadOnly(path.clone());
+        for bundle in [Some(BundleType::AppImage), None] {
+            assert_eq!(action_for("linux", bundle.clone(), &gone), Action::Download);
+            assert_eq!(action_for("linux", bundle.clone(), &locked), Action::Download);
+            assert_eq!(action_for("linux", bundle, &ready()), Action::Install);
+        }
+    }
+
+    #[test]
+    fn the_appimage_file_is_read_from_the_variable_and_the_two_probes() {
+        let var = OsStr::new("/opt/apps/Vibe.AppImage");
+        let p = PathBuf::from("/opt/apps/Vibe.AppImage");
+        assert_eq!(appimage_file(None, |_| true, |_| true), AppImageFile::Unset);
+        assert_eq!(appimage_file(Some(OsStr::new("")), |_| true, |_| true), AppImageFile::Unset);
+        assert_eq!(appimage_file(Some(var), |_| false, |_| true), AppImageFile::Missing(p.clone()));
+        // A missing file is reported as missing, whatever the folder says.
+        assert_eq!(appimage_file(Some(var), |_| false, |_| false), AppImageFile::Missing(p.clone()));
+        assert_eq!(appimage_file(Some(var), |_| true, |_| false), AppImageFile::ReadOnly(p.clone()));
+        assert_eq!(appimage_file(Some(var), |_| true, |_| true), AppImageFile::Ready(p));
+        // The folder asked about is the file's own.
+        let asked = std::cell::RefCell::new(None);
+        appimage_file(Some(var), |_| true, |d| {
+            *asked.borrow_mut() = Some(d.to_path_buf());
+            true
+        });
+        assert_eq!(asked.into_inner(), Some(PathBuf::from("/opt/apps")));
+        // A bare name lives in the working directory.
+        appimage_file(Some(OsStr::new("Vibe.AppImage")), |_| true, |d| {
+            assert_eq!(d, Path::new("."));
+            true
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_real_probes_see_a_deleted_appimage_and_a_read_only_folder() {
+        use std::os::unix::fs::PermissionsExt;
+        let read = |p: &Path| {
+            appimage_file(
+                Some(p.as_os_str()),
+                |p| std::fs::metadata(p).map(|m| m.is_file()).unwrap_or(false),
+                dir_writable,
+            )
+        };
+        let root = std::env::temp_dir().join(format!("vibe-update-390-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("Vibe.AppImage");
+        std::fs::write(&file, b"x").unwrap();
+        assert_eq!(read(&file), AppImageFile::Ready(file.clone()));
+        // A directory at the path is not a file to overwrite.
+        assert_eq!(read(&root), AppImageFile::Missing(root.clone()));
+
+        // root (uid 0) ignores the mode, so the read-only half is only
+        // meaningful for an ordinary user.
+        let is_root = unsafe { libc::geteuid() } == 0;
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let locked = read(&file);
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if !is_root {
+            assert_eq!(locked, AppImageFile::ReadOnly(file.clone()));
+        }
+
+        // The case #390 hit: the file was deleted while the app ran.
+        std::fs::remove_file(&file).unwrap();
+        assert_eq!(read(&file), AppImageFile::Missing(file.clone()));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_moved_appimage_is_refused_with_a_sentence_naming_the_path() {
+        let path = PathBuf::from("/home/u/wt/Vibe_1.6.1_amd64.AppImage");
+        let linux_appimage = ("linux", Some(BundleType::AppImage));
+        let why = install_refusal(linux_appimage.clone(), &AppImageFile::Missing(path.clone())).expect_err("refused");
+        assert!(why.contains("moved or deleted"), "{why}");
+        assert!(why.contains("/home/u/wt/Vibe_1.6.1_amd64.AppImage"), "{why}");
+        assert!(why.contains("release page"), "{why}");
+        assert!(!why.contains("os error"), "{why}");
+
+        let why = install_refusal(("linux", None), &AppImageFile::ReadOnly(path.clone())).expect_err("refused");
+        assert!(why.contains("cannot be written"), "{why}");
+        assert!(why.contains("/home/u/wt/Vibe_1.6.1_amd64.AppImage"), "{why}");
+
+        assert!(install_refusal(linux_appimage, &ready()).is_ok());
+        // A `.deb` is refused for being a `.deb`, never with AppImage words,
+        // even if a stray `APPIMAGE` names a missing file.
+        let why = install_refusal(("linux", Some(BundleType::Deb)), &AppImageFile::Missing(path)).expect_err("refused");
+        assert!(why.contains("by download"), "{why}");
+    }
+
+    #[test]
+    fn an_install_that_fails_because_the_file_went_says_so_and_otherwise_passes_the_error_on() {
+        let raw = "No such file or directory (os error 2)".to_string();
+        let gone = AppImageFile::Missing(PathBuf::from("/tmp/x/Vibe.AppImage"));
+        let said = install_failure(("linux", Some(BundleType::AppImage)), &gone, raw.clone());
+        assert!(said.contains("moved or deleted") && said.contains("/tmp/x/Vibe.AppImage"), "{said}");
+        assert_eq!(install_failure(("linux", Some(BundleType::AppImage)), &ready(), raw.clone()), raw);
+        assert_eq!(install_failure(("windows", Some(BundleType::Nsis)), &gone, raw.clone()), raw);
     }
 
     #[test]
@@ -583,11 +857,14 @@ mod tests {
 
     #[test]
     fn an_install_that_updates_by_download_is_refused_before_anything_happens() {
-        assert!(install_refusal(Action::Install).is_ok());
-        let why = install_refusal(Action::Download).expect_err("a .deb never self-updates");
+        assert!(install_refusal(("windows", Some(BundleType::Nsis)), &AppImageFile::Unset).is_ok());
+        let why = install_refusal(("linux", Some(BundleType::Deb)), &AppImageFile::Unset).expect_err("a .deb never self-updates");
         assert!(why.contains("by download"), "{why}");
         // And a deb gets that action whatever else the environment says.
-        assert!(install_refusal(action_for("linux", Some(BundleType::Deb), true)).is_err());
+        assert!(install_refusal(("linux", Some(BundleType::Deb)), &ready()).is_err());
+        // An unidentified build keeps the plain sentence.
+        let why = install_refusal(("windows", None), &AppImageFile::Unset).expect_err("unpatched windows");
+        assert!(why.contains("by download"), "{why}");
     }
 
     fn stored(o: Offered<String>) -> Option<String> {
