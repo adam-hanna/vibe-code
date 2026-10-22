@@ -161,3 +161,15 @@ test('a stored reviewSeat is read back, and a damaged one is dropped rather than
     assert.deepEqual(read(bad), { seat: undefined, repaired: true }, JSON.stringify(bad));
   }
 });
+
+test('a stored fixInFlight is read back, and a damaged one is dropped so the resume numbers a new round', () => {
+  const state = freshRun({ prefix: 'vibe-fix-in-flight-' });
+  const read = (fixInFlight: unknown): unknown => {
+    const raw = JSON.parse(JSON.stringify({ ...state, fixInFlight })) as Record<string, unknown>;
+    return validateStoredState(raw, state.id, state.dir).state.fixInFlight;
+  };
+  assert.deepEqual(read({ round: 2, final: true }), { round: 2, final: true });
+  assert.equal(read(undefined), undefined);
+  assert.equal(read({ round: 0, final: false }), undefined);
+  assert.equal(read({ round: 1, final: 'yes' }), undefined);
+});

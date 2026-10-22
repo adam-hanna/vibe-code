@@ -527,6 +527,7 @@ function countRun(
 const FIX_LABEL = /^(final-)?fix-\d+$/;
 
 const DISPOSITIONS = new Set(['fixed', 'rebutted', 'deferred', 'not-addressed']);
+const SEVERITIES = new Set(['P0', 'P1', 'P2', 'P3']);
 
 /**
  * One run's fix rounds, by what the fixer did with each review finding (#393).
@@ -592,7 +593,8 @@ function countOutcomes(
       const disposition = d['disposition'];
       const raisedBy = d['raisedBy'];
       if (typeof id !== 'string' || typeof severity !== 'string' || typeof disposition !== 'string') continue;
-      if (!DISPOSITIONS.has(disposition)) continue;
+      // Outside the vocabulary is damage, and a row for it would be a severity nobody gave.
+      if (!DISPOSITIONS.has(disposition) || !SEVERITIES.has(severity)) continue;
       if (raisedBy !== 'reviewer') {
         bump(out.excluded, typeof raisedBy === 'string' ? raisedBy : 'not recorded');
         continue;

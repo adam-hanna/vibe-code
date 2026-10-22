@@ -1947,6 +1947,19 @@ export interface RunState {
    */
   reviewSeat?: ReviewSeat | undefined;
   /**
+   * The review fix round whose turn has started and whose findings are not yet
+   * consumed (#393): set with the round's increment, before the turn, and
+   * cleared with the pending findings.
+   *
+   * What lets a resume tell "this round's turn died" from "the next round is
+   * due". Without it a resume numbered a new round on top of the one that died,
+   * so `fix-1`'s retry ran as `fix-2` answering a review it did not answer, and
+   * a final fix came back as an ordinary fix that never re-ran its reproducers.
+   * `final` says which of the two rounds it was. Absent on every run between
+   * rounds, and on every run recorded before it existed.
+   */
+  fixInFlight?: { round: number; final: boolean } | undefined;
+  /**
    * The **basename** of the most recent write turn's report artifact.
    *
    * Cleared before each write turn and written again once that turn's report is

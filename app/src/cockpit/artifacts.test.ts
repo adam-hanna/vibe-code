@@ -94,6 +94,7 @@ describe('the names are the loop’s, and the loop is read to prove it', () => {
     expect(writes('`answers-${state.questionRound}.json`')).toBe(true);
     expect(writes("'PLAN.md'")).toBe(true);
     expect(writes('`fix-dispositions-${round}.json`')).toBe(true);
+    expect(writes('`fix-report-${state.reviewRound}.md`')).toBe(true);
   });
 
   test('and this module places what those templates produce', () => {
@@ -104,6 +105,9 @@ describe('the names are the loop’s, and the loop is read to prove it', () => {
     expect(classify(file('code-review-3.json')).kind).toBe('review');
     expect(classify(file('answers-3.json')).kind).toBe('answers');
     expect(classify(file('fix-dispositions-3.json')).kind).toBe('dispositions');
+    expect(classify(file('fix-report-3.md'))).toMatchObject({ kind: 'fix-report', round: 3 });
+    // A verify-fix report is a gate repair, not a review fix round.
+    expect(classify(file('verify-fix-3.md')).kind).toBe('other');
   });
 });
 

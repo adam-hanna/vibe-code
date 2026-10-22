@@ -5,13 +5,13 @@ import { Button } from '@/ui/button';
 import { cn } from '@/lib/utils';
 import { Counts } from './Counts';
 import { Caret, Section } from './Disclosure';
-import { ballotLine, foundByLine, ofKind, outcomeLine, readDispositions, readReport, votesLine } from './artifacts';
+import { ballotLine, foundByLine, ofKind, outcomeFor, readDispositions, readReport, votesLine } from './artifacts';
 import { SEVERITIES } from './model';
 import { DOCUMENT, EMPTY, FILE, HEAD, LABEL, NOTE, PANE } from './pane';
 import { useArtifact, useArtifacts, noText } from './useArtifacts';
 import { sizeOf } from './PlansPane';
 import type { Severity } from '../design';
-import type { Classified, FixOutcome, FullFinding } from './artifacts';
+import type { Classified, FullFinding } from './artifacts';
 import type { Census, FinderMerge, FindingRow, FixDispositionsFrame } from './model';
 import type { RoundCard } from './rounds';
 
@@ -346,7 +346,7 @@ function ReportBody({
   dispositions?: Classified | null;
   /** The next review's `code-review-<n+1>.json`, or null. */
   nextReview?: Classified | null;
-  /** The fix round answering this review ran and its dispositions could not be read. */
+  /** The fix round answering this review ran and recorded no dispositions. */
   notRecorded?: boolean;
 }) {
   const { read, failure, loading } = useArtifact(dir, runId, name, revision);
@@ -356,19 +356,7 @@ function ReportBody({
   const file = fixed.read?.kind === 'text' ? readDispositions(fixed.read.text) : null;
   const raised =
     next.read?.kind === 'text' ? new Set(readReport(next.read.text)?.findings.map((f) => f.id) ?? []) : null;
-  /** The badges for one finding: a read-time join, never written back. */
-  const outcomeOf = (id: string): string[] => {
-    const entry = file?.byId.get(id);
-    const outcome: FixOutcome =
-      entry !== undefined && dispositions?.round != null
-        ? { kind: 'recorded', fixRound: dispositions.round, final: file?.final ?? false, entry }
-        : notRecorded && file === null
-          ? { kind: 'not-recorded' }
-          : null;
-    if (outcome === null) return [];
-    const after = file?.final === true ? 'not-reviewed-again' : raised?.has(id) === true ? 'raised-again' : null;
-    return outcomeLine(outcome, after);
-  };
+  const answering = { listed: dispositions?.round ?? null, file, unrecorded: notRecorded, raised };
 
   if (loading && read === null && missing === null) {
     return <p className={NOTE}>reading {name}…</p>;
@@ -443,7 +431,7 @@ function ReportBody({
             // is missing is what happened to the finding afterwards.
             row={census?.findings.find((r) => r.id === f.id) ?? null}
             reported={finders?.reported ?? null}
-            outcome={outcomeOf(f.id)}
+            outcome={outcomeFor(f.id, answering)}
           />
         ))
       )}
@@ -520,8 +508,14 @@ export function ReportPane({
       : (ofKind(entries, 'dispositions').find((c) => c.round === round + 1) ?? null);
   const nextReviewOf = (round: number | null): Classified | null =>
     kind !== 'review' || round === null ? null : (reports.find((c) => c.round === round + 1) ?? null);
-  const unreadableFor = (round: number | null): boolean =>
-    kind === 'review' && round !== null && fixDispositions.some((d) => d.answers === round && !d.recorded);
+  // A round that ran and recorded nothing: the frame that says its answer could
+  // not be read, or - for a run from before #393, or an archive opened without
+  // its frames - the round's report with no dispositions file beside it.
+  const unrecordedFor = (round: number | null): boolean =>
+    kind === 'review' &&
+    round !== null &&
+    (fixDispositions.some((d) => d.answers === round && !d.recorded) ||
+      ofKind(entries, 'fix-report').some((c) => c.round === round + 1));
   const [open, setOpen] = useState<string | null>(null);
   /** See `PlansPane`: the pane follows the run until the reader touches it. */
   const touched = useRef(false);
@@ -619,7 +613,7 @@ export function ReportPane({
             revision={revision}
             dispositions={answering(report.round)}
             nextReview={nextReviewOf(report.round)}
-            notRecorded={unreadableFor(report.round)}
+            notRecorded={unrecordedFor(report.round)}
           />
         </Section>
       ))}

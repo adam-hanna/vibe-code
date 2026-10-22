@@ -426,3 +426,112 @@ test('with no review-time stamp for the round answered, a reviewer finding credi
   assert.deepEqual(card.bySeat, {});
   assert.equal(card.total.of, 1);
 });
+
+// ---- a fix turn that dies, and the resume that follows ---------------------
+
+test('a fix turn that dies resumes as the same round, answering the same review, credited to the seat that reviewed', async () => {
+  const state = reviewingRun(RUN);
+  const cfg = config({ p1Tolerance: 0, maxReviewRounds: 3 });
+  const first: string[] = [];
+  await assert.rejects(
+    run(
+      state,
+      cfg,
+      agents(
+        {
+          codex: reviewOnce([p1('finding-one')]),
+          claude: () => {
+            throw new Error('the fixer died mid-turn');
+          },
+        },
+        first,
+      ),
+    ),
+  );
+  assert.deepEqual(first, ['review-0', 'fix-1']);
+  assert.deepEqual(state.fixInFlight, { round: 1, final: false });
+
+  const second: string[] = [];
+  await run(
+    state,
+    cfg,
+    agents(
+      {
+        codex: () => report([]),
+        claude: (label) => {
+          work(state, `${label}.txt`);
+          return said({ dispositions: [{ id: 'finding-one', disposition: 'fixed', reason: 'done' }] });
+        },
+      },
+      second,
+    ),
+  );
+  // Never `fix-2` answering a review it did not answer.
+  assert.deepEqual(second, ['fix-1', 'review-1']);
+  const file = dispositionsFile(state, 1);
+  assert.equal(file.label, 'fix-1');
+  assert.equal(file.answers, 0);
+  assert.notEqual(file.dispositions[0]?.seats, null, 'the review-time stamp still matches the round answered');
+  assert.equal(existsSync(path.join(state.dir, 'fix-dispositions-2.json')), false);
+  assert.equal(state.fixInFlight, undefined);
+});
+
+test('a final fix that dies resumes as the final fix, and still re-runs the carried reproducer', async () => {
+  const state = reviewingRun(RUN);
+  const cfg = config(
+    { p1Tolerance: 1, maxReviewRounds: 3 },
+    {
+      verify: {
+        ...DEFAULTS.verify,
+        enabled: true,
+        command: reproducerGate(state, { fixedBy: 'fixed.txt' }),
+        runs: 1,
+        timeoutMs: 30_000,
+      },
+    },
+  );
+  const first: string[] = [];
+  await assert.rejects(
+    run(
+      state,
+      cfg,
+      agents(
+        {
+          codex: (label) =>
+            label === 'review-0'
+              ? report([{ ...p1('the-claim'), reproducer: { path: 'repro/witness.txt', contents: 'FAIL - carried\n' } }])
+              : report([]),
+          claude: () => {
+            throw new Error('the fixer died mid-turn');
+          },
+        },
+        first,
+      ),
+    ),
+  );
+  assert.deepEqual(first, ['review-0', 'final-fix-1']);
+
+  const second: string[] = [];
+  await run(
+    state,
+    cfg,
+    agents(
+      {
+        codex: () => assert.fail('the final fix round is never reviewed again'),
+        claude: (label) => {
+          writeFileSync(path.join(state.targetDir, 'fixed.txt'), 'done\n', 'utf8');
+          return said({ dispositions: [{ id: 'the-claim', disposition: 'fixed', reason: `in ${label}` }] });
+        },
+      },
+      second,
+    ),
+  );
+  assert.deepEqual(second, ['final-fix-1']);
+  const file = dispositionsFile(state, 1);
+  assert.equal(file.label, 'final-fix-1');
+  assert.equal(file.answers, 0);
+  const carried = state.outstanding?.[0];
+  assert.equal(reproductionAt(carried ?? p1('missing'), 'final-fix')?.verdict, 'did-not-reproduce');
+  assert.equal(existsSync(path.join(state.dir, 'OUTSTANDING.md')), true);
+  assert.equal(state.fixInFlight, undefined);
+});

@@ -211,3 +211,13 @@ test('human and vibe findings are recorded but scored nowhere; unattributed revi
   assert.match(text, /credited to no seat:\s+1/);
   assert.match(text, /not scored, raised by:\s+human 1, vibe 1/);
 });
+
+test('an entry with a severity outside P0-P3 is skipped whole, not tallied under a row nobody gave', () => {
+  const dir = archive({
+    a: { state: { events: [charge('fix-1'), recorded(1, [entry('ok'), entry('damaged', { severity: 'P9' })])] } },
+  });
+  const o = scoreArchive(dir).findings.outcomes;
+  assert.equal(o.total.of, 1);
+  assert.deepEqual(Object.keys(o.bySeverity), ['P1']);
+  assert.equal(o.bySeat['codex/gpt-x']?.of, 1);
+});

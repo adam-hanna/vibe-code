@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { classify, outcomeLine, readDispositions } from './artifacts';
+import { classify, outcomeFor, outcomeLine, readDispositions } from './artifacts';
 import { emptyRun, reduce } from './model';
 import type { Run } from './model';
 import type { Frame } from '../host';
@@ -104,5 +104,38 @@ describe('fix_dispositions frames, folded', () => {
     expect(fold([say('fix_dispositions', { label: 'fix-1', answers: 0 })]).fixDispositions).toEqual([]);
     expect(fold([say('fix_dispositions_unreadable', { round: 1 })]).fixDispositions).toEqual([]);
     expect(emptyRun().fixDispositions).toEqual([]);
+  });
+});
+
+describe('the outcome for one finding of a review round', () => {
+  const file = readDispositions(
+    JSON.stringify({ round: 1, label: 'fix-1', dispositions: [{ id: 'a', disposition: 'rebutted', reason: 'no' }] }),
+  );
+
+  test('a recorded disposition, with the next review beside it', () => {
+    expect(outcomeFor('a', { listed: 1, file, unrecorded: false, raised: new Set(['a']) })).toEqual([
+      'fixer: rebutted - no (fix round 1)',
+      'same id raised again next round',
+    ]);
+    // Not raised again says nothing: it is not a confirmation that it was fixed.
+    expect(outcomeFor('a', { listed: 1, file, unrecorded: false, raised: new Set() })).toEqual([
+      'fixer: rebutted - no (fix round 1)',
+    ]);
+  });
+
+  test('an archived run with a fix report and no dispositions file says not recorded', () => {
+    expect(outcomeFor('a', { listed: null, file: null, unrecorded: true, raised: new Set(['a']) })).toEqual([
+      'dispositions not recorded for this round',
+      'same id raised again next round',
+    ]);
+  });
+
+  test('a listed file still loading claims nothing, and a round that never ran says nothing', () => {
+    expect(outcomeFor('a', { listed: 1, file: null, unrecorded: true, raised: null })).toEqual([]);
+    expect(outcomeFor('a', { listed: null, file: null, unrecorded: false, raised: null })).toEqual([]);
+  });
+
+  test('a fix report is classified so a round that ran can be told from one that did not', () => {
+    expect(classify({ name: 'fix-report-2.md', kind: 'file', bytes: 10 })).toMatchObject({ kind: 'fix-report', round: 2 });
   });
 });

@@ -35,7 +35,14 @@ import type { ArtifactEntry } from '../host';
  */
 
 /** Which pane an artifact belongs behind. `other` is drawn, never hidden. */
-export type ArtifactKind = 'plan' | 'critique' | 'review' | 'answers' | 'dispositions' | 'other';
+export type ArtifactKind =
+  | 'plan'
+  | 'critique'
+  | 'review'
+  | 'answers'
+  | 'dispositions'
+  | 'fix-report'
+  | 'other';
 
 export interface Classified {
   name: string;
@@ -65,6 +72,9 @@ const PATTERNS: readonly { kind: ArtifactKind; re: RegExp }[] = [
   // A review fix round's dispositions (#393). Its round is the FIX round, so it
   // answers `code-review-<round - 1>.json`; no tab lists it on its own.
   { kind: 'dispositions', re: /^fix-dispositions-(\d+)\.json$/ },
+  // A review fix round's report: the evidence that the round ran, when it left
+  // no dispositions file - an unreadable answer, or a run from before #393.
+  { kind: 'fix-report', re: /^fix-report-(\d+)\.md$/ },
   { kind: 'answers', re: /^answers-(\d+)\.json$/ },
   { kind: 'plan', re: /^plan-(\d+)\.json$/ },
 ];
@@ -395,6 +405,39 @@ export function outcomeLine(
   if (next === 'raised-again') out.push('same id raised again next round');
   else if (next === 'not-reviewed-again') out.push('not reviewed again');
   return out;
+}
+
+/** What the files beside one review round say about the fix round that answered it. */
+export interface AnsweringRound {
+  /** The round of the listed `fix-dispositions-<n>.json`, or null when none is listed. */
+  listed: number | null;
+  /** That file, read; null while it is loading or when it cannot be read. */
+  file: DispositionsFile | null;
+  /** The fix round ran and recorded none: an unreadable answer, or a run from before #393. */
+  unrecorded: boolean;
+  /** The ids the next review raised, or null when there is no next review to read. */
+  raised: ReadonlySet<string> | null;
+}
+
+/**
+ * The outcome badges for one finding of a review round: a read-time join,
+ * never written back onto the finding.
+ *
+ * "Not recorded" only when no dispositions file is listed at all - a listed
+ * file that is still loading, or cannot be read, says nothing rather than
+ * claiming the round recorded nothing.
+ */
+export function outcomeFor(id: string, a: AnsweringRound): string[] {
+  const entry = a.file?.byId.get(id);
+  const outcome: FixOutcome =
+    entry !== undefined && a.listed !== null
+      ? { kind: 'recorded', fixRound: a.listed, final: a.file?.final ?? false, entry }
+      : a.unrecorded && a.listed === null
+        ? { kind: 'not-recorded' }
+        : null;
+  if (outcome === null) return [];
+  const after = a.file?.final === true ? 'not-reviewed-again' : a.raised?.has(id) === true ? 'raised-again' : null;
+  return outcomeLine(outcome, after);
 }
 
 /**

@@ -1940,6 +1940,16 @@ const READERS = {
   // Absent stays absent: a run from before #393, or one that has not recorded a
   // review round. A damaged value is dropped, so its round credits no seat.
   reviewSeat: (raw, ctx) => readReviewSeat(raw, ctx),
+  // Absent stays absent: no fix round is in flight. A damaged marker is dropped,
+  // which resumes the way every run did before it existed - a new round.
+  fixInFlight: (raw, ctx) => {
+    if (raw === undefined) return undefined;
+    if (isRecord(raw) && isPositiveInt(raw['round']) && isBool(raw['final'])) {
+      return { round: raw['round'], final: raw['final'] };
+    }
+    ctx.repairs.dropped('fixInFlight', 'fixInFlight');
+    return undefined;
+  },
   // Absent stays absent again, and a present value is checked rather than
   // trusted: this one becomes a path under the run directory and its contents
   // are rendered into a prompt, so a stored `../../something` would read a file

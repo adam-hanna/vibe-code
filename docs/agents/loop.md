@@ -633,11 +633,15 @@ read it. Now it is data, and it is recorded per round.
   disposition, the reason, `seats`, and the `at: 'review'` reproducer verdict.
   `code-review-<n>.json` is never touched (#142). The outcome is joined at read time by the
   scorecard and the findings pane, never written back onto a finding.
-- **Written after the round is consumed.** Both sites record the report, clear the pending
-  findings, and only then write the dispositions. A process that dies before the clear buys the
-  fix again, as it always did, and wrote no record for the attempt it lost. One that dies after
-  the clear leaves a round with a report and no record, which the scorecard counts as *not
-  recorded*. Neither can produce a second record under a renumbered round.
+- **A fix round that dies is resumed as itself.** The round's increment was always persisted
+  before its turn, and the findings consumed only after it. So a process that died anywhere in
+  between resumed by numbering a *new* round: `fix-1`'s retry ran as `fix-2`, answering a review
+  it did not answer and crediting no seat, and a final fix came back as an ordinary fix that
+  never re-ran its reproducers. `state.fixInFlight` (`{ round, final }`) is set with the
+  increment and cleared with the pending findings. A resume that finds it reuses the round, and
+  a final one goes back through `runFinalFix`. Both sites record the report, clear the pending
+  findings, and then write the dispositions. A death after the clear leaves a round with a
+  report and no record, which the scorecard counts as *not recorded*, never as a second record.
 - **Attribution.** A finding is credited to every seat in `foundBy` (#388 Part B), so a finding
   two finders raised counts for both. Without `foundBy`, it is credited to the seat that took
   that review round's own turn. `reviewPhase` stamps that seat on `state.reviewSeat` (round,
@@ -663,6 +667,8 @@ read it. Now it is data, and it is recorded per round.
   `UNMEASURABLE`, with this proxy named as the nearest and not the thing.
 - **The window.** The findings pane joins `fix-dispositions-<n+1>.json` onto a finding in
   `code-review-<n>.json` and draws `outcomeLine` (`app/src/cockpit/artifacts.ts`) in the
-  provenance, below `foundBy` and the vote. "Dispositions not recorded for this round" comes
-  from the `fix_dispositions_unreadable` frame, which replay re-emits. The finding row, the round
+  provenance, below `foundBy` and the vote. "Dispositions not recorded for this round" is said
+  when no dispositions file is listed and either the `fix_dispositions_unreadable` frame says so
+  (an opened run draws its own replayed frames), or `fix-report-<n+1>.md` is listed without one.
+  The second case covers a run from before #393. The decision is `outcomeFor`, a pure function. The finding row, the round
   card and the stats view are unchanged.
