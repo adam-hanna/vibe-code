@@ -87,6 +87,7 @@ import { PairPrompt } from '../remote/PairPrompt';
 import { SpendPane } from './SpendPane';
 import { StopConfirm } from './StopConfirm';
 import { Summary } from './Summary';
+import { BriefOffer } from './BriefOffer';
 import { Workstreams } from './Workstreams';
 import { VerifyPane } from './VerifyPane';
 import { StalenessStrip } from './Staleness';
@@ -3171,27 +3172,15 @@ export function Cockpit({
 
                     Offered again once the command has RETURNED, not once the
                     loop said it was done: `serve.ts` runs one at a time and
-                    refuses a second invoke until the first settles. */}
-                {(shownLive === null || settled(run)) && !outside && (
-                  <>
-                    <div className="mx-4 mb-2 rounded-md border border-rule-card bg-card px-4 py-3.5">
-                      <span className="text-body-sm font-medium text-primary">waiting for the brief</span>
-                      <p className="mt-1.5 mb-0 text-body-sm leading-relaxed text-secondary">
-                        Describe the work to your pilot. Review the brief, then approve its proposal to begin.
-                      </p>
-                    </div>
-                    {/* `4a`, for the one moment somebody is deciding how THIS run
-                        should differ from the project's defaults. */}
-                    <Button
-                      variant="secondary"
-                      size="sm"
-                      className="mx-4 mb-3 self-start"
-                      onClick={() => setComposing({ dir: repoDir, locked: false })}
-                      disabled={busy || !wire.connected}
-                    >
-                      Customize this run
-                    </Button>
-                  </>
+                    refuses a second invoke until the first settles. That offer
+                    is made after the run, below - not here in the empty
+                    column's words, above a run that has finished (#410). */}
+                {shownLive === null && !outside && (
+                  <BriefOffer
+                    after={false}
+                    onCustomize={() => setComposing({ dir: repoDir, locked: false })}
+                    disabled={busy || !wire.connected}
+                  />
                 )}
               </>
             )}
@@ -3226,6 +3215,19 @@ export function Cockpit({
                   banner and its one action rather than a summary of work that
                   stopped early. */}
               {columnRun.completed?.exit === 0 && <Summary run={columnRun} />}
+              {/* The next run, offered after the one that ended (#410) - after
+                  its summary, or after its rail on a halt. The footer is pinned
+                  outside this scroll, so "after the run" is the end of the
+                  scroll rather than below the footer's one action. A run opened
+                  from the archive is not offered one: `past` takes the other
+                  branch above, and only the live run's command has returned. */}
+              {!past && shownLive !== null && settled(run) && !outside && (
+                <BriefOffer
+                  after
+                  onCustomize={() => setComposing({ dir: repoDir, locked: false })}
+                  disabled={busy || !wire.connected}
+                />
+              )}
             </div>
             {/* The same footer, about the same run. Its live controls draw
                 themselves off `run.completed`, which a finished run has set — so
