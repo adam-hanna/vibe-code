@@ -67,6 +67,15 @@ function thrown(what: string, err: unknown): string {
  * refused, because sending it would put the key in a prompt and a transcript.
  */
 export async function readReviewMd(cwd: string, sha: string): Promise<ReviewMdRead> {
+  // Every reason is redacted HERE, at the one exit, rather than at each site:
+  // a held key can be any string of eight or more characters - "REVIEW.md"
+  // included - so even a fixed sentence can carry one, and these reasons are
+  // recorded in state, narrated, and shown by doctor and the settings note.
+  const read = await readUnredacted(cwd, sha);
+  return read.kind === 'refused' || read.kind === 'unreadable' ? { ...read, reason: redact(read.reason) } : read;
+}
+
+async function readUnredacted(cwd: string, sha: string): Promise<ReviewMdRead> {
   const list = `git ls-tree ${short(sha)}`;
   let listed: { code: number | null; stdout: string; stderr: string };
   try {
@@ -209,7 +218,9 @@ export async function reviewStandardsFor(
     return settle({ text: again.text, commit: record.commit });
   }
   const found = again.kind === 'present' ? `blob ${again.blob}` : again.kind === 'absent' ? 'no REVIEW.md' : again.reason;
-  const reason = `the recorded blob ${String(record.blob)} no longer matches what ${short(record.commit)} holds (${found})`;
+  const reason = redact(
+    `the recorded blob ${String(record.blob)} no longer matches what ${short(record.commit)} holds (${found})`,
+  );
   state.reviewMd = { ...record, outcome: 'unreadable', reason };
   recordAndSay(
     state,

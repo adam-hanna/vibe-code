@@ -76,8 +76,10 @@ describe('the REVIEW.md note', () => {
     const at = settings.indexOf('who else reviews, and who votes</h3>');
     const end = settings.indexOf('</section>', at);
     expect(at).toBeGreaterThan(-1);
-    expect(settings.slice(at, end)).toContain("{scope === 'project' && <ReviewMdNote dir={dir} />}");
+    expect(settings.slice(at, end)).toMatch(/\{scope === 'project' && \(\s*<ReviewMdNote dir=\{dir\} baseRef=/);
     const note = settings.slice(settings.indexOf('function ReviewMdNote'), settings.indexOf('function Key('));
     expect(note).not.toMatch(/<input|<textarea|ProseField|onSave/);
+    // A saved git.baseRef moves the commit described, so it re-asks (#389 review).
+    expect(note).toContain('}, [dir, baseRef]);');
   });
 });

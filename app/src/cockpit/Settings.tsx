@@ -436,7 +436,7 @@ const Refusals = createContext(0);
  * committed, which is what stops a run from weakening its own review. The host
  * never fetches for it, and the sentence says when that matters.
  */
-function ReviewMdNote({ dir }: { dir: string }) {
+function ReviewMdNote({ dir, baseRef }: { dir: string; baseRef: string | null }) {
   const [line, setLine] = useState<string | null>(null);
   useEffect(() => {
     let live = true;
@@ -450,7 +450,10 @@ function ReviewMdNote({ dir }: { dir: string }) {
     return () => {
       live = false;
     };
-  }, [dir]);
+    // `baseRef` is not sent - the host reads it from the config - but a saved or
+    // externally changed `git.baseRef` moves the commit this note describes, so
+    // it is what makes the note ask again rather than show the old base.
+  }, [dir, baseRef]);
   if (line === null) return null;
   return <p className={S.note}>{line}</p>;
 }
@@ -2844,7 +2847,9 @@ export function Settings({
           ))}
         </div>
         {/* The repository's own standards (#389), which every seat above gets. */}
-        {scope === 'project' && <ReviewMdNote dir={dir} />}
+        {scope === 'project' && (
+          <ReviewMdNote dir={dir} baseRef={typeof git['baseRef'] === 'string' ? git['baseRef'] : null} />
+        )}
       </section>
 
       {/* ---- what every turn is told ------------------------------------- */}

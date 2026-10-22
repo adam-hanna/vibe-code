@@ -234,3 +234,25 @@ test('no role but the review seats is given REVIEW.md, across a full loop with a
   assert.ok(others.length >= 4, `too few other turns: ${others.map(([l]) => l).join(', ')}`);
   for (const [label, prompt] of others) assert.ok(!prompt.includes(HEADING), `${label} was given REVIEW.md`);
 });
+
+test('the mismatch reason is redacted before it is recorded or said', async (t) => {
+  const { state, start } = parked('vibe-review-md-mismatch-redact-');
+  await drive(state, withReview({}), {});
+  const before = process.env['ANTHROPIC_API_KEY'];
+  // A held key that occurs in the mismatch sentence itself.
+  process.env['ANTHROPIC_API_KEY'] = 'no longer matches';
+  t.after(() => {
+    if (before === undefined) delete process.env['ANTHROPIC_API_KEY'];
+    else process.env['ANTHROPIC_API_KEY'] = before;
+  });
+  const tampered = loadRun(state.targetDir, state.id);
+  tampered.phase = 'reviewing';
+  tampered.reviewMd = { commit: start, outcome: 'present', blob: 'c'.repeat(40), bytes: 1 };
+  const { seen } = await drive(tampered, withReview({}), {});
+  assert.equal(tampered.reviewMd?.outcome, 'unreadable');
+  const reason = tampered.reviewMd?.reason ?? '';
+  assert.ok(!reason.includes('no longer matches'), reason);
+  const said = ids(seen, 'review_md_mismatch')[0];
+  assert.ok(said !== undefined);
+  assert.ok(!JSON.stringify(said).includes('no longer matches'));
+});

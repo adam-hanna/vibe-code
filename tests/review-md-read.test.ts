@@ -142,3 +142,31 @@ test('a held key that occurs inside the blob id does not corrupt the id', async 
   assert.equal(read.kind, 'present');
   if (read.kind === 'present') assert.equal(read.blob, blob);
 });
+
+test('a held key that appears in a fixed refusal sentence is redacted from the reason', async (t) => {
+  // `secrets()` holds any string of eight characters or more, and "REVIEW.md"
+  // is nine: every fixed reason names the file, so none may go out unredacted.
+  holding(t, 'REVIEW.md');
+  const dir = repo();
+  writeFileSync(path.join(dir, 'REVIEW.md'), 'This file is REVIEW.md.\n', 'utf8');
+  const sha = commitAll(dir, 'names itself');
+  const held = await readReviewMd(dir, sha);
+  assert.equal(held.kind, 'refused');
+  if (held.kind === 'refused') {
+    assert.ok(!held.reason.includes('REVIEW.md'), held.reason);
+    assert.match(held.reason, /contains a key vibe holds/);
+  }
+});
+
+test('a symlink refusal is redacted too', { skip: process.platform === 'win32' }, async (t) => {
+  holding(t, 'REVIEW.md');
+  const dir = repo();
+  symlinkSync('README.md', path.join(dir, 'REVIEW.md'));
+  const sha = commitAll(dir, 'a link');
+  const read = await readReviewMd(dir, sha);
+  assert.equal(read.kind, 'refused');
+  if (read.kind === 'refused') {
+    assert.ok(!read.reason.includes('REVIEW.md'), read.reason);
+    assert.match(read.reason, /symbolic link/);
+  }
+});
