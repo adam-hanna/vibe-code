@@ -162,6 +162,11 @@ export interface FullFinding {
    * exactly what it did before.
    */
   foundBy: readonly FoundBy[] | null;
+  /**
+   * What the review verifiers voted (#388 Part C), or null - every finding that
+   * was not put to a vote, which must render as exactly what it did before.
+   */
+  votes: Votes | null;
   deferred: boolean;
   downgraded: { from: string; reason: string } | null;
 }
@@ -210,6 +215,87 @@ export function foundByLine(foundBy: readonly FoundBy[], reported: number | null
   return reported === null
     ? `found by ${n} finder${foundBy.length === 1 ? '' : 's'}: ${who}`
     : `found by ${n} of ${String(reported)} finders: ${who}`;
+}
+
+/** One verifier's ballot, as the report file has it. */
+export interface Ballot {
+  seat: string;
+  provider: string;
+  model: string;
+  /** As cast. */
+  vote: string;
+  /** As counted - a `not-real` that pointed at nothing is counted `cannot-tell`. */
+  counted: string;
+  reason: string;
+  countedReason: string | null;
+}
+
+/** The vote on one finding, as the report file has it. */
+export interface Votes {
+  quorum: number;
+  n: number;
+  real: number;
+  notReal: number;
+  cannotTell: number;
+  outcome: string;
+  ballots: readonly Ballot[];
+}
+
+/**
+ * A finding's vote, or null when there is none or its counts cannot be read - a
+ * tally this window would have to fill in is one it would be inventing. A
+ * ballot this build cannot read is dropped alone, as `readFoundBy` drops an
+ * entry.
+ */
+function readVotes(v: unknown): Votes | null {
+  const row = record(v);
+  if (row === null) return null;
+  const quorum = num(row['quorum']);
+  const n = num(row['n']);
+  const real = num(row['real']);
+  const notReal = num(row['notReal']);
+  const cannotTell = num(row['cannotTell']);
+  const outcome = str(row['outcome']);
+  if (quorum === null || n === null || real === null || notReal === null || cannotTell === null || outcome === null) {
+    return null;
+  }
+  const ballots: Ballot[] = [];
+  for (const item of Array.isArray(row['ballots']) ? (row['ballots'] as unknown[]) : []) {
+    const b = record(item);
+    if (b === null) continue;
+    const seat = str(b['seat']);
+    const provider = str(b['provider']);
+    const model = str(b['model']);
+    const vote = str(b['vote']);
+    const counted = str(b['counted']);
+    const reason = str(b['reason']);
+    if (seat === null || provider === null || model === null || vote === null || counted === null || reason === null) {
+      continue;
+    }
+    ballots.push({ seat, provider, model, vote, counted, reason, countedReason: str(b['countedReason']) });
+  }
+  return { quorum, n, real, notReal, cannotTell, outcome, ballots };
+}
+
+/**
+ * The vote's sentence: *"vote: 1 of 3 real, 2 not real (quorum 2), unconfirmed"*.
+ *
+ * Every number is the report's own, counted by the core as each ballot was
+ * counted. `cannot tell` is said only when there was one, so the common
+ * sentence stays the short one.
+ */
+export function votesLine(v: Votes): string {
+  const unsure = v.cannotTell > 0 ? `, ${String(v.cannotTell)} cannot tell` : '';
+  return (
+    `vote: ${String(v.real)} of ${String(v.n)} real, ${String(v.notReal)} not real${unsure} ` +
+    `(quorum ${String(v.quorum)}), ${v.outcome}`
+  );
+}
+
+/** One ballot's line: who, what it voted (and how that was counted), and why. */
+export function ballotLine(b: Ballot): string {
+  const counted = b.counted === b.vote ? '' : ` (counted as ${b.counted})`;
+  return `${b.seat}: ${b.vote}${counted} — ${b.reason}`;
 }
 
 function readCitations(v: unknown): Citation[] {
@@ -277,6 +363,7 @@ export function readReport(text: string): Report | null {
         citations: readCitations(row['evidence']),
         raisedBy: str(row['raisedBy']),
         foundBy: readFoundBy(row['foundBy']),
+        votes: readVotes(row['votes']),
         // `=== true`, so a report that does not carry the field is not read as
         // having said no. It means the same thing here, and the coercion is the
         // one that cannot become wrong later.

@@ -102,3 +102,12 @@ change to a path that has already moved, and it destroys the evidence that nothi
 
 To regenerate: build at the commit whose output you mean to freeze, then render each shape above
 with the shared arguments and write it here with `'utf8'` and no post-processing.
+
+## #388 Part C: `vote-basic.txt`, the verifier's prompt
+
+`votePrompt` is new, so its baseline was generated rather than spliced: once, from exactly the
+call `tests/vote-prompt.test.ts` makes (`CLAIM` and the arguments in `render()`), against the
+build that introduced it, and read by eye before it was committed. It contains the claim, the
+vote's own evidence rule (not `EVIDENCE_RULE`, which is about a finding's severity), the plan's
+scope, the diff and the plan - and by construction nothing about who raised the claim or how
+anyone else voted. Regenerate it only when the vote's instructions are changed on purpose.

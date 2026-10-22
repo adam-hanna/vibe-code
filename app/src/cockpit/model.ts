@@ -387,6 +387,29 @@ export interface FinderMerge {
   seq: number;
 }
 
+/**
+ * What a review round's vote came to (#388 Part C), off `review_votes_tallied`.
+ *
+ * Every number is the core's own count. Absent on a round with no verifier,
+ * which writes no such frame; a frame missing either of the two counts that say
+ * what was voted on is dropped rather than filled in.
+ */
+export interface VoteTally {
+  /** The core's raw round, the number `code-review-<n>.json` is named by. Null when unsaid. */
+  round: number | null;
+  /** Findings put to the vote, and the verifiers each went to. */
+  findings: number;
+  verifiers: number;
+  votes: number | null;
+  confirmed: number | null;
+  unconfirmed: number | null;
+  undecided: number | null;
+  /** Blocking findings that reproduced and so were not voted on. */
+  reproduced: number | null;
+  at: number;
+  seq: number;
+}
+
 /** One turn's charge, as the seam that charged it reported (#223, `5e`). */
 export interface Charge {
   label: string;
@@ -657,6 +680,8 @@ export interface Run {
   censuses: readonly Census[];
   /** Every finder round's merge, oldest first (#388 Part B). Empty without finders. */
   finderMerges: readonly FinderMerge[];
+  /** Every round's vote tally, oldest first (#388 Part C). Empty without verifiers. */
+  voteTallies: readonly VoteTally[];
   /** What the run has spent, from the one seam every token goes through. */
   spend: Spend;
   /** Every compaction, oldest first. Empty until one happens (`5e`). */
@@ -868,6 +893,7 @@ export function emptyRun(): Run {
     verify: [],
     censuses: [],
     finderMerges: [],
+    voteTallies: [],
     spend: { tokens: null, costUsd: null, codexTokens: null, charges: [] },
     compactions: [],
     baseSha: null,
@@ -1902,6 +1928,32 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
               parts: num(data['parts']),
               findings: num(data['findings']),
               merged: num(data['merged']),
+              at,
+              seq: id(),
+            },
+          ],
+        };
+      }
+
+      case 'review_votes_tallied': {
+        // Dropped rather than guessed when either count is missing, as the
+        // finders' merge frame is.
+        const findings = num(data['findings']);
+        const verifiers = num(data['verifiers']);
+        if (findings === null || verifiers === null) return next;
+        return {
+          ...next,
+          voteTallies: [
+            ...next.voteTallies,
+            {
+              round: num(data['round']),
+              findings,
+              verifiers,
+              votes: num(data['votes']),
+              confirmed: num(data['confirmed']),
+              unconfirmed: num(data['unconfirmed']),
+              undecided: num(data['undecided']),
+              reproduced: num(data['reproduced']),
               at,
               seq: id(),
             },

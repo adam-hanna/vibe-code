@@ -434,6 +434,43 @@ export const REVIEW_SCHEMA = {
   },
 } as const satisfies object;
 
+/**
+ * One verifier's vote on one finding (#388 Part C).
+ *
+ * Beside `FINDINGS_SCHEMA`, and its evidence item is that schema's own object
+ * rather than a copy: a vote's citations are grounded by `groundFindings`, so
+ * they have to be the same shape a finding's are, and a second spelling of the
+ * item is one that drifts (#68 is what a drifted item cost). `evidence` may be
+ * empty - a `real` vote needs none beyond the claim's own - so it has no
+ * `minItems`, and the rule that a `not-real` vote must point at something is
+ * enforced by the tally, where a miss costs one vote rather than the turn.
+ */
+export const VOTE_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['vote', 'reason', 'evidence'],
+  properties: {
+    vote: {
+      type: 'string',
+      enum: ['real', 'not-real', 'cannot-tell'],
+      description:
+        'real = the defect the claim describes exists in this code. not-real = it does not, and ' +
+        'you can show why. cannot-tell = anything in between, including any doubt.',
+    },
+    reason: {
+      type: 'string',
+      description: 'Why, in a few sentences. For not-real, the concrete reason the claim is false.',
+    },
+    evidence: {
+      type: 'array',
+      description:
+        'Where to look. Needed for not-real: a not-real vote whose citations resolve to ' +
+        'nothing is counted as cannot-tell. May be empty for real and cannot-tell.',
+      items: FINDINGS_SCHEMA.properties.findings.items.properties.evidence.items,
+    },
+  },
+} as const satisfies object;
+
 /** Codex answering Claude's blocking questions. */
 export const ANSWERS_SCHEMA = {
   type: 'object',

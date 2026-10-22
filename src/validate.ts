@@ -21,6 +21,7 @@ import type {
   Severity,
   SeverityChange,
   Verdict,
+  VoteValue,
 } from '@src/types.js';
 
 /**
@@ -260,6 +261,27 @@ export function parseFindings(raw: unknown): FindingsReport {
     verdict: oneOf(o, 'verdict', VERDICTS, 'report', raw),
     summary: typeof summaryRaw === 'string' ? summaryRaw : '',
     findings,
+  };
+}
+
+const VOTES: readonly VoteValue[] = ['real', 'not-real', 'cannot-tell'];
+
+/**
+ * One verifier's vote, as the turn returned it (#388 Part C).
+ *
+ * Strict on `vote` and `reason` and throws otherwise: a vote that cannot be read
+ * is a failed turn, which the caller counts as `cannot-tell` - so a malformed
+ * answer can only ever keep a finding blocking. `evidence` is returned as the
+ * model gave it, unvalidated, because `groundFindings` is what decides whether a
+ * citation resolves and a missing list is "cited nothing", not a parse error.
+ */
+export function parseVote(raw: unknown): { vote: VoteValue; reason: string; evidence: unknown[] } {
+  const o = record(raw, 'vote', raw);
+  const evidence = o['evidence'];
+  return {
+    vote: oneOf(o, 'vote', VOTES, 'vote', raw),
+    reason: str(o, 'reason', 'vote', raw),
+    evidence: Array.isArray(evidence) ? (evidence as unknown[]) : [],
   };
 }
 

@@ -1164,6 +1164,94 @@ export function withFocus(prompt: string, focus: string | undefined): string {
 }
 
 /**
+ * How a vote cites, in the vote's own terms. Not `EVIDENCE_RULE`, which is about
+ * what happens to a *finding's* severity when its citations fail - a verifier
+ * sets no severity, and telling it about one is the thing its prompt avoids.
+ * The kinds and the checks are the same, because `groundFindings` runs them.
+ */
+const VOTE_EVIDENCE = `Each citation names one kind of place:
+- \`code\` - this line does X. Needs \`path\` (a file); may add \`line\` and \`excerpt\`. Checked against the repository: the file must exist, \`line\` must be inside it, and \`excerpt\` must appear somewhere in it.
+- \`artifact\` - a run artifact such as \`PLAN.md\`, by basename. Checked against the run directory.
+- \`absence\` - something is missing from a file or directory. Needs \`path\`; only that the place exists is checked.
+- \`external\` - a fact about another tool, a spec, or a URL. Needs \`ref\`. Nothing is checked.
+
+A path must name something inside the repository - or, for \`artifact\`, inside the run directory. Your citations count if **any one** of them resolves.`;
+
+/** What a verifier is shown of a finding: the claim, and nothing about who made it. */
+export type VoteClaim = Pick<Finding, 'title' | 'detail' | 'suggested_fix' | 'evidence'>;
+
+/**
+ * One verifier's prompt: is this one claimed defect real? (#388 Part C)
+ *
+ * **What it is never told, by construction.** It takes the four fields of the
+ * claim and nothing else of the finding, so there is no argument through which
+ * the finder that raised it, how many did (`foundBy`), the id, the severity, the
+ * id's history or another verifier's vote could reach it. A verifier that knew
+ * three finders agreed, or that the others had already said `real`, would be
+ * counting heads rather than reading code - which is the opposite of what the
+ * vote is for.
+ *
+ * It judges existence, not severity or worth: the severity was the finder's
+ * call and a person's to move (#142), and a vote that also re-graded would
+ * be two decisions taken under one name.
+ */
+export function votePrompt(
+  claim: VoteClaim,
+  changedFiles: readonly string[],
+  diff: string,
+  planMd: string,
+  outOfScope: readonly OutOfScopeItem[] | undefined,
+  environment?: EnvironmentFacts | null,
+  roles: RoleTable = ROLES,
+): string {
+  return `You are checking one claimed defect in a code change. Someone reviewing the change says the defect below exists. Decide whether it does.
+
+Read the repository as needed - the diff is context, not the whole picture. Check the code the claim points at and the code around it, and run the tests if that is the fastest way to settle the question.
+
+${environmentBlock(environment, 'reviewer', roles)}
+
+## How to vote
+
+Judge **whether the defect exists** in this code - not how severe it is, and not whether it is worth fixing. Those are not your question.
+
+- **\`real\`** - the defect the claim describes is there. You need no evidence beyond the claim's own; agreeing with what it points at is enough.
+- **\`not-real\`** - the claim is false. Give a concrete reason it is false, and evidence for that reason that a reader can open: the code that shows it, cited the way a finding cites code. A \`not-real\` vote whose evidence resolves to nothing is counted as \`cannot-tell\`.
+- **\`cannot-tell\`** - anything in between. If you are in doubt, this is your vote. It is not a failure; it keeps the claim standing, which is the right outcome when nobody can show it is wrong.
+
+## Evidence
+
+${VOTE_EVIDENCE}
+
+## The claim
+
+### ${claim.title}
+
+${claim.detail}${citation(claim, '\n\n')}
+
+*Suggested fix:* ${claim.suggested_fix}
+
+## Scope the plan declared
+
+${formatOutOfScope(outOfScope)}
+
+## Files changed
+
+${changedFiles.length > 0 ? changedFiles.map((f) => `- ${f}`).join('\n') : '(none detected)'}
+
+## Diff
+
+\`\`\`diff
+${diff || '(empty diff)'}
+\`\`\`
+
+## The plan this was implementing
+
+${planMd}
+
+${block(BLOCK.json, RESPOND_WITH_JSON)}`;
+}
+
+/**
  * The block asking for a verdict on each change to the judge (#112).
  *
  * The definition of "justified" is AGENTS.md's rule for when a test may be
@@ -1454,7 +1542,7 @@ const DEFERRED_MARK =
  * `C:\...` a citation may legitimately arrive as is not a path the reader's
  * shell can open. Repo-relative is the one form true for both.
  */
-function citation(f: Finding, indent: string): string {
+function citation(f: Pick<Finding, 'evidence'>, indent: string): string {
   const parts = readEvidence(f.evidence)
     .map((e) => {
       if (e.kind === 'external') {

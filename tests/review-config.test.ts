@@ -6,7 +6,9 @@ import path from 'node:path';
 import { configDiff, DEFAULTS, loadConfig, PROJECT_ONLY, writeConfigPatch } from '@src/config.js';
 
 /**
- * The `review` section (#388 Part A): accepted, validated, and read by no run.
+ * The `review` section (#388 Part A): accepted and validated. What the runs do
+ * with it is pinned elsewhere - `review-finders-loop.test.ts` (Part B) and
+ * `review-votes-loop.test.ts` (Part C).
  *
  * Every refusal the brief lists is pinned by name and, for a seat, by index -
  * because `validateConfig` naming the key is the only way somebody who believes

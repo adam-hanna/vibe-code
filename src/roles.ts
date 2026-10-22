@@ -584,8 +584,12 @@ function specFor(role: Role, setting: RoleSetting, slot: SlotName): RoleSpec {
  * the heartbeat - then follows the seat with no code of its own. With no
  * `mcpServers` the seat reaches none (#138), as any role that names none does.
  */
-export function seatTable(roles: RoleTable, seat: RoleSetting): RoleTable {
-  return { ...roles, reviewer: specFor('reviewer', seat, seatSlot(seat.provider)) };
+export function seatTable(roles: RoleTable, seat: RoleSetting, schema?: object): RoleTable {
+  const spec = specFor('reviewer', seat, seatSlot(seat.provider));
+  // A verifier (#388 Part C) answers a vote, not a review, and both providers
+  // take the response schema off the spec - so the seat carries the schema its
+  // job asks for. A finder passes none and keeps the reviewer's.
+  return { ...roles, reviewer: schema === undefined ? spec : { ...spec, schema } };
 }
 
 /** One `review.finders[i]` entry, read. `k` is 1-based: `f1` is `review.finders[0]`. */
@@ -614,6 +618,34 @@ export function readFinders(cfg: Config): FinderEntry[] {
     const focus = isRecord(entry) && typeof entry['focus'] === 'string' ? entry['focus'] : undefined;
     return { k: i + 1, path, setting, ...(focus === undefined ? {} : { focus }) };
   });
+}
+
+/** One `review.verifiers[i]` entry, read. `k` is 1-based: `v1` is `review.verifiers[0]`. */
+export type VerifierEntry = Omit<FinderEntry, 'focus'>;
+
+/**
+ * The review verifiers this config names, in order (#388 Part C).
+ *
+ * `readFinders`' sibling, through the same `roleSetting` reader with a role's
+ * keys only - `validateReview` refuses a `focus` on a verifier. Absent
+ * `review` is no verifiers, which is what a run stored before it was.
+ */
+export function readVerifiers(cfg: Config): VerifierEntry[] {
+  const verifiers: unknown = (cfg.review as Config['review'] | undefined)?.verifiers;
+  if (!Array.isArray(verifiers)) return [];
+  return verifiers.map((entry: unknown, i) => {
+    const path = `review.verifiers[${i}]`;
+    return { k: i + 1, path, setting: roleSetting(path, entry) };
+  });
+}
+
+/**
+ * The providers any review seat - a finder or a verifier - takes a turn on,
+ * deduped, in `providersForRoles`' order. Empty for a config that seats none.
+ */
+export function seatProviders(cfg: Config): AgentProvider[] {
+  const held = new Set([...readFinders(cfg), ...readVerifiers(cfg)].map((e) => e.setting.provider));
+  return (['claude', 'codex'] as const).filter((provider) => held.has(provider));
 }
 
 /**
@@ -968,9 +1000,14 @@ export function modelFor(role: Role, cfg: Config, roles: RoleTable = rolesFor(cf
  * edits the wrong line - and the two keys can now hold different strings, so the
  * provider key is no longer a safe thing to name by default.
  */
-export function modelSource(role: Role, roles: RoleTable = ROLES): string {
+export function modelSource(
+  role: Role,
+  roles: RoleTable = ROLES,
+  /** The seat's own path when a review seat took the turn (#388 Part C). */
+  seatPath?: string,
+): string {
   const spec = roles[role];
-  return spec.model === undefined ? `${spec.provider}.model` : `roles.${role}.model`;
+  return spec.model === undefined ? `${spec.provider}.model` : `${seatPath ?? `roles.${role}`}.model`;
 }
 
 /** What a log line calls each agent. */

@@ -462,6 +462,7 @@ const TURN_PHRASE: Readonly<Record<string, string>> = {
   implement: 'implementing the plan',
   'verify-fix': 'fixing the failing checks',
   review: 'reviewing the code',
+  vote: 'checking whether a finding is real',
   'review-fix': 'fixing what the review found',
   'final-fix': 'fixing the last review findings',
 };

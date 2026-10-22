@@ -19,6 +19,7 @@ src/scorecard.ts     what the run archive says about the loop, and what it canno
 src/fork.ts          `vibe fork`: preflight that only reads, then a commit phase that creates
 src/similarity.ts    the one similarity metric, its threshold, and the censuses behind it
 src/finder-merge.ts  one review round's reports across finders, merged by claim, with foundBy (#388)
+src/vote.ts          the review vote's fail-closed tally, pure: quorum, counted ballots, outcome (#388)
 src/questions.ts     when two wordings are one question: the threshold, and REPHRASED.md
 src/raise.ts         what a person does to a run's findings: raise one, move a severity
 src/roles.ts         who does what: the role table, refusals, warnings

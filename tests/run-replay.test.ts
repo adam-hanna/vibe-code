@@ -774,3 +774,25 @@ test('a verify-fix after a later review round stays in that round’s code group
   const fix = steps.find((s) => s.narration.id === 'turn_started' && s.narration.data?.['kind'] === 'verify-fix');
   assert.equal(fix?.narration.data?.['round'], 1);
 });
+
+test('a vote is a turn of its review round on the reviewer seat, told apart by verifier', () => {
+  // #388 Part C: `vote-<r>-<n>-v<k>` is verifier k's vote on finding n of round r.
+  assert.deepEqual(seatOf('vote-2-3-v1'), { role: 'reviewer', kind: 'vote', phase: 'review', round: 2, verifier: 1 });
+  assert.equal(seatOf('vote-0-12-v5')?.verifier, 5);
+  assert.equal(seatOf('vote-0-12-v5')?.round, 0);
+  assert.equal(seatOf('vote-2'), null, 'a malformed vote label is not filed under a guess');
+});
+
+test('the vote label the orchestrator builds is the spelling seatOf reads', () => {
+  let at = path.dirname(fileURLToPath(import.meta.url));
+  while (!existsSync(path.join(at, 'src', 'orchestrator.ts')) && path.dirname(at) !== at) {
+    at = path.dirname(at);
+  }
+  const source = readFileSync(path.join(at, 'src', 'orchestrator.ts'), 'utf8');
+  const templates = [...source.matchAll(/`(vote-\$\{[^}]+\}-\$\{[^}]+\}-v\$\{[^}]+\})`/g)].map((m) => m[1] ?? '');
+  assert.equal(templates.length, 1, `one vote label, found ${templates.join(', ') || 'none'}`);
+  for (const template of templates) {
+    const label = template.replace(/\$\{[^}]+\}/g, '2');
+    assert.deepEqual(seatOf(label), { role: 'reviewer', kind: 'vote', phase: 'review', round: 2, verifier: 2 });
+  }
+});

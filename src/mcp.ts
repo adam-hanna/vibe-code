@@ -4,8 +4,8 @@ import path from 'node:path';
 import { agentEnv } from '@src/auth.js';
 import type { RunFn } from '@src/proc.js';
 import { setOwn } from '@src/runtime.js';
-import { mcpServersFor, readFinders, roleEnabled, ROLE_NAMES } from '@src/roles.js';
-import type { FinderEntry, Role, RoleTable } from '@src/roles.js';
+import { mcpServersFor, readFinders, readVerifiers, roleEnabled, ROLE_NAMES } from '@src/roles.js';
+import type { FinderEntry, Role, RoleTable, VerifierEntry } from '@src/roles.js';
 import type { Config } from '@src/types.js';
 
 /**
@@ -66,7 +66,11 @@ function enforcementLabel(provider: 'claude' | 'codex'): string {
  * two mechanisms with the Codex caveat. Lines, unindented, for a caller to
  * place.
  */
-export function describeMcp(roles: RoleTable, finders: readonly FinderEntry[] = []): string[] {
+export function describeMcp(
+  roles: RoleTable,
+  finders: readonly FinderEntry[] = [],
+  verifiers: readonly VerifierEntry[] = [],
+): string[] {
   // `role:` rather than doctor's bare `role` column, so the line that states a
   // seat's model and timeout stays the only one that starts with its name.
   // Padded to the role names alone, so a config with no finder prints exactly
@@ -79,6 +83,7 @@ export function describeMcp(roles: RoleTable, finders: readonly FinderEntry[] = 
   const lines = [
     ...ROLE_NAMES.map((role) => row(`${role}:`, mcpServersFor(role, roles), roles[role].provider)),
     ...finders.map((f) => row(`finder ${String(f.k)}:`, f.setting.mcpServers ?? [], f.setting.provider)),
+    ...verifiers.map((v) => row(`verifier ${String(v.k)}:`, v.setting.mcpServers ?? [], v.setting.provider)),
   ];
   return [
     ...lines,
@@ -380,6 +385,19 @@ export async function mcpRefusals(cfg: Config, roles: RoleTable, ctx: McpRefusal
           subject: f.path,
           provider: f.setting.provider,
           servers: f.setting.mcpServers ?? [],
+        }),
+      ),
+    // And each verifier (#388 Part C), for the same reason: a vote turn that
+    // cannot start counts as `cannot-tell`, so a bad grant would leave every
+    // blocking finding undecided without anyone being told why.
+    ...readVerifiers(cfg)
+      .filter((v) => (v.setting.mcpServers ?? []).length > 0)
+      .map(
+        (v): Grantee => ({
+          role: 'reviewer',
+          subject: v.path,
+          provider: v.setting.provider,
+          servers: v.setting.mcpServers ?? [],
         }),
       ),
   ];
