@@ -9,7 +9,7 @@ import { Caret } from './Disclosure';
 import { clock, elapsed } from './format';
 import { censusByPhase, questionsByPhase, title, unplacedQuestions } from './rounds';
 import type { BottomTab, Tab } from './where';
-import { findTurn, nowStatus, RAIL_TITLE, turnGroup, verifyRow, verifyRowText } from './rail';
+import { findTurn, nowStatus, RAIL_TITLE, runningGate, turnGroup, verifyRow, verifyRowText } from './rail';
 import type { RailState, VerifyRow } from './rail';
 import { RunningRow } from './RunningRow';
 import type { ArchiveView } from './model';
@@ -1089,7 +1089,14 @@ function RunRail({
   archive: ArchiveView;
 }) {
   const currentTurn = run.running ?? findTurn(run, run.gate?.turnId ?? null);
-  const currentKind = currentTurn === null ? null : turnGroup(run, currentTurn.id);
+  // A gate running with no turn open is the Code stage working: the gates are
+  // drawn under Code and run between its turns (#409). Without this a resume
+  // at `reviewing` drew Code complete and Code review not started while the
+  // core gate ran for minutes.
+  const gateRunning = runningGate(run);
+  const currentKind = currentTurn === null
+    ? gateRunning === null ? null : 'code'
+    : turnGroup(run, currentTurn.id);
   const [open, setOpen] = useState<ReadonlySet<CycleKind>>(() => new Set());
   const toggle = (kind: CycleKind) => {
     setOpen((current) => {
@@ -1103,9 +1110,11 @@ function RunRail({
   const status = nowStatus(run);
   const verify = verifyRow(run);
   const statusState = status.tone;
-  const statusTime = activity === null
-    ? run.preflight === null ? null : elapsed(Math.max(0, now - run.preflight.at))
-    : elapsed(activity.elapsedMs);
+  const statusTime = activity !== null
+    ? elapsed(activity.elapsedMs)
+    : gateRunning !== null
+      ? elapsed(Math.max(0, now - gateRunning.startedAt))
+      : run.preflight === null ? null : elapsed(Math.max(0, now - run.preflight.at));
 
   // `flex-none`: the rail is sized by its groups and the cockpit's wrapper is
   // what scrolls, so a summary placed after it shares the scroll rather than
@@ -1132,7 +1141,7 @@ function RunRail({
         <h2 className="mt-1.5 mb-0 text-section font-semibold text-display">{status.title}</h2>
         <p className="mt-1 mb-0 text-body-sm text-secondary" title={status.detail}>{status.detail}</p>
         {statusTime !== null && (
-          <span className={cn(FIGURE, 'mt-2 inline-flex items-center gap-1')} title="Elapsed time for the current turn or preflight">
+          <span className={cn(FIGURE, 'mt-2 inline-flex items-center gap-1')} title="Elapsed time for the current turn, gate or preflight">
             <Clock size={13} aria-hidden="true" /> {statusTime}
           </span>
         )}

@@ -1,5 +1,7 @@
 import { boundary } from './format';
+import { settled } from './model';
 import type { Attempt, CycleKind, GateRun, Run, Turn } from './model';
+import type { Tab } from './where';
 
 /**
  * What the run rail says, decided here so it can be tested (#248).
@@ -78,6 +80,60 @@ export function turnDetail(turn: Pick<Turn, 'role' | 'kind'>): string {
   return `${roleName(turn.role)} ${FIX_WORK[turn.kind] ?? 'is working'}`;
 }
 
+/**
+ * The gate running now while no turn is, or null (#409).
+ *
+ * **The stretch the window used to call idle.** A resume at `reviewing` re-runs
+ * the gates before the review, and so does every pass after an implement or fix
+ * turn ends: `verify_started` opens a gate, no turn is open, and the rail read
+ * *Ready for the next turn · The run is between turns* above a Code stage marked
+ * complete for the whole of a core gate's minutes. `reduce` already knew -
+ * `openGate` sets `running` - and nothing asked it.
+ *
+ * Null while a turn is open (the turn is what is running, and a gate re-run
+ * under a verify-fix is the rail's `→ fixing`), while a gate is held for a
+ * decision, and once the run has ended or its host is gone: a gate the run never
+ * settled is not one that is still going.
+ */
+export function runningGate(run: Run): GateRun | null {
+  if (run.running !== null || run.gate !== null || run.lost !== null || settled(run)) return null;
+  if (run.reason !== null || run.ended !== null) return null;
+  const pass = run.verify[run.verify.length - 1];
+  if (pass === undefined) return null;
+  let open: GateRun | null = null;
+  for (const gate of pass.gates) if (gate.status === 'running') open = gate;
+  return open;
+}
+
+/**
+ * Which pane holds each stage's detail. One map, so the round cards' links and
+ * the tab bar's running mark cannot name different tabs for one stage.
+ */
+export const STAGE_TAB: Readonly<Record<CycleKind, Tab>> = {
+  plan: 'plans',
+  critique: 'critique',
+  code: 'code',
+  review: 'review',
+};
+
+/**
+ * The tab for what the run is doing now, or null (#409).
+ *
+ * The same answer the run path draws its live stage from - the open turn's group
+ * - so the bar and the rail cannot disagree. A running gate marks `verify`, the
+ * pane that draws it, rather than `code`, whose pane is commits. A run waiting
+ * for a decision is doing nothing, and marks no tab, as the rail marks no stage
+ * live.
+ */
+export function liveTab(run: Run): Tab | null {
+  if (run.lost !== null || run.gate !== null || settled(run)) return null;
+  if (run.running !== null) {
+    const group = turnGroup(run, run.running.id);
+    return group === null ? null : STAGE_TAB[group];
+  }
+  return runningGate(run) === null ? null : 'verify';
+}
+
 export interface NowStatus {
   title: string;
   detail: string;
@@ -107,6 +163,10 @@ export function nowStatus(run: Run): NowStatus {
       tone: 'running',
     };
   }
+  // A gate is not a turn, and with none open this used to fall through to
+  // *between turns* for the whole of a core gate's minutes (#409).
+  const gate = runningGate(run);
+  if (gate !== null) return { title: 'Verifying', detail: `Running the ${gate.name} gate`, tone: 'running' };
   if (run.preflight !== null && !run.preflight.passed) {
     return {
       title: 'Preflight',

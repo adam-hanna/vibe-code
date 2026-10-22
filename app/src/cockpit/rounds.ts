@@ -294,6 +294,30 @@ export function rounds(run: Run): readonly RoundCard[] {
 }
 
 /**
+ * The round of this stage that is running now, or null (#409).
+ *
+ * The four artifact panes are built from what rounds wrote, and a round in
+ * flight has written nothing yet - so a Critique tab opened during a critique
+ * turn showed round 0's finished critique and nothing at all about the one
+ * running. This is that round, as the pilot's log already draws it.
+ *
+ * **The card holding the open turn**, and only that: `run.running` is the one
+ * answer the rail, the `now` card and the tab bar all read, so a pane cannot
+ * call a round live that the rail calls finished. A phase announced with no turn
+ * started yet is not drawn as running - nothing is executing in it.
+ */
+export function inFlight(cards: readonly RoundCard[], run: Run, cycle: CycleKind): RoundCard | null {
+  const running = run.running;
+  if (running === null) return null;
+  for (let i = cards.length - 1; i >= 0; i -= 1) {
+    const card = cards[i];
+    if (card?.cycle !== cycle) continue;
+    return card.turns.some((t) => t.id === running.id) ? card : null;
+  }
+  return null;
+}
+
+/**
  * Every round that committed, oldest first — the Code tab's list.
  *
  * **Keyed off the commit rather than off the phase**, which is what keeps it
