@@ -130,6 +130,9 @@ test('a clean pass is legible as a sequence of ids, with no sentence read', asyn
       'verify_passed', // the verdict, which the run has always recorded (#223)
       'phase_started', // review
       'turn_started', //  the reviewer
+      // What the start commit holds as REVIEW.md, said once at the first review
+      // (#389). Here "No REVIEW.md at <sha>": this fixture has none.
+      'review_md',
       'codex_turn',
       'artifact_written', // code-review-0.json
       'findings_reported',

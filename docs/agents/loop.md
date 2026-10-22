@@ -674,3 +674,60 @@ read it. Now it is data, and it is recorded per round.
   (an opened run draws its own replayed frames), or `fix-report-<n+1>.md` is listed without one.
   The second case covers a run from before #393. The decision is `outcomeFor`, a pure function. The finding row, the round
   card and the stats view are unchanged.
+
+## The repository's REVIEW.md (#389)
+
+`src/review-md.ts`. A repository's owners add their own review standards in a root
+`REVIEW.md`. The reviewer, every additional finder and the verifiers receive it, and no other role
+does.
+
+- **Read from the start commit, never the working tree.** The commit is `state.start.sha`, else
+  `state.baseSha`. A run that edits `REVIEW.md` changes the next run's review, never its own,
+  which is the point: a change cannot weaken the review it is about to get. It is the same rule
+  Anthropic's Code Review uses with the base branch. The edit is still a judge file
+  (`REVIEW_FILE` in `src/judge.ts`, root-exact like `vibe.config.json`), because it weakens the next
+  run.
+- **`ls-tree` then `cat-file blob`, never `git show <sha>:REVIEW.md`.** `show` prints a symlink's
+  target path as though it were the text. A link or a submodule is refused, the link rule of #53.
+- **Both git reads skip `run`'s redaction (`redact: false`), and the result is verbatim or refused.**
+  With redaction on, a held key that happens to occur inside the hex object id turns it into
+  `[redacted key]`, and the file fails to load. A redacted text would also not be what the owners
+  committed, while the blob and size still describe the original. So a file that contains a key
+  vibe holds is refused, never sent, and never sent redacted. Every reason the reader returns is
+  redacted, because reasons reach logs and state.
+- **Three outcomes, plus refused.** Absent renders nothing and is not a warning. Most repositories
+  have none. Refused and unreadable are warned in the log and the summary, and the review goes
+  ahead without the file. A missing optional file never halts a run, and it is never rendered as
+  absent in silence either.
+- **One write.** `state.reviewMd` is set in memory, and the single `review_md` `recordAndSay`
+  persists it with its event, so the record never exists without the narration that discloses it.
+- **Once per run per process, then a blob check on a resume.** `reviewStandardsFor` caches its answer
+  in a `WeakMap` keyed by the state object. A later round in the same process reuses it, so a
+  transient git failure on round three cannot withdraw the standards rounds one and two had. A
+  resume loads a new state object. It re-reads the recorded commit and requires the recorded
+  blob. A mismatch means the record and the repository disagree, so it fails closed: the outcome
+  becomes `unreadable`, `review_md_mismatch` is said, and nothing is sent.
+- **A fork drops the record.** The record describes the parent's start, and the child's first
+  review reads its own `start ?? baseSha`.
+- **Placement and framing.** The file goes after `SIMPLE_SOLUTION` in `reviewPrompt`, and after "How to
+  vote" in `votePrompt`, so the severity definitions and `APPROVE_COST` still frame it. It sits
+  under a heading naming it as the repository's. It is not a `block()`, so `prompts.<block>` cannot
+  replace it. Absent renders nothing, which keeps the frozen prompts byte-identical.
+- **32 KiB is borrowed, not measured.** It is the limit Codex applies to `AGENTS.md`, used here as
+  "long enough that standing text is read less carefully". Over it, the log, the summary and
+  doctor warn. It is never a cap, and the file is sent whole.
+- **One resolver, two modes: `git.nextRunStart`.** It answers "`git.baseRef` if set, else HEAD" and
+  sits on `resolveBase`.
+  - The run's preflight calls it with `fetch: true`. That is `resolveBase` exactly, so a failed
+    fetch still refuses and never falls back to the local copy (#249: the #169 run started from a
+    stale tip). Every existing refusal and test of it is unchanged.
+  - `fetch: false` still classifies the ref locally (`--symbolic-full-name`), so a caller can say
+    "as last fetched". It skips only the network: listing remotes, the fetch, and the no-remote
+    refusal. Its answer says `fetched: false`, and no code that decides where a run starts may
+    use it.
+- **Why doctor fetches and settings does not.** Doctor is a preview a person runs on purpose, so its
+  answer should be the one the run would get. When the fetch fails, doctor says so and labels the
+  local copy possibly stale. The settings screen opens often, and a fetch can block for up to
+  `git.worktreeTimeoutMs`, so its `review_md` frame answers locally, says "as last fetched" for a
+  remote-tracking ref, and calls itself a preview. Neither can know the commit a run will actually
+  start at.

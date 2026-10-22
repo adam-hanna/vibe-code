@@ -223,6 +223,28 @@ export interface StatsFrame {
   scorecard: ArchiveStats;
 }
 
+/**
+ * The repository's REVIEW.md at the commit the next run would start from, in
+ * reply to `review_md` (#389). A preview: the host never fetches for it, so
+ * `fetched` is always false, and a run reads the file from the commit it
+ * actually starts at. No text - presence and size only.
+ */
+export interface ReviewMdFrame {
+  type: 'review_md';
+  id: number;
+  dir: string;
+  ref: string | null;
+  tracking: boolean;
+  fetched: false;
+  commit: string | null;
+  reviewMd:
+    | { kind: 'present'; blob: string; bytes: number }
+    | { kind: 'absent' }
+    | { kind: 'refused' | 'unreadable'; reason: string }
+    | null;
+  reason?: string;
+}
+
 /** The archive, in reply to a request for it. */
 export interface Archive {
   type: 'archive';
@@ -608,6 +630,7 @@ export type Frame =
   | FsFrame
   | Archive
   | StatsFrame
+  | ReviewMdFrame
   | ConfigFrame
   | DiffFrame
   | ArtifactsFrame
@@ -660,6 +683,9 @@ export function isFrame(v: unknown): v is Frame {
     type === 'archive' ||
     // The scorecard, ignored by the reducer for the archive's reason (#114).
     type === 'stats' ||
+    // REVIEW.md at the next run's start (#389): a fact about the repository,
+    // read by the settings note, and nothing about the run being narrated.
+    type === 'review_md' ||
     type === 'config' ||
     type === 'diff' ||
     // The two artifact reads (#223), ignored by the cockpit's reducer for the
@@ -1392,6 +1418,17 @@ export async function replay(dir: string, runId: string): Promise<{
     'the host did not answer with the run',
   );
   return { steps: frame.steps, exit: frame.exit, lost: frame.lost ?? null };
+}
+
+/** REVIEW.md at the commit the next run would start from (#389). Never fetches. */
+export async function reviewMd(dir: string): Promise<ReviewMdFrame> {
+  const id = nextRequestId();
+  return ask<ReviewMdFrame>(
+    { type: 'review_md', id, dir },
+    id,
+    'review_md',
+    'the host did not answer with REVIEW.md',
+  );
 }
 
 /**

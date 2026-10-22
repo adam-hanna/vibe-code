@@ -39,6 +39,7 @@ import type {
   RunEvent,
   RunPhase,
   RunStart,
+  ReviewMdRecord,
   CliVersions,
   RunState,
   RunStatus,
@@ -1413,6 +1414,52 @@ function readStart(raw: unknown, ctx: ReadContext): RunStart | undefined {
   return undefined;
 }
 
+/** A blob id: SHA-1, or SHA-256 in a repository that uses it. */
+const BLOB_ID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+const REVIEW_MD_OUTCOMES: readonly string[] = ['present', 'absent', 'refused', 'unreadable'];
+
+/**
+ * What the run found as `REVIEW.md` (#389), or nothing at all.
+ *
+ * `readStart`'s rule and reason: it describes a read of a commit, and a repaired
+ * one would describe a read nobody made, so a malformed record is dropped whole
+ * and the drop is logged. Dropping is safe: the next review reads afresh from
+ * the start commit, which cannot have changed.
+ */
+function readReviewMdRecord(raw: unknown, ctx: ReadContext): ReviewMdRecord | undefined {
+  if (raw === undefined) return undefined;
+  const ok = (): ReviewMdRecord | null => {
+    if (!isRecord(raw)) return null;
+    const commit = raw['commit'];
+    const outcome = raw['outcome'];
+    const blob = raw['blob'];
+    const bytes = raw['bytes'];
+    const reason = raw['reason'];
+    if (!isString(commit) || !FULL_SHA.test(commit)) return null;
+    if (!isString(outcome) || !REVIEW_MD_OUTCOMES.includes(outcome)) return null;
+    if (blob !== undefined && !(isString(blob) && BLOB_ID.test(blob))) return null;
+    if (bytes !== undefined && !isCounter(bytes)) return null;
+    if (reason !== undefined && !(isString(reason) && reason !== '')) return null;
+    if (outcome === 'present') {
+      if (blob === undefined || bytes === undefined) return null;
+      return { commit, outcome, blob, bytes };
+    }
+    if (outcome === 'absent') return { commit, outcome };
+    if (reason === undefined) return null;
+    return {
+      commit,
+      outcome: outcome === 'refused' ? 'refused' : 'unreadable',
+      ...(blob === undefined ? {} : { blob }),
+      ...(bytes === undefined ? {} : { bytes }),
+      reason,
+    };
+  };
+  const record = ok();
+  if (record !== null) return record;
+  ctx.repairs.dropped('reviewMd', 'reviewMd');
+  return undefined;
+}
+
 /**
  * The CLI versions a run last ran under, or nothing at all (#298).
  *
@@ -1969,6 +2016,8 @@ const READERS = {
   branchPending: (raw, ctx) => readBranchPending(raw, ctx),
   // Absent stays absent: a run from before #249, or one never put on a branch.
   start: (raw, ctx) => readStart(raw, ctx),
+  // Absent stays absent: a run from before #389, or one not yet reviewed.
+  reviewMd: (raw, ctx) => readReviewMdRecord(raw, ctx),
   // Absent stays absent: a run from before #298, or one started --skip-probe.
   cliVersions: (raw, ctx) => readCliVersions(raw, ctx),
   // The three question-record fields (#65). Optional every one: absent is what

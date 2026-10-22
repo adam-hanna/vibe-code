@@ -65,9 +65,23 @@ test('vibe.config.json is always judged at the root, and only at the root', () =
   assert.ok(!isJudge('sub/vibe.config.json', []));
 });
 
-test('the record names vibe.config.json among the patterns in force, once', () => {
-  assert.deepEqual(recordedPatterns([]), ['vibe.config.json']);
-  assert.deepEqual(recordedPatterns(['a/**', 'vibe.config.json']), ['a/**', 'vibe.config.json']);
+test('the record names vibe.config.json and REVIEW.md among the patterns in force, once', () => {
+  // REVIEW.md joined the always-judged files in #389, so the record names it.
+  assert.deepEqual(recordedPatterns([]), ['vibe.config.json', 'REVIEW.md']);
+  assert.deepEqual(recordedPatterns(['a/**', 'vibe.config.json']), [
+    'a/**',
+    'vibe.config.json',
+    'REVIEW.md',
+  ]);
+  assert.deepEqual(recordedPatterns(['REVIEW.md']), ['REVIEW.md', 'vibe.config.json']);
+});
+
+test('REVIEW.md is always judged at the root, and only at the root (#389)', () => {
+  for (const patterns of [DEFAULT_TEST_PATHS, [], ['spec/**']]) {
+    assert.ok(isJudge('REVIEW.md', patterns), JSON.stringify(patterns));
+  }
+  assert.ok(!isJudge('docs/REVIEW.md', []));
+  assert.ok(!isJudge('review.md', []));
 });
 
 test('a rename counts when either side matches', () => {

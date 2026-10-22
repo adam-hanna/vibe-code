@@ -51,6 +51,7 @@ src/work.ts          how far a write turn has got - measured, and labelled a pro
 src/schemas.ts       the JSON schemas both CLIs are pinned to
 src/validate.ts      parser vocabulary for model output
 src/proc.ts          child-process plumbing, and how a child ended
+src/review-md.ts     the repository's REVIEW.md, read from the run's start commit, for the review seats (#389)
 src/cancel.ts        stopping a turn that is already running - the latch, what it may kill, and the wait it may cut short
 src/commands.ts      a command a person pressed - no shell, no shim, and where it runs
 src/commandlog.ts    a command's output on disk, and what the last launch left there

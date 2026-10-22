@@ -208,7 +208,8 @@ test('an edit to vibe.config.json is recorded whatever verify.testPaths says', a
     const record = state.testChanges;
     assert.ok(record !== undefined, JSON.stringify(testPaths));
     assert.deepEqual(record.files.map((f) => [f.path, f.status]), [['vibe.config.json', 'modified']]);
-    assert.deepEqual(record.patterns, [...testPaths, 'vibe.config.json']);
+    // REVIEW.md is named too since #389: it is always judged, like the config.
+    assert.deepEqual(record.patterns, [...testPaths, 'vibe.config.json', 'REVIEW.md']);
   }
 });
 

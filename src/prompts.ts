@@ -1203,6 +1203,13 @@ export function votePrompt(
   outOfScope: readonly OutOfScopeItem[] | undefined,
   environment?: EnvironmentFacts | null,
   roles: RoleTable = ROLES,
+  /**
+   * The repository's `REVIEW.md`, read from the run's start commit (#389), or
+   * absent. A verifier needs it because "invents a number" is a defect only by
+   * this repository's standard. Trailing and absent-renders-nothing, so the
+   * frozen vote prompt is byte-identical without one.
+   */
+  reviewMd?: ReviewStandards | undefined,
 ): string {
   return `You are checking one claimed defect in a code change. Someone reviewing the change says the defect below exists. Decide whether it does.
 
@@ -1216,7 +1223,7 @@ Judge **whether the defect exists** in this code - not how severe it is, and not
 
 - **\`real\`** - the defect the claim describes is there. You need no evidence beyond the claim's own; agreeing with what it points at is enough.
 - **\`not-real\`** - the claim is false. Give a concrete reason it is false, and evidence for that reason that a reader can open: the code that shows it, cited the way a finding cites code. A \`not-real\` vote whose evidence resolves to nothing is counted as \`cannot-tell\`.
-- **\`cannot-tell\`** - anything in between. If you are in doubt, this is your vote. It is not a failure; it keeps the claim standing, which is the right outcome when nobody can show it is wrong.
+- **\`cannot-tell\`** - anything in between. If you are in doubt, this is your vote. It is not a failure; it keeps the claim standing, which is the right outcome when nobody can show it is wrong.${standardsSection(reviewMd, true)}
 
 ## Evidence
 
@@ -1251,6 +1258,35 @@ ${planMd}
 ${block(BLOCK.json, RESPOND_WITH_JSON)}`;
 }
 
+/** The repository's `REVIEW.md` as a review turn receives it (#389). */
+export interface ReviewStandards {
+  /** The file, verbatim. */
+  text: string;
+  /** The full commit it was read from. */
+  commit: string;
+}
+
+/**
+ * The repository's review standards, after vibe's own standing text so the
+ * severity definitions and `APPROVE_COST` still frame them, and named as the
+ * repository's so a reader of the prompt can tell whose words are whose.
+ * Absent renders nothing.
+ */
+function standardsSection(s: ReviewStandards | undefined, forVote: boolean): string {
+  if (s === undefined) return '';
+  const vote = forVote
+    ? ' Any severity rules in it are not your question, as above - use it only to decide whether the claimed defect exists.'
+    : '';
+  // The vote prompt places this straight after a list item, so it needs the
+  // blank line the review prompt's interpolation already provides.
+  return `${forVote ? '\n' : ''}
+## This repository's review standards (REVIEW.md)
+
+This was written by this repository's owners and read from commit \`${s.commit.slice(0, 7)}\`. It adds to the instructions above and does not replace them.${vote}
+
+${s.text}${s.text.endsWith('\n') ? '' : '\n'}`;
+}
+
 /**
  * The block asking for a verdict on each change to the judge (#112).
  *
@@ -1264,13 +1300,13 @@ function judgeSection(judge: readonly FileChange[] | undefined): string {
   return `
 ## Changes to the judge
 
-This change touches files that decide whether the work passes - its tests, or \`vibe.config.json\`, where the verification gates are configured. A change here can make the gate go green without the code getting any better, so each one needs your verdict.
+This change touches files that decide whether the work passes - its tests, \`vibe.config.json\`, where the verification gates are configured, or \`REVIEW.md\`, the repository's review standards. A change here can make the gate go green without the code getting any better, so each one needs your verdict.
 
 ${judge.map(judgeLine).join('\n')}
 
 For each file above, return exactly one entry in \`test_verdicts\` - \`file\` spelled exactly as listed, \`justified\`, and a \`reason\`.
 
-**What justified means.** Editing or removing a test is justified ONLY when the test's claim is no longer the contract: the behaviour it checks genuinely moved, as the plan intended, or the test asserted more than the thing it was guarding. It is NEVER justified merely because it makes the gate pass - a test changed to agree with the code is the defect this check exists to catch. A newly added test is fine to mark justified; adding tests is not suspicious. For \`vibe.config.json\`, the question is whether the change to the gates or the configuration is something the plan called for.
+**What justified means.** Editing or removing a test is justified ONLY when the test's claim is no longer the contract: the behaviour it checks genuinely moved, as the plan intended, or the test asserted more than the thing it was guarding. It is NEVER justified merely because it makes the gate pass - a test changed to agree with the code is the defect this check exists to catch. A newly added test is fine to mark justified; adding tests is not suspicious. For \`vibe.config.json\` and \`REVIEW.md\`, the question is whether the change is something the plan called for.
 
 A listed file you leave out is recorded as unjudged, never as justified. This does not block the run and it is not a finding: if a change here is wrong, ALSO raise it as an ordinary finding at its true severity.
 `;
@@ -1324,6 +1360,16 @@ export function reviewPrompt(
    * verdicts on no files.
    */
   judge?: readonly FileChange[] | undefined,
+  /**
+   * The repository's `REVIEW.md`, read from the run's start commit (#389), or
+   * absent - which is also how a refused or unreadable file arrives.
+   *
+   * Trailing and absent-renders-nothing for the reason `chunk` is: a
+   * repository without one gets the prompt it got before this existed, byte for
+   * byte. It is not a `block()`, so a `prompts.<block>` override never touches
+   * it: replacing vibe's text and adding the repository's are separate.
+   */
+  reviewMd?: ReviewStandards | undefined,
 ): string {
   return `You are reviewing a code change against the plan it was meant to implement.${
     round > 1 ? continuityNote(round, hasMemory, 'change') : ''
@@ -1368,7 +1414,7 @@ There is no per-criterion verdict to report and no field to set. Your findings a
 
 ${block(BLOCK.review, REVIEW_BREADTH)}
 ${block(BLOCK.simple, SIMPLE_SOLUTION)}
-${chunk === undefined ? '' : chunkNote(chunk)}${reportSection(report)}${judgeSection(judge)}
+${standardsSection(reviewMd, false)}${chunk === undefined ? '' : chunkNote(chunk)}${reportSection(report)}${judgeSection(judge)}
 ## Files changed
 
 ${changedFiles.length > 0 ? changedFiles.map((f) => `- ${f}`).join('\n') : '(none detected)'}

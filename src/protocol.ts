@@ -399,6 +399,30 @@ export type Outbound =
    * describing the product rather than quoting it.
    */
   | { type: 'prompts'; id: number; blocks: readonly PromptBlock[] }
+  /**
+   * What the commit the next run would start from holds as `REVIEW.md`,
+   * answering `review_md` (#389). A PREVIEW, and labelled as one: it never
+   * fetches, so `fetched` is always false, and a run reads the file from the
+   * commit it actually starts at. The text is not carried - the settings note
+   * shows presence and size, and there is no editor. `reviewMd` is null, with a
+   * `reason`, when there is no commit to read: a ref that does not resolve
+   * locally, or a repository with nothing committed.
+   */
+  | {
+      type: 'review_md';
+      id: number;
+      dir: string;
+      ref: string | null;
+      tracking: boolean;
+      fetched: false;
+      commit: string | null;
+      reviewMd:
+        | { kind: 'present'; blob: string; bytes: number }
+        | { kind: 'absent' }
+        | { kind: 'refused' | 'unreadable'; reason: string }
+        | null;
+      reason?: string;
+    }
   /** Every stored pilot conversation, answering `chats` (#223, `src/chatstore.ts`). */
   | { type: 'chats'; id: number; chats: readonly { key: string; value: string }[] }
   /** A conversation was written or removed, answering `chat_save`. */
@@ -770,6 +794,11 @@ export type Inbound =
    * later reader has to work out is unused.
    */
   | { type: 'prompts'; id: number }
+  /**
+   * The repository's REVIEW.md at the commit the next run would start from
+   * (#389). Unlike `prompts` it names a repository, so it carries a `dir`.
+   */
+  | { type: 'review_md'; id: number; dir: string }
   /** The pilot's stored conversations (#223). */
   | { type: 'chats'; id: number }
   /** Store one conversation, or remove it with a null value. */
@@ -1029,6 +1058,15 @@ export function decode(line: string): Decoded {
         return { ok: false, id, reason: 'stats carried no dir' };
       }
       return { ok: true, message: { type: 'stats', id, dir } };
+    }
+    case 'review_md': {
+      // `archive`'s rule exactly: an empty `dir` would answer for the host's
+      // own cwd, which is another repository's REVIEW.md shown as this one's.
+      const dir = parsed['dir'];
+      if (typeof dir !== 'string' || dir === '') {
+        return { ok: false, id, reason: 'review_md carried no dir' };
+      }
+      return { ok: true, message: { type: 'review_md', id, dir } };
     }
     case 'artifacts':
     case 'artifact':

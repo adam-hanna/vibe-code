@@ -517,6 +517,9 @@ export async function commitFork(targetDir: string, plan: ForkPlan): Promise<For
     // branch is created at the checkpoint commit above. `git.baseRef` never
     // applies to a fork, so the child records no start of its own either.
     delete child.start;
+    // Read from the parent's start, which is false of the child; its first
+    // review reads its own `start ?? baseSha` (#389).
+    delete child.reviewMd;
     if (branch === null) delete child.branchPending;
     else child.branchPending = true;
 

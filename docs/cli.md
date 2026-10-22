@@ -81,7 +81,9 @@ Reads every run in the repository's archive and reports how the loop has behaved
 vibe doctor [options]
 ```
 
-Checks that `claude` and `codex` are installed, logged in and able to run the tools each role needs, and prints the configuration a run would use. It takes the same options `vibe run` does, so `vibe doctor --role reviewer:effort=max` shows the effect of that flag, and an invalid flag fails doctor exactly as it would fail a run. It also prints the gate table, including which `step` gates a terminal run will run through. Run it first.
+Checks that `claude` and `codex` are installed, logged in and able to run the tools each role needs, and prints the configuration a run would use. It takes the same options `vibe run` does, so `vibe doctor --role reviewer:effort=max` shows the effect of that flag, and an invalid flag fails doctor exactly as it would fail a run. It also prints the gate table, including which `step` gates a terminal run will run through.
+
+It also prints one `REVIEW.md:` line about the [repository's review standards](./how-it-works). The line says whether the commit the next run would start from has a `REVIEW.md`. That commit is `git.baseRef` if set, else `HEAD`. The line gives the ref, the short commit and the size, a warning when the file is over 32 KiB, and the reason when it would be refused or is unreadable. For a remote-tracking `git.baseRef`, doctor fetches first, as a run would. If the fetch fails, doctor says so and gives the reason. It may add what the local copy holds, labelled possibly stale, and never presents that as the commit the next run will start from. The line never changes doctor's exit code. Run it first.
 
 ## Options
 

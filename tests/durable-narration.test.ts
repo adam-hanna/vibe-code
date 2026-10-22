@@ -87,6 +87,12 @@ test('a clean pass records the events it always did, and no more', async () => {
       'codex_turn',
       'plan_approved',
       'review_approved',
+      // Added by #389, and decided rather than slipped in: the brief asks for
+      // the REVIEW.md read to be said once, at the first review, with its own
+      // id - including "No REVIEW.md at <sha>" - and recording it is what lets
+      // a replay say it too. It lands in the same write as `state.reviewMd`,
+      // so the record never exists without the event that discloses it.
+      'review_md',
       'verify_passed',
       // Added by #136, and it is the guard working rather than being worked
       // around. The work sampler takes a reading every sixty seconds through a
@@ -98,7 +104,8 @@ test('a clean pass records the events it always did, and no more', async () => {
       'work_measured',
     ],
   );
-  assert.equal(state.events.length, 8);
+  // 9 since #389: the one `review_md` event above, said once at the first review.
+  assert.equal(state.events.length, 9);
 
   // And the run narrated several times that number, which is the ratio the rule
   // exists to protect. Asserted as an inequality, not a fixed count: the point

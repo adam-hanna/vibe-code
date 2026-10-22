@@ -33,7 +33,8 @@ import {
   writeConfigPatch,
 } from '@src/config.js';
 import { GATEABLE, GATE_MODES, UNGATEABLE } from '@src/gates.js';
-import { diffRange, diffSinceWithLimit } from '@src/git.js';
+import { diffRange, diffSinceWithLimit, nextRunStart } from '@src/git.js';
+import { readReviewMd } from '@src/review-md.js';
 import { PROVIDERS, ROLE_NAMES } from '@src/roles.js';
 import { listModels } from '@src/models.js';
 import type { ModelListings } from '@src/models.js';
@@ -536,6 +537,37 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
           message: err instanceof Error ? err.message : String(err),
         });
       }
+      return;
+    }
+
+    if (msg.type === 'review_md') {
+      // A read beside a run like `stats`: it writes nothing. **It never
+      // fetches** (#389): the settings screen opens often, and a fetch can block
+      // for up to `git.worktreeTimeoutMs`. So this is a local answer, said as
+      // one - `fetched: false` - and `fetch: false` is for display only:
+      // nothing that decides where a run starts may use it.
+      const { id, dir } = msg;
+      void (async () => {
+        const cfg = readConfig(dir);
+        const ref = cfg.git.baseRef;
+        const next = await nextRunStart(dir, ref, { fetch: false, timeoutMs: cfg.git.worktreeTimeoutMs });
+        const base = { type: 'review_md', id, dir, ref, fetched: false } as const;
+        if (!next.ok) {
+          send({ ...base, tracking: false, commit: null, reviewMd: null, reason: next.reason });
+          return;
+        }
+        if (next.sha === null) {
+          const reason = 'no commit for a run to start from yet';
+          send({ ...base, tracking: next.tracking, commit: null, reviewMd: null, reason });
+          return;
+        }
+        const read = await readReviewMd(dir, next.sha);
+        // The text stays here: the note shows presence and size.
+        const reviewMd = read.kind === 'present' ? { kind: read.kind, blob: read.blob, bytes: read.bytes } : read;
+        send({ ...base, tracking: next.tracking, commit: next.sha, reviewMd });
+      })().catch((err: unknown) => {
+        send({ type: 'error', id, message: err instanceof Error ? err.message : String(err) });
+      });
       return;
     }
 

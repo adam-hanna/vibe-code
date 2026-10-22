@@ -366,6 +366,18 @@ export interface RunStart {
   ref: string | null;
 }
 
+/** See `RunState.reviewMd` (#389). `blob` and `bytes` only when present. */
+export interface ReviewMdRecord {
+  /** The full commit id `REVIEW.md` was read from. */
+  commit: string;
+  outcome: 'present' | 'absent' | 'refused' | 'unreadable';
+  blob?: string;
+  /** git's own size for the blob, never a count of decoded characters. */
+  bytes?: number;
+  /** Why a refused or unreadable file was not given to the reviewer. */
+  reason?: string;
+}
+
 /**
  * The agent CLI versions detected on this machine (#298). See
  * `RunState.cliVersions`. Null is "not detected" - a `--version` that could
@@ -1892,6 +1904,17 @@ export interface RunState {
    * child's branch starts at the checkpoint commit, not at the parent's start.
    */
   start?: RunStart;
+  /**
+   * What the run found as the repository's `REVIEW.md` (#389), and the commit
+   * it was read from - `start.sha`, else `baseSha`; never the working tree.
+   *
+   * Written once, at the first review, in the same save as its `review_md`
+   * event. A resume re-reads `commit` and requires `blob` to match; a mismatch
+   * rewrites the outcome to `unreadable`, with a reason naming both. Absent on
+   * every run from before #389, and on a run whose first review had no commit
+   * to read from. A fork drops it: it describes the parent's start.
+   */
+  reviewMd?: ReviewMdRecord;
   /**
    * The `claude` and `codex` versions this run last ran under (#298), written
    * when it starts and again on every resume. A resume that finds a different
