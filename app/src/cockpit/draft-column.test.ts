@@ -33,7 +33,9 @@ test('the column, the footer and the summary all take the empty run while a draf
 test('Code, Verify and Spend say there is no run while a draft has none (#319)', () => {
   // They chose between the opened run and `run`, and a draft opens nothing, so
   // all three drew the window's last live run beside an empty column.
-  expect(cockpit).toMatch(/tab === 'code' &&\s*\(noRun \? \(\s*<NoRun>/);
+  // Inside `InFlight` since #409, which adds nothing here: it draws off
+  // `columnRun`, the blank run while a draft has none.
+  expect(cockpit).toMatch(/tab === 'code' && \(\s*<InFlight card=\{flying\('code'\)\}>\s*\{noRun \? \(\s*<NoRun>/);
   expect(cockpit).toMatch(/tab === 'verify' && noRun && \(\s*<NoRun>/);
   expect(cockpit).toMatch(/tab === 'verify' && !noRun && \(/);
   expect(cockpit).toMatch(/tab === 'spend' &&\s*\(noRun \? \(\s*<NoRun>/);

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
 import { Activity, ChevronLeft, PanelLeft, PanelRightClose, PanelRightOpen, Monitor, Plus, Settings as SettingsIcon, Smartphone, Terminal, X } from 'lucide-react';
 import { usePanelRef } from 'react-resizable-panels';
 import type { Layout, LayoutChangedMeta, PanelImperativeHandle } from 'react-resizable-panels';
@@ -87,6 +88,7 @@ import { PairPrompt } from '../remote/PairPrompt';
 import { SpendPane } from './SpendPane';
 import { StopConfirm } from './StopConfirm';
 import { Summary } from './Summary';
+import { liveTab } from './rail';
 import { BriefOffer } from './BriefOffer';
 import { Workstreams } from './Workstreams';
 import { VerifyPane } from './VerifyPane';
@@ -132,7 +134,9 @@ import {
 import { exitNotice, offerNotice, runNotice } from './notices';
 import type { CapRead, LiveRun, LiveRuns } from './hosts';
 import { useStats } from './useStats';
-import { rounds } from './rounds';
+import { inFlight, rounds } from './rounds';
+import type { RoundCard as RoundCardData } from './rounds';
+import { RoundCard } from '../pilot/RoundCard';
 import { implementArgv, readLaunchArgv, resumeArgv } from './argv';
 import { LIGHT_QUERY, SCALE_KEY, SCALE_VAR, THEME_KEY, readScale, readTheme, resolveTheme, writable, type Theme } from './appearance';
 import { LIMITS_KEY, readLimits, writeLimits } from '../pilot/ledger';
@@ -144,7 +148,7 @@ import { showsConfig } from '../changed';
 import { memory, useFollowedMemory, useMemoryRevision } from '../memory';
 import { connectedNames } from '../remote/pairing';
 import { useRemoteStatus } from '../remote/useRemoteStatus';
-import type { Run } from './model';
+import type { CycleKind, Run } from './model';
 
 /**
  * A tab in the main pane's bar (the UI rework). Stated rather than inherited:
@@ -155,6 +159,55 @@ import type { Run } from './model';
 const TAB =
   'cursor-pointer whitespace-nowrap border-0 border-b-2 border-transparent bg-transparent px-2.5 pt-2.5 pb-3 text-body-sm font-medium text-secondary hover:bg-column hover:text-primary focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent';
 const TAB_ON = 'border-accent text-accent';
+
+/**
+ * A stage's pane, with the round of that stage still running drawn at its foot
+ * (#409).
+ *
+ * The four artifact panes are built from what rounds wrote, so a round in flight
+ * was not on them at all. It is drawn here as the pilot's log draws it - the
+ * same `RoundCard`, from the same `rounds()` - rather than as a third design.
+ *
+ * **Below the pane's scroll, not inside it.** A reader who opened round 0 stays
+ * where they are and still sees what is running; a pane that scrolled to a live
+ * card would move the document out from under them, which is what the panes'
+ * *follow until touched* rule exists to prevent. And every pane's empty state
+ * gets it for free, which is when it matters most: the first critique round
+ * running over a pane that has nothing yet.
+ *
+ * The wrapper is always drawn, so a round starting or ending never remounts the
+ * pane under it and costs it the sections somebody opened.
+ */
+function InFlight({ card, children }: { card: RoundCardData | null; children: ReactNode }) {
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      {children}
+      {card !== null && (
+        <div className="max-h-[40%] flex-none overflow-y-auto border-t border-rule-structure bg-page px-7 pt-4" aria-label="the round running now">
+          <RoundCard card={card} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The mark on the tab for what the run is doing now (#409): the run path's live
+ * dot, so the bar and the rail draw one state one way. It pulses, under #307's
+ * rule - *a pulse means work is running* - which is why the sidebar's working
+ * rows pulse too; the mark is drawn only while something is. A state rather
+ * than a count, so it is an icon before the label and never `· n`, which in
+ * this bar always means how many things are behind the tab.
+ */
+function RunningMark({ on }: { on: boolean }) {
+  if (!on) return null;
+  return (
+    <span className="mr-1.5 inline-flex align-middle" title="The run is working here now">
+      <LivenessDot state="live" />
+      <span className="sr-only">running:</span>
+    </span>
+  );
+}
 
 /**
  * The cockpit, at the slice #159 scopes it to.
@@ -2005,6 +2058,14 @@ export function Cockpit({
   // falling through to the window's last live run.
   const columnRun = noRun ? blank : past && opened.run !== null ? opened.run : run;
   /**
+   * Where the run is now, for the tab bar's mark and the round in flight at the
+   * foot of a stage's pane (#409). Off `columnRun`, the run the column draws, so
+   * the bar, the rail and the panes are about one run.
+   */
+  const live = liveTab(columnRun);
+  const columnCards = columnRun === run ? cards : rounds(columnRun);
+  const flying = (cycle: CycleKind): RoundCardData | null => inFlight(columnCards, columnRun, cycle);
+  /**
    * The verification passes the Verify tab draws, and the run whose directory
    * their logs are read from - **one run, never two** (#248). Each attempt opens
    * the file its own run named, so drawing the live run's attempts while reading
@@ -2624,6 +2685,7 @@ export function Cockpit({
               aria-current={tab === 'plans' ? 'page' : undefined}
               onClick={() => open('plans')}
             >
+              <RunningMark on={live === 'plans'} />
               Plans
             </button>
             {/* The four artifact tabs are in `CycleKind`'s order — plan,
@@ -2650,6 +2712,7 @@ export function Cockpit({
               aria-current={tab === 'critique' ? 'page' : undefined}
               onClick={() => open('critique')}
             >
+              <RunningMark on={live === 'critique'} />
               Critique
             </button>
             {/* `1d`, per round. The whole-run diff is this pane's first section
@@ -2659,6 +2722,7 @@ export function Cockpit({
               aria-current={tab === 'code' ? 'page' : undefined}
               onClick={() => open('code')}
             >
+              <RunningMark on={live === 'code'} />
               Code{run.commits.length > 0 ? ` · ${String(run.commits.length)}` : ''}
             </button>
             <button
@@ -2666,6 +2730,7 @@ export function Cockpit({
               aria-current={tab === 'review' ? 'page' : undefined}
               onClick={() => open('review')}
             >
+              <RunningMark on={live === 'review'} />
               Review
             </button>
             {/* `1f`. The count is blocking questions, not all of them: an
@@ -2689,6 +2754,7 @@ export function Cockpit({
               aria-current={tab === 'verify' ? 'page' : undefined}
               onClick={() => setTab('verify')}
             >
+              <RunningMark on={live === 'verify'} />
               Verify{verifyOf.passes.length > 0 ? ` · ${String(verifyOf.passes.length)}` : ''}
             </button>
             {/* The phone's way to the commands pane, which the desktop docks
@@ -2836,34 +2902,40 @@ export function Cockpit({
             />
           )}
           {tab === 'plans' && (
-            <PlansPane
-              dir={shownDir}
-              runId={shownRunId}
-              openAt={openAt}
-              revision={run.artifacts.length}
-            />
+            <InFlight card={flying('plan')}>
+              <PlansPane
+                dir={shownDir}
+                runId={shownRunId}
+                openAt={openAt}
+                revision={run.artifacts.length}
+              />
+            </InFlight>
           )}
           {tab === 'critique' && (
-            <ReportPane
-              dir={shownDir}
-              runId={shownRunId}
-              kind="critique"
-              rounds={past ? [] : cards}
-              openAt={openAt}
-              revision={run.artifacts.length}
-            />
+            <InFlight card={flying('critique')}>
+              <ReportPane
+                dir={shownDir}
+                runId={shownRunId}
+                kind="critique"
+                rounds={past ? [] : cards}
+                openAt={openAt}
+                revision={run.artifacts.length}
+              />
+            </InFlight>
           )}
           {tab === 'review' && (
-            <ReportPane
-              dir={shownDir}
-              runId={shownRunId}
-              kind="review"
-              rounds={past ? [] : cards}
-              openAt={openAt}
-              revision={run.artifacts.length}
-              // An opened run's own replayed frames: a past run is never the live one.
-              fixDispositions={past ? (opened.run?.fixDispositions ?? []) : run.fixDispositions}
-            />
+            <InFlight card={flying('review')}>
+              <ReportPane
+                dir={shownDir}
+                runId={shownRunId}
+                kind="review"
+                rounds={past ? [] : cards}
+                openAt={openAt}
+                revision={run.artifacts.length}
+                // An opened run's own replayed frames: a past run is never the live one.
+                fixDispositions={past ? (opened.run?.fixDispositions ?? []) : run.fixDispositions}
+              />
+            </InFlight>
           )}
           {/* **The run on screen, and its repository** (UI rework). This took
               the live run because an opened run had no shas on this side; the
@@ -2873,21 +2945,24 @@ export function Cockpit({
               committed three rounds. While the opened run is still being read
               the pane says that, rather than drawing the live run's shas
               against the opened run's repository. */}
-          {tab === 'code' &&
-            (noRun ? (
-              <NoRun>
-                The Code tab shows what a run's rounds changed, read from its commits. Start this run
-                and its first round lands here once it commits.
-              </NoRun>
-            ) : !past ? (
-              <CodePane run={run} dir={liveRepo} openAt={openAt} />
-            ) : opened.run !== null ? (
-              <CodePane run={opened.run} dir={shownDir} openAt={openAt} />
-            ) : (
-              <p className="m-0 p-6 text-body-sm text-secondary">
-                {opened.failure ?? 'Reading this run…'}
-              </p>
-            ))}
+          {tab === 'code' && (
+            <InFlight card={flying('code')}>
+              {noRun ? (
+                <NoRun>
+                  The Code tab shows what a run's rounds changed, read from its commits. Start this run
+                  and its first round lands here once it commits.
+                </NoRun>
+              ) : !past ? (
+                <CodePane run={run} dir={liveRepo} openAt={openAt} />
+              ) : opened.run !== null ? (
+                <CodePane run={opened.run} dir={shownDir} openAt={openAt} />
+              ) : (
+                <p className="m-0 p-6 text-body-sm text-secondary">
+                  {opened.failure ?? 'Reading this run…'}
+                </p>
+              )}
+            </InFlight>
+          )}
           {/* Mounted whatever tab is showing, and hidden rather than unmounted.
               A conversation is state nobody can get back, and a proposal waiting
               on a person would be destroyed by a glance at the output pane -

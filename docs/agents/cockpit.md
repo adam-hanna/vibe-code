@@ -94,6 +94,28 @@ Two rules the cockpit inherits from the design and must not quietly drop:
   compared. So the rule is now *a pulse means a turn is running*: `hostedMarks.working` is a
   run with `running` set and no gate held, and its row pulses, so several rows can. A gate,
   a held turn and an idle host all draw `LivenessDot still`.
+- **Where the run is, said on every surface that draws it** (#409). A resume at `reviewing`
+  re-runs the gates before the review, and for a core gate's minutes the window called the run
+  idle: *Ready for the next turn · The run is between turns*, Code complete, Code review not
+  started. A gate is not a turn, and the now card and the run path asked only about turns,
+  although `reduce` already had the gate open at `running`. `runningGate` (`cockpit/rail.ts`) is
+  the one answer: a gate at `running` in the latest pass, while no turn is open, no decision is
+  held, and the run has not ended or lost its host. The now card says *Verifying · Running the
+  core gate* with a clock from the gate's start, and the run path draws **Code** live, because
+  the gates run between Code's turns and are drawn under it.
+  - **The tab bar marks the tab for what is running**, from `liveTab`, which reads the same open
+    turn the rail does through `STAGE_TAB` (the map the round cards' links use too), so the bar
+    and the rail cannot disagree. A running gate marks **Verify**, the pane that draws it. A held
+    decision marks nothing. The mark is the rail's live dot, pulsing under #307's rule, and it is
+    an icon before the label, never `· n`: in this bar a `· n` is a count of what is behind the tab.
+  - **Each stage's tab draws the round in flight** (`InFlight` in `Cockpit.tsx`, `inFlight` in
+    `rounds.ts`). The four artifact panes are built from what rounds wrote, so a round still
+    running was on none of them. It is the pilot log's `RoundCard`, from the same `rounds()`, for
+    the card holding `run.running`. That is the turn the rail reads, so a pane cannot call a round
+    live that the rail calls finished. It sits **below the pane's scroll**, not in it: a reader who
+    opened round 0 is not moved, and every empty pane shows it, which is when it matters most. The
+    wrapper is always drawn, so a round starting or ending never remounts the pane under it. The
+    Verify pane already drew a running gate, and keeps doing so.
 - **A row waiting on a person says so, and why** (#307). `cockpit/attention.ts` holds the
   rule: a held gate (`gate`); the archive's `needs-input`, `stalled` and `error`
   (`needs you`, `stopped`, `failed`), only for a run not running, since a running run's

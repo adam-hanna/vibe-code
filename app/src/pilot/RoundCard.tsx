@@ -4,12 +4,12 @@ import { cn } from '@/lib/utils';
 import { Counts } from '../cockpit/Counts';
 import { elapsed, work as describeWork } from '../cockpit/format';
 import { SEVERITIES } from '../cockpit/model';
+import { STAGE_TAB } from '../cockpit/rail';
 import { roundTitle } from '../cockpit/rounds';
 import type { Severity } from '../design';
 import type { RoundCard as Round } from '../cockpit/rounds';
 import type { GateRun } from '../cockpit/model';
 import type { OpenAt } from '../cockpit/LoopColumn';
-import type { Tab } from '../cockpit/where';
 
 /**
  * What a round left behind, in the log (hi-fi 5, #223).
@@ -72,7 +72,8 @@ function gateLine(gate: GateRun): string {
  * knows.** `CycleKind` is four and so is this, so a fifth group fails to compile
  * here rather than producing a card whose heading is a link to nowhere — the same
  * reason `format.ts` holds the boundary and exit-code maps and `contract.test.ts`
- * fails on the commit that adds a ninth code.
+ * fails on the commit that adds a ninth code. It is `rail.ts`'s `STAGE_TAB`
+ * since #409, so the tab bar's running mark reads the same map as these links.
  *
  * The round travels with it. A card is a summary of *one* round, so a link that
  * opened the pane at whichever round happened to be newest would be the wrong
@@ -80,12 +81,7 @@ function gateLine(gate: GateRun): string {
  * up already earned: the largest thing on the surface was inert while something
  * smaller beside it did the navigating.
  */
-const PANE: Readonly<Record<Round['cycle'], Tab>> = {
-  plan: 'plans',
-  critique: 'critique',
-  code: 'code',
-  review: 'review',
-};
+const PANE = STAGE_TAB;
 
 /** A measured duration on the card: monospace and tabular, so a column of them lines up. */
 const TOOK = 'font-mono text-mono-sm tabular-nums text-tertiary';
