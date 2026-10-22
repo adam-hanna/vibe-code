@@ -282,12 +282,23 @@ export async function createBranch(cwd: string, name: string, startPoint?: strin
  * would wait on the network for as long as the network liked.
  *
  * Never throws: every failure is a sentence for the preflight refusal.
+ *
+ * **`fetch: false` is for display only** (#389): the settings note, and what
+ * doctor adds - labelled possibly stale - after its own fetch failed. It still
+ * asks git whether the ref is remote-tracking, which is local, so a caller can
+ * say "as last fetched"; it skips only the network - the remote listing, the
+ * fetch, and the refusal for a tracking ref with no remote. No code path that
+ * decides where a run starts may pass it. `fetched` says which answer this is.
  */
 export async function resolveBase(
   cwd: string,
   ref: string,
   timeoutMs: number,
-): Promise<{ ok: true; sha: string } | { ok: false; reason: string }> {
+  options: { fetch?: boolean } = {},
+): Promise<
+  { ok: true; sha: string; fetched: boolean; tracking: boolean } | { ok: false; reason: string }
+> {
+  const fetch = options.fetch !== false;
   const repo = await repoStatus(cwd);
   if (!repo.isRepo) {
     return {
@@ -301,7 +312,9 @@ export async function resolveBase(
   // Whether it is a remote-tracking ref, asked of git rather than guessed from a
   // slash: `feature/x` is a local branch and `origin/develop` usually is not.
   const full = await git(cwd, ['rev-parse', '--symbolic-full-name', ref], { allowFail: true });
-  if (full.code === 0 && full.stdout.startsWith('refs/remotes/')) {
+  const tracking = full.code === 0 && full.stdout.startsWith('refs/remotes/');
+  let didFetch = false;
+  if (tracking && fetch) {
     const listed = await git(cwd, ['remote'], { allowFail: true });
     // The longest remote whose prefix matches, so a remote named `a/b` is split
     // as `a/b` + name rather than `a` + `b/name`.
@@ -342,6 +355,7 @@ export async function resolveBase(
             'Nothing has been spent.',
         };
       }
+      didFetch = true;
     } catch (err: unknown) {
       return {
         ok: false,
@@ -364,7 +378,66 @@ export async function resolveBase(
         'have been fetched once before it can be named. Nothing has been spent.',
     };
   }
-  return { ok: true, sha };
+  return { ok: true, sha, fetched: didFetch, tracking };
+}
+
+/** Where the next run would start, as `nextRunStart` answers it (#389). */
+export interface NextStart {
+  ok: true;
+  /** Null only for HEAD in a repository with no commits. */
+  sha: string | null;
+  /** `git.baseRef`, or null for HEAD. */
+  ref: string | null;
+  tracking: boolean;
+  /** True only when a fetch ran and succeeded: a false here is a local answer. */
+  fetched: boolean;
+}
+export interface NextStartRefused {
+  ok: false;
+  ref: string | null;
+  reason: string;
+}
+
+/**
+ * The commit the next run would start from: `git.baseRef` resolved if set,
+ * else HEAD (#249, #389). The one copy of that rule - the run's preflight,
+ * `vibe doctor` and the settings frame all call it.
+ *
+ * `fetch: true` is the run's own mode and is `resolveBase` exactly: a failed
+ * fetch refuses and never falls back to the local copy. `fetch: false` is for
+ * display only and answers `fetched: false` - see `resolveBase`.
+ */
+export function nextRunStart(
+  cwd: string,
+  ref: string,
+  o: { fetch: boolean; timeoutMs: number },
+): Promise<(NextStart & { sha: string }) | NextStartRefused>;
+export function nextRunStart(
+  cwd: string,
+  ref: string | null,
+  o: { fetch: boolean; timeoutMs: number },
+): Promise<NextStart | NextStartRefused>;
+export async function nextRunStart(
+  cwd: string,
+  ref: string | null,
+  o: { fetch: boolean; timeoutMs: number },
+): Promise<NextStart | NextStartRefused> {
+  if (ref === null) {
+    const repo = await repoStatus(cwd);
+    if (!repo.isRepo) {
+      return {
+        ok: false,
+        ref,
+        reason:
+          `${cwd} is not a git repository` +
+          (repo.error === null ? '' : ` (git could not be run: ${repo.error})`),
+      };
+    }
+    return { ok: true, sha: await markBase(cwd), ref, tracking: false, fetched: false };
+  }
+  const resolved = await resolveBase(cwd, ref, o.timeoutMs, { fetch: o.fetch });
+  if (!resolved.ok) return { ok: false, ref, reason: resolved.reason };
+  return { ok: true, sha: resolved.sha, ref, tracking: resolved.tracking, fetched: resolved.fetched };
 }
 
 /** A full object id, never an abbreviation: 40 lowercase hex characters. */

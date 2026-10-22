@@ -14,7 +14,9 @@ import {
   committing,
   config,
   freshRun,
+  p1,
   planFixture,
+  report,
   verifying,
   work,
 } from './helpers/loop-harness.js';
@@ -155,4 +157,50 @@ test('a fork does not inherit the start of the run it was forked from', async ()
   const { state: child } = await commitFork(parent.targetDir, plan);
   assert.equal(child.start, undefined);
   assert.equal(loadRun(child.targetDir, child.id).start, undefined);
+});
+
+test('a fork does not inherit the REVIEW.md record of the run it was forked from (#389)', async () => {
+  // The record names the parent's start commit, which is false of the child -
+  // its branch starts at the checkpoint, and its first review must read from
+  // its own `start ?? baseSha`, not re-read the parent's.
+  const parent = freshRun({ prefix: 'vibe-reviewmd-fork-', task: 'parent', planOnly: false, git: true, commit: true });
+  let round = 0;
+  const realLog = console.log;
+  console.log = () => undefined;
+  try {
+    await orchestrate(
+      parent,
+      config({ p1Tolerance: 0 }, { ...committing(), ...verifying(parent) }),
+      false,
+      agents(
+        {
+          claude: (label) => {
+            if (label === 'plan' || label.startsWith('revise')) return planFixture();
+            round += 1;
+            work(parent, `work-${round}.txt`);
+            return `did ${label}`;
+          },
+          // One blocking finding in the first review, so a fix round follows it
+          // and writes a checkpoint after the record exists.
+          codex: (label) => (label === 'review-0' ? report([p1('fix-me')]) : report([])),
+        },
+        [],
+      ),
+    );
+  } finally {
+    console.log = realLog;
+  }
+  assert.notEqual(parent.reviewMd, undefined, 'the parent recorded what its review read');
+  const carrying = listCheckpoints(parent.dir).filter((c) => {
+    if (c.meta?.commit == null) return false;
+    const snap = JSON.parse(readFileSync(path.join(parent.dir, `checkpoint-${c.n}.json`), 'utf8')) as Record<string, unknown>;
+    return snap['reviewMd'] !== undefined;
+  });
+  const point = carrying[carrying.length - 1];
+  assert.ok(point !== undefined, 'no checkpoint carries the record');
+
+  const plan = await planFork(parent.targetDir, parent.id, point.n, {});
+  const { state: child } = await commitFork(parent.targetDir, plan);
+  assert.equal(child.reviewMd, undefined);
+  assert.equal(loadRun(child.targetDir, child.id).reviewMd, undefined);
 });

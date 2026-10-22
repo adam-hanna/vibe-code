@@ -76,6 +76,7 @@ import { resolveGates } from '@src/verify.js';
 import { createWorktree, sameRepositoryRefusal, storedWorktree, workDirOf } from '@src/worktree.js';
 import type { AgentPreflight } from '@src/preflight.js';
 import * as git from '@src/git.js';
+import { describeBytes, describeReviewMdAt, overWarning, readReviewMd, REVIEW_MD_WARN_BYTES } from '@src/review-md.js';
 import * as log from '@src/log.js';
 import type { EnvironmentFacts, Phase } from '@src/runtime.js';
 import type {
@@ -2168,7 +2169,13 @@ export async function runPreflight(
           'failure #249 removed. Unset git.baseRef, or drop --no-branch. Nothing has been spent.',
       );
     }
-    const resolved = await git.resolveBase(state.targetDir, ref, cfg.git.worktreeTimeoutMs);
+    // The fetching mode, always: this decides where the run starts, and a
+    // failed fetch refuses rather than falling back to a possibly stale local
+    // copy (#249). `fetch: false` is for display and must never be used here.
+    const resolved = await git.nextRunStart(state.targetDir, ref, {
+      fetch: true,
+      timeoutMs: cfg.git.worktreeTimeoutMs,
+    });
     // The fetch is not interruptible, so a stop pressed during it ends the run
     // the moment it returns rather than after the worktree and both probes.
     stopIfCancelled();
@@ -2632,6 +2639,68 @@ export function reportDeferred(state: RunState): void {
 }
 
 /**
+ * The repository's REVIEW.md as this run's reviewers received it (#389), as one
+ * summary line - and none when the start commit had none, which is most
+ * repositories. Refused and unreadable are warnings: the owners wrote standards
+ * and the reviewer did not get them, so the summary must say so.
+ *
+ * Exported for the reason `reportDeferred` is.
+ */
+export function reportReviewMd(state: RunState): void {
+  const r = state.reviewMd;
+  if (r === undefined || r.outcome === 'absent') return;
+  const at = r.commit.slice(0, 7);
+  if (r.outcome === 'present') {
+    const bytes = r.bytes ?? 0;
+    const line = `Review:   REVIEW.md from ${at} (${describeBytes(bytes)})${overWarning(bytes)}`;
+    if (bytes > REVIEW_MD_WARN_BYTES) log.warn(line);
+    else log.info(line);
+    return;
+  }
+  log.warn(`Review:   REVIEW.md at ${at} was not given to the reviewer: ${r.reason ?? r.outcome}`);
+}
+
+/**
+ * `vibe doctor`'s REVIEW.md line (#389): what the commit the NEXT run would
+ * start from holds - `git.baseRef` if set, else HEAD, through the one resolver
+ * the run's preflight uses.
+ *
+ * **Doctor fetches**, because it is the preview a person runs on purpose and
+ * the answer should be the one the run would get. **A failed fetch is said, with
+ * its reason**, and only then may the local copy be described - labelled
+ * possibly stale, and never as the commit the next run will start from: the run
+ * itself would refuse, not fall back (#249). None of this counts against the
+ * exit code: REVIEW.md is optional, and a preview of it is not a broken
+ * environment.
+ */
+async function reportReviewMdPreview(targetDir: string, cfg: LoadedConfig): Promise<void> {
+  const ref = cfg.git.baseRef;
+  const timeoutMs = cfg.git.worktreeTimeoutMs;
+  const next = await git.nextRunStart(targetDir, ref, { fetch: true, timeoutMs });
+  if (next.ok) {
+    if (next.sha === null) {
+      log.info('REVIEW.md: no commit for a run to start from yet');
+      return;
+    }
+    const read = await readReviewMd(targetDir, next.sha);
+    const line = `REVIEW.md: ${describeReviewMdAt(ref ?? 'HEAD', next.sha, read)}`;
+    if (read.kind === 'absent') log.info(line);
+    else if (read.kind === 'present' && read.bytes <= REVIEW_MD_WARN_BYTES) log.ok(line);
+    else log.warn(line);
+    return;
+  }
+  log.warn(`REVIEW.md: could not resolve the commit the next run would start from: ${next.reason}`);
+  if (ref === null) return;
+  const local = await git.nextRunStart(targetDir, ref, { fetch: false, timeoutMs });
+  if (!local.ok || local.sha === null) return;
+  const read = await readReviewMd(targetDir, local.sha);
+  log.info(
+    '  local copy, possibly stale - not necessarily the commit the next run will start from: ' +
+      describeReviewMdAt(ref, local.sha, read),
+  );
+}
+
+/**
  * What the additional review finders cost and how many reported (#388 Part B),
  * as one summary line - and nothing at all on a run that seated none.
  *
@@ -2812,6 +2881,7 @@ function summary(state: RunState, started: number, recovery?: RecoveryReport): v
   log.info(
     `Rounds:   ${state.planRound} plan revision(s)${asked}, ${state.reviewRound} fix round(s)`,
   );
+  reportReviewMd(state);
   reportReviewFinders(state);
   reportReviewVotes(state);
   if (state.sessionRotations > 0) log.info(`Compacted: ${state.sessionRotations} time(s)`);
@@ -3107,6 +3177,7 @@ async function cmdDoctor(args: readonly string[]): Promise<ExitCode> {
     // line per mode rather than per row - six lines of `auto` is six lines of
     // nothing happening.
     for (const line of describeGates(cfg.gates)) log.info(`  ${line}`);
+    await reportReviewMdPreview(targetDir, cfg);
   } catch (err) {
     log.fail(`config: ${err instanceof Error ? err.message : String(err)}`);
     bad++;

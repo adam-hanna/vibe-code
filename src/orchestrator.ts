@@ -205,6 +205,7 @@ export type { ExitCode, TurnCharge, TurnSpend } from '@src/charge.js';
 // One name for both in the file that records the first would be the confusion
 // the pair exists to remove (#131).
 import { describeEnding as describeChildEnding, endingOf, isAbnormal } from '@src/proc.js';
+import { reviewStandardsFor } from '@src/review-md.js';
 import { workDirOf } from '@src/worktree.js';
 import { formatWork, withWorkProgress, workData } from '@src/work.js';
 
@@ -4664,6 +4665,12 @@ async function runReview(
   // a report is small next to a 400k-character diff (#49, #50).
   const report = latestReport(state);
 
+  // The repository's REVIEW.md, from the commit the run started at - never the
+  // working tree, so an edit this run made reaches the NEXT run's review, not
+  // this one (#389). Settled once per run per process and handed to every part,
+  // every finder (through `reviewPromptFor`) and every verifier alike.
+  const reviewMd = await reviewStandardsFor(state, cwd);
+
   if (chunks.length > 1) {
     // How the round was SPLIT, which is true before any turn runs. What was
     // actually seen is `reviewCoverage`, recorded per completed part below.
@@ -4739,6 +4746,9 @@ async function runReview(
       // Absent unless this part shows a judge file, which is what keeps every
       // other round's prompt byte-identical (#112).
       listed.length > 0 ? listed : undefined,
+      // Absent when the repository has none, or it was refused or unreadable,
+      // which keeps that prompt byte-identical too (#389).
+      reviewMd,
     );
   };
   /**
@@ -4924,6 +4934,7 @@ async function runReview(
         plan.out_of_scope,
         state.environment,
         roles,
+        reviewMd,
       );
       const ballots: Ballot[] = [];
       for (const v of verifiers) {

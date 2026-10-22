@@ -185,6 +185,17 @@ export interface RunOptions {
    * route Settings names rather than to whatever the shell happened to hold.
    */
   env?: NodeJS.ProcessEnv | undefined;
+  /**
+   * Whether held keys are redacted from stdout and stderr. Default `true`, which
+   * is what every caller had before this option existed (#389).
+   *
+   * `false` exists for one reader: the committed `REVIEW.md` (`src/review-md.ts`),
+   * whose object ids and text must arrive unaltered - a redacted id names no
+   * object, and a redacted text is not what the owners committed. That caller
+   * scans the text for held keys itself and REFUSES a file that contains one
+   * rather than redacting it, and redacts every reason it logs.
+   */
+  redact?: boolean | undefined;
 }
 
 export interface RunResult {
@@ -303,7 +314,8 @@ export type RunFn = (
 export function run(bin: string, args: readonly string[], options: RunOptions = {}): Promise<RunResult> {
   const { input, cwd, timeoutMs, onLine, onBytes, interruptible, signal, env } = options;
   const keys = secrets();
-  const clean = (text: string): string => (keys.length === 0 ? text : redact(text, keys));
+  const clean = (text: string): string =>
+    keys.length === 0 || options.redact === false ? text : redact(text, keys);
 
   return new Promise<RunResult>((resolve, reject) => {
     // Before the spawn, and the ordering is the fail-closed half of #209. A

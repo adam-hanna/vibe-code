@@ -46,6 +46,16 @@ export const DEFAULT_TEST_PATHS: readonly string[] = [
 export const CONFIG_FILE = 'vibe.config.json';
 
 /**
+ * Always part of the judge too, root-exact like `CONFIG_FILE` (#389).
+ *
+ * The repository's review standards. A run reads them from the commit it
+ * started at, so an edit here does not change THIS run's review - it weakens
+ * the NEXT one's, which is exactly why the reviewer is asked whether the plan
+ * called for it. A `REVIEW.md` in a subdirectory is not the file vibe reads.
+ */
+export const REVIEW_FILE = 'REVIEW.md';
+
+/**
  * A glob as an anchored regular expression: `*`, `**` and `?`, nothing else.
  *
  * Hand-written rather than `path.matchesGlob`, which arrived in Node 22 while
@@ -88,18 +98,19 @@ export function judgePatterns(verify: Pick<VerifyConfig, 'testPaths'>): readonly
 }
 
 /**
- * What the record names as matched against, `vibe.config.json` included.
+ * What the record names as matched against, `vibe.config.json` and
+ * `REVIEW.md` included.
  *
  * Included because it is in force: a record reading `patterns: []` beside a
  * config-file entry would name less than was actually matched. The matching
  * itself stays root-exact in `isJudge`; this list is only what the record says.
  */
 export function recordedPatterns(patterns: readonly string[]): string[] {
-  return [...new Set([...patterns, CONFIG_FILE])];
+  return [...new Set([...patterns, CONFIG_FILE, REVIEW_FILE])];
 }
 
 export function isJudge(file: string, patterns: readonly string[]): boolean {
-  return file === CONFIG_FILE || patterns.some((p) => matchesGlob(file, p));
+  return file === CONFIG_FILE || file === REVIEW_FILE || patterns.some((p) => matchesGlob(file, p));
 }
 
 /**

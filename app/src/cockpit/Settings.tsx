@@ -15,6 +15,7 @@ import { projectName } from './projects';
 import { capOf } from './hosts';
 import { showsConfig } from '../changed';
 import { settingsRead } from './settingsdoor';
+import { reviewMdLine } from './reviewmd';
 import { DRAFTS_KEY, draftsFor, readDrafts, removeDraft, saveDraft } from './drafts';
 import type { Draft } from './drafts';
 import type { KeyStatus } from '../pilot/keys';
@@ -429,6 +430,34 @@ const Refusals = createContext(0);
  * "silence" in minutes left nothing on screen matching that name. The rows that
  * already lead with the key (the caps, the budget) do not need it.
  */
+/**
+ * What the repository's REVIEW.md is at the commit the next run would start
+ * from (#389). Read-only, on purpose: the file is edited in the repository and
+ * committed, which is what stops a run from weakening its own review. The host
+ * never fetches for it, and the sentence says when that matters.
+ */
+function ReviewMdNote({ dir, baseRef }: { dir: string; baseRef: string | null }) {
+  const [line, setLine] = useState<string | null>(null);
+  useEffect(() => {
+    let live = true;
+    setLine(null);
+    host
+      .reviewMd(dir)
+      .then((frame) => live && setLine(reviewMdLine(frame)))
+      .catch((err: unknown) => {
+        if (live) setLine(`REVIEW.md could not be checked: ${err instanceof Error ? err.message : String(err)}`);
+      });
+    return () => {
+      live = false;
+    };
+    // `baseRef` is not sent - the host reads it from the config - but a saved or
+    // externally changed `git.baseRef` moves the commit this note describes, so
+    // it is what makes the note ask again rather than show the old base.
+  }, [dir, baseRef]);
+  if (line === null) return null;
+  return <p className={S.note}>{line}</p>;
+}
+
 function Key({ name }: { name: string }) {
   return <code className={S.key}>{name}</code>;
 }
@@ -2817,6 +2846,10 @@ export function Settings({
             </label>
           ))}
         </div>
+        {/* The repository's own standards (#389), which every seat above gets. */}
+        {scope === 'project' && (
+          <ReviewMdNote dir={dir} baseRef={typeof git['baseRef'] === 'string' ? git['baseRef'] : null} />
+        )}
       </section>
 
       {/* ---- what every turn is told ------------------------------------- */}

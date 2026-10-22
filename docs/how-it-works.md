@@ -104,6 +104,23 @@ A reproducer that failed before a final fix and passes after it closes the findi
 
 The tests and `vibe.config.json` decide whether a run passed, so a round that edits them is grading its own work. When a round changes a file matching `verify.testPaths`, or `vibe.config.json`, the reviewer is shown each one and must say whether the change was justified. A change is justified only when the test's claim is no longer the contract, and never because it makes the gate pass. Each file's status, its lines added and removed, and the verdict are recorded in `state.json` and the round's `code-review-<n>.json`. A file the reviewer did not address is recorded as `unjudged`. None of this stops the run, but the end-of-run summary names any file that was not judged justified.
 
+### The repository's review standards (REVIEW.md)
+
+A `REVIEW.md` at the root of your repository is how its owners add their own standards to the review: the things a reviewer should flag here that it would not flag everywhere. Examples: an invented number is a P1, or a finding about behaviour must cite a file and line.
+
+- **It is read from the commit the run started at, never the working tree.** That is the commit recorded as `state.start`, or the diff base when the run has no start. A run that adds or edits `REVIEW.md` changes the next run's review, never its own, so a change cannot weaken the review it is about to get.
+- **Only `REVIEW.md` at the root counts.** A `review.md`, or a `REVIEW.md` in a subdirectory, is not read.
+- **Some files are refused rather than read.** A `REVIEW.md` committed as a symbolic link or a submodule is refused, because following the link would read a file that was never committed as `REVIEW.md`. So is one that contains an API key vibe holds. One that git cannot read is warned about and skipped. In each case the run log and the end-of-run summary say so, and the review goes ahead without it.
+- **The reviewer, every additional finder and the verifiers get it.** No other role does: not the planner, the critic, the implementer, the fixer or the answerer. Verifiers are told that any severity rules in it are not their question.
+- **It adds to vibe's own review instructions and never replaces them.** It is placed after them, under a heading that names it as the repository's. Replacing vibe's text is still `prompts.<block>`, which is separate and does not touch `REVIEW.md`.
+- **It is a judge file.** Like `vibe.config.json`, a round that edits it is shown to the reviewer, which must say whether the plan called for the change.
+- **It is sent whole, with no cap.** Over 32 KiB, the run log, the summary and `vibe doctor` warn that it is long. That is a warning, not a limit.
+
+`vibe doctor` and the note under the reviewer's settings only preview `REVIEW.md` at the commit the *next* run would start from: `git.baseRef` if set, else `HEAD`. A run reads it from the commit it actually starts at.
+
+- `vibe doctor` fetches a remote-tracking `git.baseRef` first, as the run would.
+- The settings note never fetches, so for a remote-tracking ref it says "as last fetched".
+
 ### Raising a finding yourself
 
 Every `NEEDS-INPUT.md` ends with a **Raise a finding** block. Fill it in and resume, and your finding enters the loop like a reviewer's:
