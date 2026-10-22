@@ -46,6 +46,16 @@ export interface FooterProps {
   onResume: (runId: string, dir: string, raise?: Raise) => void;
   /** Take a finished plan-only run into implementation (#223). See `implementArgv`. */
   onImplement: (runId: string, dir: string) => void;
+  /**
+   * Open the runs list for this run's repository, or the window's when the run
+   * names none (#396).
+   *
+   * The way out of a lost run, and deliberately not a resume. Reopening it has
+   * to take a lock a dead process left behind, and `1b` is the one place that
+   * may overrule a lock, with a confirmation that names it - two places able to
+   * force is one too many. So this footer takes you there rather than forcing.
+   */
+  onShowRuns: (repo: string | null) => void;
   /** The caps in force, so a raise can be relative. Null until the config is read. */
   caps: Caps | null;
   /**
@@ -196,6 +206,7 @@ export function Footer({
   onStop,
   onResume,
   onImplement,
+  onShowRuns,
   caps,
   gates,
   order,
@@ -228,7 +239,15 @@ export function Footer({
           <span className={DETAIL}>the process running this run has gone.</span>
         </div>
         <div className={WHY}>{run.lost}</div>
-        <div className={NOTE}>Nothing is running it now. Open it from the runs list to resume.</div>
+        <div className={NOTE}>Nothing is running it now. Reopen it from the runs list to resume.</div>
+        {/* The list rather than a resume here: see `onShowRuns`. Until this, the
+            sentence above was the only route and it named a screen nothing on
+            it opened - the list is reached otherwise only from the palette. */}
+        <div className={ACTIONS}>
+          <Button variant="secondary" size="sm" onClick={() => onShowRuns(run.identity?.repo ?? null)}>
+            Open the runs list
+          </Button>
+        </div>
       </div>
     );
   }

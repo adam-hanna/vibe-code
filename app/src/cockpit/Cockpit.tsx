@@ -2094,6 +2094,17 @@ export function Cockpit({
   const shutSheets = (): void => {
     if (SURFACE.overlayPanels) setPanels((p) => (p.sidebar || p.loop ? { ...p, sidebar: false, loop: false } : p));
   };
+  /**
+   * `1b` for one repository (#396): the lost footer's way to the one screen that
+   * may take a dead process's lock back. The run's own repository where it names
+   * one, because the list is per repository and a lost run in another project
+   * would otherwise open a list it is not in.
+   */
+  const showRuns = (repo: string | null): void => {
+    if (repo !== null) rememberRepo(repo);
+    setTab('runs');
+    shutSheets();
+  };
   // The composer is a dialog over everything, and what it starts lands in the
   // main pane, so on a phone opening it puts any sheet away.
   useEffect(() => {
@@ -3234,6 +3245,7 @@ export function Cockpit({
                 shutSheets();
                 return implement(runId, dir, columnRun.identity?.task ?? null);
               }}
+              onShowRuns={showRuns}
               caps={caps}
               gates={gates}
               order={order}
@@ -3272,6 +3284,10 @@ export function Cockpit({
                   onStop={() => setConfirmStop(true)}
                   onResume={(runId, dir, raise) => resume(runId, dir, raise, false, run.identity?.task ?? null)}
                   onImplement={(runId, dir) => implement(runId, dir, run.identity?.task ?? null)}
+                  onShowRuns={(repo) => {
+                    setGateOpen(false);
+                    showRuns(repo);
+                  }}
                   caps={caps}
                   gates={gates}
                   order={order}

@@ -457,6 +457,31 @@ they are waiting on. Four things in it are worth carrying:
   `exit` travels beside the steps rather than among them, because a `result` is
   not narration — it is the frame that answers a request — and a status this
   build does not recognise reports **null** rather than a guessed zero.
+
+  **A record with no ending is the exception, and the lock is what answers it** (#396). A
+  run whose status is still mid-loop (`planning`, `implementing`, `reviewing`) has no
+  exit, so nothing closed the turn it was on. A machine shut down under a run held at
+  `implemented`, which is not recorded, since `gate_waiting` never is. After the
+  relaunch the opened run drew its implement turn running, with "code" blinking, Pause
+  and Stop that did nothing, and no Resume. The archive listing already asked the lock
+  and called the run interrupted. The run's own view did not ask, so the two
+  disagreed.
+
+  So `readRunReplay` asks `livenessOf`, and the replay carries `liveness` and `lost`.
+  `lost` is the core's sentence: the status the record stops at, then
+  `describeLiveness`. It is set only when there is no exit **and** the lock rules out
+  a live process (`interrupted` or `not-running`). An `unknown` lock is left alone,
+  for `src/lock.ts`'s reason: a lock that cannot be read, or one held on another
+  machine, cannot rule out a live process. `openedEnding` in `model.ts` applies
+  whichever ending there is. An exit is applied as a `result`. A `lost` sentence is
+  applied through the same `hostLost` a live run's dead host goes through, so the
+  turn ends and the footer says the process has gone.
+
+  **The lost footer opens the runs list rather than resuming.** Reopening the run means
+  taking back a lock a dead process left behind, and `1b` is the one place that may
+  overrule a lock. So the footer's button goes there, in the run's own repository.
+  It does not add a second place able to force. Before this, the footer's sentence
+  named a screen that only the palette could open.
 - **A conversation belongs to the run it is about, and *about* includes the run
   it proposed.** Adoption was allowed only out of the project bucket —
   `chatKey(dir, null)` — which is right about where a pre-run conversation lives

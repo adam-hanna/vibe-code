@@ -2539,6 +2539,31 @@ export function foldReplay(
 }
 
 /**
+ * An opened run's ending, applied to its fold (#223, #396).
+ *
+ * **Two endings, and the record holds at most one of them.** An `exit` is the
+ * run's own, applied as the `result` frame it is: it closes whatever turn was
+ * open and sets `completed`, which is what makes the footer draw this run's
+ * ending rather than nothing.
+ *
+ * A run whose record stops mid-loop has no exit, and that alone used to leave
+ * its last turn open for good - a run whose machine shut down under it came
+ * back pulsing on "code", with Pause and Stop that did nothing and no Resume.
+ * `lost` is the core's answer to whether anything still runs it, read off the
+ * lock, and it is applied through the same `hostLost` a live run's dead host
+ * goes through: the turn ends, and the footer says the process has gone.
+ * Neither means the run is still going, and it is drawn exactly as it was.
+ *
+ * `at` is the replay's last step, the same instant `forResume` closes a seeded
+ * turn at.
+ */
+export function openedEnding(run: Run, ending: { exit: number | null; lost: string | null }, at: number): Run {
+  if (ending.exit !== null) return reduce(run, { type: 'result', id: 0, exit: ending.exit }, at);
+  if (ending.lost !== null) return hostLost(run, at, ending.lost);
+  return run;
+}
+
+/**
  * A replayed run, made ready to be carried on with (#223).
  *
  * **The ending has to go, and leaving it on was a real defect.** `foldReplay`

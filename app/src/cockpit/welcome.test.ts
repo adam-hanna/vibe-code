@@ -9,7 +9,7 @@ function footer(run: Run, over: { pausing?: boolean; stopping?: boolean } = {}):
   return renderToStaticMarkup(createElement(Footer, {
     run, busy: false, pausing: over.pausing ?? false, stopping: over.stopping ?? false, caps: null, gates: null, order: [],
     onDecide: () => {}, onPause: () => {}, onUnpause: () => {}, onStop: () => {},
-    onResume: () => {}, onImplement: () => {},
+    onResume: () => {}, onImplement: () => {}, onShowRuns: () => {},
   }));
 }
 

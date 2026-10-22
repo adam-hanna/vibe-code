@@ -2,12 +2,14 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { tmpdir } from 'node:os';
+import { hostname, tmpdir } from 'node:os';
 import path from 'node:path';
 import { readRunReplay } from '@src/run.js';
 import { replayRun, seatOf } from '@src/replay.js';
 import type { ReplaySources } from '@src/replay.js';
 import { decode } from '@src/protocol.js';
+import { LOCK_FILE } from '@src/lock.js';
+import { absentPid } from './helpers/pids.js';
 import type { RunState } from '@src/types.js';
 
 /**
@@ -523,6 +525,83 @@ test('a run whose artifacts are missing still replays its turns', () => {
     replay.steps.find((s) => s.narration.id === 'findings_reported'),
     undefined,
   );
+});
+
+// ---- a run with no ending, and whether anything still runs it (#396) ----------
+
+/** A lock naming `pid` on this host, which is what makes it probeable. */
+function lockRun(repo: string, pid: number, host = hostname(), id = '20260101-000000-a-run'): void {
+  writeFileSync(
+    path.join(repo, '.vibe', 'runs', id, LOCK_FILE),
+    JSON.stringify({ pid, host, startedAt: iso(0), id, token: 'run-replay-test' }),
+    'utf8',
+  );
+}
+
+/**
+ * The run #396 was filed about: held at `implemented` when the machine shut
+ * down, so its record stops at `reviewing` with the implement turn as the last
+ * charge, and the pid in its lock is dead after the reboot.
+ */
+function interruptedAtReview(): string {
+  return repoWith({
+    status: 'reviewing',
+    events: [{ at: iso(10_000), type: 'claude_turn', label: 'implement', tokens: 1, costUsd: 0 }],
+  });
+}
+
+test('a run with no ending whose lock names a dead pid is replayed as lost', () => {
+  const repo = interruptedAtReview();
+  lockRun(repo, absentPid());
+  const replay = readRunReplay(repo, '20260101-000000-a-run');
+  assert.equal(replay.liveness, 'interrupted');
+  // No exit is invented: the run never returned one, and a lost host is not an
+  // exit code of the run's.
+  assert.equal(replay.exit, null);
+  assert.ok(replay.lost !== null, 'a dead holder was not reported');
+  // The status the record stops at, and the lock's own sentence, which is what
+  // `vibe list` would say about it.
+  assert.match(replay.lost, /"reviewing"/);
+  assert.match(replay.lost, /no longer running/);
+});
+
+test('a run with no ending and no lock is replayed as lost', () => {
+  const repo = interruptedAtReview();
+  const replay = readRunReplay(repo, '20260101-000000-a-run');
+  assert.equal(replay.liveness, 'not-running');
+  assert.equal(replay.exit, null);
+  assert.ok(replay.lost !== null);
+  assert.match(replay.lost, /no process claims this run/);
+});
+
+test('a run with no ending that a live process holds is left running', () => {
+  // This process, which is alive by construction - no probe to race. The
+  // window keeps drawing its turn open, because it is.
+  const repo = interruptedAtReview();
+  lockRun(repo, process.pid);
+  const replay = readRunReplay(repo, '20260101-000000-a-run');
+  assert.equal(replay.liveness, 'running');
+  assert.equal(replay.lost, null);
+});
+
+test('a run with no ending whose lock cannot be probed is not called lost', () => {
+  // `unknown`: another machine's lock. It cannot rule out a live process, so
+  // saying the process has gone is the claim `src/lock.ts` refuses to make.
+  const repo = interruptedAtReview();
+  lockRun(repo, absentPid(), `${hostname()}-elsewhere`);
+  const replay = readRunReplay(repo, '20260101-000000-a-run');
+  assert.equal(replay.liveness, 'unknown');
+  assert.equal(replay.lost, null);
+});
+
+test('a run that ended is never called lost, whatever its lock says', () => {
+  // Its exit is the ending. A dead pid beside a finished run is what every run
+  // killed after it decided to stop leaves, and is no news about the run.
+  const repo = repoWith({ status: 'done' });
+  lockRun(repo, absentPid());
+  const replay = readRunReplay(repo, '20260101-000000-a-run');
+  assert.equal(replay.exit, 0);
+  assert.equal(replay.lost, null);
 });
 
 test('a replay request with no dir or no runId is refused by name', () => {

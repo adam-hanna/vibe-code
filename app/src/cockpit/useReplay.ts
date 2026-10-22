@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import * as host from '../host';
-import { foldReplay, reduce } from './model';
+import { foldReplay, openedEnding } from './model';
 import type { Run } from './model';
 
 /**
@@ -55,16 +55,11 @@ export function useReplay(dir: string, runId: string | null, revision = 0): Repl
         if (cancelled) return;
         // The same fold a resume seeds its column with, so "what did this run
         // look like" has one answer and not two.
-        let built = foldReplay(got.steps);
-        // The ending, applied as the frame it is. A `result` closes whatever
-        // turn was open and sets `completed`, which is what makes the footer
-        // draw this run's ending rather than nothing — and it is why nothing is
-        // left running when the fold finishes.
-        if (got.exit !== null) {
-          const last = got.steps[got.steps.length - 1]?.at ?? Date.now();
-          built = reduce(built, { type: 'result', id: 0, exit: got.exit }, last);
-        }
-        setRun(built);
+        // The ending: the run's exit, or the core's word that nothing runs it
+        // any more (#396). Either closes whatever turn was open, which is why
+        // nothing is left running when the fold finishes - unless something is.
+        const last = got.steps[got.steps.length - 1]?.at ?? Date.now();
+        setRun(openedEnding(foldReplay(got.steps), got, last));
         setFailure(null);
       })
       .catch((err: unknown) => {
