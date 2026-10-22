@@ -158,18 +158,37 @@ jobs:
           # file, which is uploaded under its own name and under the stable one.
           # `updater`: the update bundles and signatures, uploaded only when the
           # signing key is set.
+          # `out`: where under app/src-tauri the bundles land. A `--target`
+          # build writes under target/<triple>/ instead of target/.
+          # `build_args`, `sidecar_target`, `rust_targets`: the macOS entry's
+          # universal build; empty elsewhere.
           - os: windows-latest
+            out: target/release
             assets: >-
               bundle/msi/*.msi=Vibe-windows-x64.msi
               bundle/nsis/*-setup.exe=Vibe-windows-x64-setup.exe
             updater: bundle/msi/*.msi.sig bundle/nsis/*-setup.exe.sig
-          # Apple Silicon only. The .app is the bundle the dmg wraps.
+          # One universal bundle, Apple Silicon and Intel (#325), built on arm64
+          # so it does not depend on GitHub's retiring Intel runners. The .app is
+          # the bundle the dmg wraps. stage-sidecar lipos the official arm64 and
+          # x64 Node of the version setup-node installed into one `node`.
+          # The dmg goes up under two stable names: the universal one the pages
+          # link, and the arm64 one every page linked before this, so a link
+          # already out there (the README of each published npm version among
+          # them) still downloads a Mac build. The arm64 name is the universal
+          # file, not a thin one.
           - os: macos-14
+            out: target/universal-apple-darwin/release
+            build_args: --target universal-apple-darwin
+            sidecar_target: universal-apple-darwin
+            rust_targets: aarch64-apple-darwin,x86_64-apple-darwin
             assets: >-
+              bundle/dmg/*.dmg=Vibe-macos-universal.dmg
               bundle/dmg/*.dmg=Vibe-macos-arm64.dmg
             updater: bundle/macos/*.app.tar.gz bundle/macos/*.app.tar.gz.sig
           # 22.04 for its older glibc.
           - os: ubuntu-22.04
+            out: target/release
             assets: >-
               bundle/deb/*.deb=Vibe-linux-amd64.deb
               bundle/appimage/*.AppImage=Vibe-linux-x86_64.AppImage
@@ -186,7 +205,11 @@ jobs:
           cache-dependency-path: |
             package-lock.json
             app/package-lock.json
+      # Both darwin targets on macOS: the CLI builds a universal app as one
+      # cargo build per architecture and lipos them.
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_targets || '' }}
       - if: runner.os == 'Linux'
         uses: ./.github/actions/linux-deps
       - run: npm ci && npm run build
@@ -269,40 +292,64 @@ jobs:
           echo "UPDATER=1" >> "$GITHUB_ENV"
           echo "TAURI_ARGS=${TAURI_ARGS:-} --config ${conf//\\//}" >> "$GITHUB_ENV"
 
-      # beforeBuildCommand runs the webview build and stage:sidecar.
+      # beforeBuildCommand runs the webview build and stage:sidecar, which
+      # inherits this environment: VIBE_SIDECAR_TARGET is how it knows to stage
+      # a universal node rather than copy this runner's arm64 one.
       - name: Build the bundles
         shell: bash
         working-directory: app
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: npm run app:build -- ${TAURI_ARGS:-}
+          VIBE_SIDECAR_TARGET: ${{ matrix.sidecar_target || '' }}
+          BUILD_ARGS: ${{ matrix.build_args || '' }}
+        run: npm run app:build -- ${BUILD_ARGS:-} ${TAURI_ARGS:-}
 
       # `node --version` runs no JavaScript and passed on the v1.6.0 bundle whose
       # node could not run any, so this starts the real host from the signed
       # .app and waits for its `ready` frame. An empty line makes it answer and
       # stdin's close makes it leave.
+      #
+      # Twice, once per architecture (#325): natively as arm64, and as x86_64
+      # under Rosetta, which is the slice an Intel Mac runs. Nobody here has an
+      # Intel Mac, so Rosetta is the closest this gets; it proves the x64 slice
+      # is there, signed with allow-jit and able to run the host. Every binary
+      # in Contents/MacOS - the app and node - must hold both slices: a thin
+      # one would start on one kind of Mac and not the other.
       - name: Start the host from the macOS bundle
         if: runner.os == 'macOS'
         # A host that hangs instead of dying would otherwise hold the job until
-        # GitHub's six-hour limit. It says ready in well under a second.
-        timeout-minutes: 3
+        # GitHub's six-hour limit. It says ready in well under a second; the
+        # rest is room for installing Rosetta on an image that lacks it.
+        timeout-minutes: 6
         shell: bash
-        working-directory: app/src-tauri/target/release/bundle/macos
+        working-directory: app/src-tauri/${{ matrix.out }}/bundle/macos
         run: |
           set -euo pipefail
           apps=(*.app)
           contents="${apps[0]}/Contents"
+          for bin in "$contents/MacOS/"*; do
+            archs=" $(lipo -archs "$bin") "
+            echo "$bin: $archs"
+            case "$archs" in *" arm64 "*) ;; *) echo "::error::$bin has no arm64 slice"; exit 1 ;; esac
+            case "$archs" in *" x86_64 "*) ;; *) echo "::error::$bin has no x86_64 slice"; exit 1 ;; esac
+          done
           codesign -d --entitlements - "$contents/MacOS/node"
-          out=$(echo '' | "$contents/MacOS/node" "$contents/Resources/host/dist/src/hostmain.js" 2>&1) || {
-            echo "::error::The bundled node exited with $? before the host said ready: $out"
-            exit 1
-          }
-          echo "$out"
-          grep -q '"type":"ready"' <<< "$out" || {
-            echo "::error::The host in the bundle never said ready."
-            exit 1
-          }
+          if ! arch -x86_64 /usr/bin/true 2>/dev/null; then
+            echo "Rosetta is not installed on this runner; installing it to run the x86_64 slice."
+            sudo softwareupdate --install-rosetta --agree-to-license
+          fi
+          for a in arm64 x86_64; do
+            out=$(echo '' | arch "-$a" "$contents/MacOS/node" "$contents/Resources/host/dist/src/hostmain.js" 2>&1) || {
+              echo "::error::The bundled node ($a) exited with $? before the host said ready: $out"
+              exit 1
+            }
+            echo "$a: $out"
+            grep -q '"type":"ready"' <<< "$out" || {
+              echo "::error::The host in the bundle never said ready under $a."
+              exit 1
+            }
+          done
 
       # linuxdeploy bundles the build machine's libwayland, and on a distro
       # with a newer Mesa WebKit cannot create an EGL display against it: the
@@ -342,10 +389,11 @@ jobs:
       - name: Collect the release files
         id: assets
         shell: bash
-        working-directory: app/src-tauri/target/release
+        working-directory: app/src-tauri/${{ matrix.out }}
         env:
           ASSETS: ${{ matrix.assets }}
           UPDATER_FILES: ${{ matrix.updater }}
+          OUT: ${{ matrix.out }}
         run: |
           set -euo pipefail
           shopt -s nullglob
@@ -365,7 +413,15 @@ jobs:
               exit 1
             fi
             cp "${matched[0]}" "$stable/$name"
-            files+=("${matched[0]}" "$stable/$name")
+            # One installer may have two stable names (the macOS dmg); its
+            # versioned file still goes up once. The `+` form, because bash 3.2
+            # calls an empty array unbound under `set -u`.
+            dup=0
+            for f in ${files[@]+"${files[@]}"}; do
+              if [ "$f" = "${matched[0]}" ]; then dup=1; fi
+            done
+            if [ "$dup" = 0 ]; then files+=("${matched[0]}"); fi
+            files+=("$stable/$name")
           done
           if [ "${UPDATER:-}" = 1 ]; then
             for glob in "${updater[@]}"; do
@@ -385,7 +441,7 @@ jobs:
             for f in "${files[@]}"; do
               case "$f" in
                 /*|[A-Za-z]:*) p="$f" ;;
-                *) p="app/src-tauri/target/release/$f" ;;
+                *) p="app/src-tauri/$OUT/$f" ;;
               esac
               echo "${p//\\//}"
             done
@@ -645,7 +701,10 @@ jobs:
             asset=$(basename "$f" .sig)
             case "$asset" in
               *.AppImage) add linux-x86_64 "$asset" ;;
-              *.app.tar.gz) add darwin-aarch64 "$asset" ;;
+              # The universal bundle (#325), under both keys: the updater looks
+              # up `darwin-<arch of the running slice>`, so an Apple Silicon
+              # install finds the key it always has, and an Intel one finds its own.
+              *.app.tar.gz) add darwin-aarch64 "$asset"; add darwin-x86_64 "$asset" ;;
               *.msi) add windows-x86_64-msi "$asset" ;;
               *-setup.exe) add windows-x86_64-nsis "$asset"; add windows-x86_64 "$asset" ;;
               *) echo "::warning::$asset.sig matches no updater platform; left out of latest.json." ;;
