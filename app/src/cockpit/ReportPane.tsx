@@ -6,7 +6,7 @@ import { cn } from '@/lib/utils';
 import { Counts } from './Counts';
 import { Caret, Section } from './Disclosure';
 import { ballotLine, foundByLine, ofKind, outcomeFor, readDispositions, readReport, votesLine } from './artifacts';
-import { SEVERITIES } from './model';
+import { SEVERITIES, gateSentence } from './model';
 import { DOCUMENT, EMPTY, FILE, HEAD, LABEL, NOTE, PANE } from './pane';
 import { useArtifact, useArtifacts, noText } from './useArtifacts';
 import { sizeOf } from './PlansPane';
@@ -323,6 +323,38 @@ function Finding({
   );
 }
 
+/**
+ * A round's counts and what the gate made of them, at the head of its report.
+ *
+ * The loop's own sentence where it blocked, never one composed from the counts.
+ * Where no gate decision reached this window - no census at all, which is every
+ * round of a run it joined late, or a census without a `pass`, which is every
+ * replayed one (#437) - the report's own verdict stands in, labelled as the
+ * judge's word and not the gate's. It was *"The gate blocked this round."*,
+ * read off a missing field, over a review the loop called clean.
+ */
+export function GateHead({
+  census,
+  verdict,
+}: {
+  census: Census | null;
+  verdict: string | null;
+}) {
+  const sentence = census === null ? null : gateSentence(census);
+  return (
+    <>
+      {census !== null && <Counts counts={census.counts} tolerance={census.tolerance} compact />}
+      {sentence !== null && <p className="m-0 text-body text-primary">{sentence}</p>}
+      {sentence === null && verdict !== null && (
+        <p className="m-0 text-body text-primary">
+          <Badge>{verdict}</Badge> the judge’s own verdict. No gate decision was
+          narrated to this window for this round.
+        </p>
+      )}
+    </>
+  );
+}
+
 /** The round's report, once its section is open. */
 function ReportBody({
   dir,
@@ -395,25 +427,7 @@ function ReportBody({
           the gate decided on; a tally of the list below would be this pane's
           arithmetic wearing the gate's clothes. The loop's own sentence where it
           blocked, never one composed from the counts. */}
-      {census !== null && (
-        <>
-          <Counts counts={census.counts} tolerance={census.tolerance} compact />
-          <p className="m-0 text-body text-primary">
-            {census.pass
-              ? 'The gate passed.'
-              : (census.reason ?? 'The gate blocked this round.')}
-          </p>
-        </>
-      )}
-      {census === null && report.verdict !== null && (
-        // The report's own word, when no census was narrated for this round -
-        // which is every round of a run this window joined late. It is the
-        // judge's verdict and not the gate's decision, and it says which.
-        <p className="m-0 text-body text-primary">
-          <Badge>{report.verdict}</Badge> the judge’s own verdict. No gate decision was
-          narrated to this window for this round.
-        </p>
-      )}
+      <GateHead census={census} verdict={report.verdict} />
 
       {/* The summary is the paragraph a person reads before any individual
           finding, and no frame has ever carried it. */}

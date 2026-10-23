@@ -3,7 +3,7 @@ import { Badge } from '@/ui/badge';
 import { cn } from '@/lib/utils';
 import { Counts } from '../cockpit/Counts';
 import { elapsed, work as describeWork } from '../cockpit/format';
-import { SEVERITIES } from '../cockpit/model';
+import { SEVERITIES, gateSentence } from '../cockpit/model';
 import { STAGE_TAB } from '../cockpit/rail';
 import { phaseRound, roundTitle } from '../cockpit/rounds';
 import type { Severity } from '../design';
@@ -105,6 +105,7 @@ export function RoundCard({
 }) {
   const open = card.endedAt === null;
   const counts = card.census?.counts ?? null;
+  const gate = card.census === null ? null : gateSentence(card.census);
   const go = onOpen === undefined ? null : () => { onOpen(PANE[card.cycle], card.round); };
 
   return (
@@ -238,12 +239,9 @@ export function RoundCard({
           />
           {/* The loop's own sentence where it blocked, because `gate()` names
               the exact arithmetic that stopped the round. Never one composed
-              here from the counts. */}
-          <div className="text-body-sm text-primary">
-            {card.census.pass
-              ? 'The gate passed.'
-              : (card.census.reason ?? 'The gate blocked this round.')}
-          </div>
+              here from the counts, and none where the census did not say what
+              the gate decided - a replayed one carries the counts alone (#437). */}
+          {gate !== null && <div className="text-body-sm text-primary">{gate}</div>}
           {card.census.findings.slice(0, 3).map((f) => (
             <div className="flex items-baseline gap-2" key={f.id}>
               <SeverityChip severity={weight(f.severity)} label={f.severity} />

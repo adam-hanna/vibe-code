@@ -476,6 +476,12 @@ they are waiting on. Four things in it are worth carrying:
     severity moved afterwards (#142) is deliberately **not** applied: the round's
     report is the record of what the judge produced, and rewriting it here would
     make the column disagree with the artifact the pane beside it shows.
+    **The counts are all a replayed census carries**: the artifact holds the
+    report and not the gate's decision, so there is no `tolerance`, `pass` or
+    `reason`. The fold keeps those **null**, and the round card and the Review
+    pane then draw no tolerance badge and no gate sentence (`gateSentence`). It
+    read them as `0` and `false` once, and an opened run's clean review said
+    *tolerance P1≤0 · The gate blocked this round.* (#437).
 
   `exit` travels beside the steps rather than among them, because a `result` is
   not narration — it is the frame that answers a request — and a status this
