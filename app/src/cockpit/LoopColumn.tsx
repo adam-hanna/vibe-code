@@ -14,7 +14,7 @@ import type { RailState, VerifyRow } from './rail';
 import { RunningRow } from './RunningRow';
 import type { ArchiveView } from './model';
 import type { KeyboardEvent } from 'react';
-import { runningRow } from './model';
+import { runningRow, startedLine } from './model';
 import type { Census, CycleKind, PhaseGroup, Preflight, QuestionRound, ResumedFrom, Run, Turn } from './model';
 
 /**
@@ -699,6 +699,7 @@ function Identity({ run }: { run: Run }) {
   const identity = run.identity;
   if (identity === null) return null;
   const branch = run.branch;
+  const started = startedLine(identity);
   return (
     <header className="flex flex-none flex-col gap-1 rounded-md border border-rule-card bg-card p-4">
       {/* Clamped, and the whole of it on the title.
@@ -729,6 +730,10 @@ function Identity({ run }: { run: Run }) {
           identity.repo
         )}
       </div>
+      {/* Only when a phone asked (#365). Not an absent line: a run started here
+          or from a terminal has nothing to attribute, and a dashed "nobody
+          said" under every run would be noise about the common case. */}
+      {started !== null && <div className="text-body-sm text-tertiary">{started}</div>}
     </header>
   );
 }
@@ -1110,6 +1115,7 @@ function RunRail({
   const status = nowStatus(run);
   const verify = verifyRow(run);
   const statusState = status.tone;
+  const started = startedLine(run.identity);
   const statusTime = activity !== null
     ? elapsed(activity.elapsedMs)
     : gateRunning !== null
@@ -1122,6 +1128,16 @@ function RunRail({
   // be allowed to shrink, applied to this one).
   return (
     <section className="flex min-w-0 flex-none flex-col gap-2.5 bg-column px-3 pb-3.5" aria-label="run status">
+      {/* Who asked for this run, when it was a phone (#365). The rail is what
+          the cockpit draws of a run's identity - the full column's header is
+          not on screen there - so the line goes above the `now` card, where it
+          stays for as long as the run is open: it is a fact about the run, not
+          a notice about a moment. */}
+      {started !== null && (
+        <p className="m-0 px-1 text-body-sm text-tertiary">
+          {started}
+        </p>
+      )}
       {/* The `now` card: what is happening, in one sentence, with a state bar
           down its left edge in the state's colour. */}
       <div

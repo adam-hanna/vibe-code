@@ -735,6 +735,8 @@ async function startRun(
       resumed: false,
       // The agent CLIs this run starts under (#298), null when not detected.
       cliVersions,
+      // Who asked for this invoke, only when it said (#365).
+      ...originData(origin),
     },
   });
   log.info(`Repo:    ${targetDir}`);
@@ -1026,6 +1028,7 @@ async function resumeRun(
           resumed: true,
           from: resumedFrom(state),
           cliVersions,
+          ...originData(origin),
         },
       });
       return execute(state, cfg, true, flags.skipProbe === true, REAL_GATE, loop, handle, origin);
@@ -1087,9 +1090,33 @@ async function resumeRun(
       resumed: true,
       from: resumedFrom(state),
       cliVersions,
+      ...originData(origin),
     },
   });
   return execute(state, cfg, true, flags.skipProbe === true, REAL_GATE, loop, handle, origin);
+}
+
+/**
+ * `run_started`'s `origin`, or nothing at all (#365).
+ *
+ * `gate_released`'s rule: the field is there when the invoke carried a readable
+ * origin and absent when it did not, never `null` and never a placeholder. A
+ * window started the run, a terminal did or the origin could not be read - the
+ * three are indistinguishable here (`readOrigin`), so naming any of them would
+ * be inventing it.
+ *
+ * **Said, not recorded a second time.** The durable fact is `run_origin`
+ * (#354), one row per invoke written by `execute`; this is the same label on
+ * the frame a window builds a run's identity from, so it can say *Started from
+ * <phone>* without joining narration to `state.events`. A second row would be
+ * two records of one fact that a later reader has to reconcile.
+ *
+ * A spread rather than a field so every `run_started` site stays one object
+ * literal with no braces inside it - `contract.test.ts` reads the sites as
+ * source.
+ */
+function originData(origin: string | null): { origin?: string } {
+  return origin === null ? {} : { origin };
 }
 
 /**

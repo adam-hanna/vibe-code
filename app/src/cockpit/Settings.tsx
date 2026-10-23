@@ -13,7 +13,7 @@ import { STEPS, THEMES, type Theme } from './appearance';
 import { pickDirectory } from './pick';
 import { projectName } from './projects';
 import { capOf } from './hosts';
-import { showsConfig } from '../changed';
+import { configWriteFor } from '../changed';
 import { settingsRead } from './settingsdoor';
 import { reviewMdLine } from './reviewmd';
 import { DRAFTS_KEY, draftsFor, readDrafts, removeDraft, saveDraft } from './drafts';
@@ -1466,6 +1466,18 @@ export function Settings({
   useEffect(() => loadCliModels(), []);
   const [failure, setFailure] = useState<string | null>(null);
   const [saved, setSaved] = useState<string | null>(null);
+  /**
+   * The phone that last saved the file on screen, or null (#365).
+   *
+   * **Kept until something supersedes it, never on a timer.** A save from a
+   * phone is made because nobody is at the desktop, so a note that faded after
+   * a few seconds would be gone before anyone came back to read it. It goes
+   * when the next save to this file lands - this window's, which says its own
+   * line, or another client's, which names that phone or nobody - and when the
+   * screen is left or pointed at another file, the lifetime `saved` has.
+   */
+  const [savedFrom, setSavedFrom] = useState<string | null>(null);
+  useEffect(() => setSavedFrom(null), [scope, dir]);
   const [busy, setBusy] = useState(false);
   const [refusals, setRefusals] = useState(0);
   /** Whether the prompts section is open, which is what makes its read lazy. */
@@ -1532,7 +1544,13 @@ export function Settings({
     let live = true;
     void host
       .onChanged((c) => {
-        if (c.what === 'config' && showsConfig(c.key, scope, dir)) load();
+        const wrote = configWriteFor(c, scope, dir);
+        if (wrote === null) return;
+        // This window's own "saved to" line described the file before this
+        // write, so it goes; the new line says who wrote it, when a phone did.
+        setSaved(null);
+        setSavedFrom(wrote.phone);
+        load();
       })
       .then((stop) => {
         if (live) off = stop;
@@ -1551,6 +1569,7 @@ export function Settings({
       if (door.kind === 'none') return;
       setBusy(true);
       setSaved(null);
+      setSavedFrom(null);
       void host
         .config(door.dir, patch, to)
         .then((next) => {
@@ -1770,6 +1789,10 @@ export function Settings({
       {saved !== null && failure === null && (
         <p className={S.note}>saved to {saved}, and reread from it.</p>
       )}
+      {/* A phone's save, said where this window's own is said (#365): the same
+          place, the same weight, because it is the same fact with a different
+          author. */}
+      {savedFrom !== null && <p className={S.note}>saved from {savedFrom}, and reread from the file.</p>}
 
       {/* **Each kind of setting in the one view it belongs to** (#223). This
           machine's — how the window is drawn, how each vendor is reached, what
