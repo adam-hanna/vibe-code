@@ -1,0 +1,120 @@
+{
+  "run": "20261008-091212-issue-246-part-a-of-two-one-host-process",
+  "critiques": [
+    {
+      "file": "plan-critique-0.json",
+      "findings": [
+        {
+          "id": "invoke-correlation-id-shares-control-id-space",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        },
+        {
+          "id": "same-repo-scan-fails-open",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        },
+        {
+          "id": "same-repo-check-uses-directory-not-repository-identity",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        },
+        {
+          "id": "invoke-error-is-silently-dropped",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        },
+        {
+          "id": "run-host-pid-lifecycle-not-cleared",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        },
+        {
+          "id": "diagnostics-runs-stale-while-open",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        }
+      ]
+    },
+    {
+      "file": "plan-critique-1.json",
+      "findings": [
+        {
+          "id": "invoke-correlation-id-shares-control-id-space",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        },
+        {
+          "id": "run-host-app-data-inherited",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        },
+        {
+          "id": "run-host-loss-leaves-preflight-live",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        },
+        {
+          "id": "run-host-start-send-failure-leaks",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        }
+      ]
+    },
+    {
+      "file": "plan-critique-2.json",
+      "findings": [
+        {
+          "id": "diagnostics-runs-stale-while-open",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        },
+        {
+          "id": "launch-settled-ignores-host-loss",
+          "severity": "P2",
+          "defer": false,
+          "raisedBy": "critic"
+        }
+      ]
+    },
+    {
+      "file": "plan-critique-3.json",
+      "findings": [
+        {
+          "id": "run-host-start-send-failure-leaks",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        },
+        {
+          "id": "host-reap-removes-before-wait",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        }
+      ]
+    },
+    {
+      "file": "plan-critique-4.json",
+      "findings": [
+        {
+          "id": "close-grace-is-not-idempotent",
+          "severity": "P2",
+          "defer": false,
+          "raisedBy": "critic"
+        }
+      ]
+    }
+  ]
+}

@@ -15,7 +15,7 @@ src/protocol.ts      the frames those two processes agree on
 src/host.ts          what a host may be told at a boundary, and may answer
 src/gates.ts         which boundaries hold a run, what a hold costs, and the two that cannot
 src/orchestrator.ts  the loop: planPhase, reviewPhase, the guards, the prompt dispatch
-src/run.ts           run state, artifacts, checkpoints, convergence maths (assessConvergence et al)
+src/run.ts           run state, artifacts, checkpoints, convergence maths (assessConvergence, planStall et al)
 src/scorecard.ts     what the run archive says about the loop, and what it cannot
 src/fork.ts          `vibe fork`: preflight that only reads, then a commit phase that creates
 src/similarity.ts    the one similarity metric, its threshold, and the censuses behind it

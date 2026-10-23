@@ -1,0 +1,340 @@
+{
+  "run": "20261008-115205-gh-issue-246-b-issue-246-part-b-of-two-t",
+  "critiques": [
+    {
+      "file": "plan-critique-0.json",
+      "findings": [
+        {
+          "id": "nullable-run-label-metadata",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        },
+        {
+          "id": "resume-launch-metadata",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        },
+        {
+          "id": "ended-entry-bypasses-replay",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        },
+        {
+          "id": "quit-confirm-duplicate-keys",
+          "severity": "P2",
+          "defer": false,
+          "raisedBy": "critic"
+        },
+        {
+          "id": "sidebar-current-id-not-repository-scoped",
+          "severity": "P2",
+          "defer": false,
+          "raisedBy": "critic"
+        },
+        {
+          "id": "poisoned-host-lock-orphans-on-quit",
+          "severity": "P2",
+          "defer": false,
+          "raisedBy": "critic"
+        },
+        {
+          "id": "start-refusal-clears-before-success",
+          "severity": "P2",
+          "defer": false,
+          "raisedBy": "critic"
+        }
+      ]
+    },
+    {
+      "file": "plan-critique-1.json",
+      "findings": [
+        {
+          "id": "nullable-run-label-metadata",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        },
+        {
+          "id": "resume-launch-metadata",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        },
+        {
+          "id": "quit-event-lost-without-fallback",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        }
+      ]
+    },
+    {
+      "file": "plan-critique-2.json",
+      "findings": [
+        {
+          "id": "resume-launch-metadata",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        },
+        {
+          "id": "quit-pending-breaks-hostprocess-clone",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        },
+        {
+          "id": "pending-launch-state-is-singleton",
+          "severity": "P2",
+          "defer": false,
+          "raisedBy": "critic"
+        }
+      ]
+    },
+    {
+      "file": "plan-critique-3.json",
+      "findings": [
+        {
+          "id": "offscreen-held-chat-not-bound",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        }
+      ]
+    },
+    {
+      "file": "plan-critique-4.json",
+      "findings": [
+        {
+          "id": "fanout-excludes-onscreen-adopter",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        },
+        {
+          "id": "adoption-before-chatstore-ready",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        },
+        {
+          "id": "null-max-concurrent-disables-cap",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        }
+      ]
+    },
+    {
+      "file": "plan-critique-5.json",
+      "findings": [
+        {
+          "id": "fanout-counts-restores-as-adopters",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        }
+      ]
+    },
+    {
+      "file": "plan-critique-6.json",
+      "findings": [
+        {
+          "id": "historical-adoption-state-contaminates-new-launch",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        }
+      ]
+    },
+    {
+      "file": "plan-critique-7.json",
+      "findings": [
+        {
+          "id": "cleanup-helper-lacks-source-conversation",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        },
+        {
+          "id": "unknown-repository-adoption-never-resolves",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        }
+      ]
+    },
+    {
+      "file": "plan-critique-8.json",
+      "findings": [
+        {
+          "id": "skipped-adoption-reenters-pilot-pane",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        }
+      ]
+    },
+    {
+      "file": "plan-critique-9.json",
+      "findings": [
+        {
+          "id": "unknown-repository-skip-not-propagated",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        }
+      ]
+    },
+    {
+      "file": "plan-critique-10.json",
+      "findings": [
+        {
+          "id": "live-code-pane-uses-window-repo",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        }
+      ]
+    },
+    {
+      "file": "plan-critique-11.json",
+      "findings": [
+        {
+          "id": "pilot-command-uses-sidebar-repo",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        },
+        {
+          "id": "launch-without-service-connection-guard",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        }
+      ]
+    },
+    {
+      "file": "plan-critique-12.json",
+      "findings": [
+        {
+          "id": "pilot-command-drops-allowed-directory",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        },
+        {
+          "id": "invalid-cap-bypasses-first-launch",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        }
+      ]
+    },
+    {
+      "file": "plan-critique-13.json",
+      "findings": [
+        {
+          "id": "launch-without-service-connection-guard",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        }
+      ]
+    },
+    {
+      "file": "plan-critique-14.json",
+      "findings": [
+        {
+          "id": "prestart-draft-claim-delayed",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        },
+        {
+          "id": "prestart-live-state-not-synchronous",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        }
+      ]
+    },
+    {
+      "file": "plan-critique-15.json",
+      "findings": [
+        {
+          "id": "prestart-prunes-focused-run",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        },
+        {
+          "id": "run-started-id-not-bound-to-live-entry",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        }
+      ]
+    },
+    {
+      "file": "plan-critique-16.json",
+      "findings": [
+        {
+          "id": "prestart-resume-repoints-viewing",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        },
+        {
+          "id": "adoption-restore-race",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        }
+      ]
+    },
+    {
+      "file": "plan-critique-17.json",
+      "findings": [
+        {
+          "id": "spawned-host-is-invisible-before-promise",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        },
+        {
+          "id": "hosted-marks-lose-repository-scope",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        },
+        {
+          "id": "adoption-not-recoverable-after-relaunch",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        }
+      ]
+    },
+    {
+      "file": "plan-critique-18.json",
+      "findings": [
+        {
+          "id": "spawned-host-is-invisible-before-promise",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        },
+        {
+          "id": "sidebar-archive-refetches-on-live-frame",
+          "severity": "P2",
+          "defer": false,
+          "raisedBy": "critic"
+        }
+      ]
+    }
+  ]
+}
