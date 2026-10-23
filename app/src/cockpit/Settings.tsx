@@ -20,6 +20,7 @@ import { DRAFTS_KEY, draftsFor, readDrafts, removeDraft, saveDraft } from './dra
 import type { Draft } from './drafts';
 import type { KeyStatus } from '../pilot/keys';
 import type { ConfigFrame, PromptsFrame } from '../host';
+import { inForce, pilotPromptBlocks } from '../pilot/brief';
 import { memory, useMemoryRevision } from '../memory';
 import { CLI_DEFAULT, loadCliModels, optionsFor, useModels, whyNot } from './models';
 import { backToCommand, convert, gatesPatch, pastedEscapes, readGates, ready, toRow } from './gateform';
@@ -1023,7 +1024,7 @@ function PromptBlock({
   onSaveDraft,
   onRemoveDraft,
 }: {
-  block: PromptsFrame['blocks'][number];
+  block: PromptsFrame['blocks'][number] & { problem?: string | null };
   drafts: readonly Draft[];
   busy: boolean;
   /** Empty adopts the default, because that is what clearing the key means. */
@@ -1055,6 +1056,13 @@ function PromptBlock({
           <Badge>the default</Badge>
         )}
       </div>
+      {/* Said rather than swallowed (#420): a stored value that could not be
+          used is somebody believing they changed what an agent is told. */}
+      {block.problem !== undefined && block.problem !== null && (
+        <p className={S.note}>
+          <Badge variant="alarm">not used</Badge> {block.problem}
+        </p>
+      )}
 
       <textarea
         className={S.promptbox}
@@ -1679,6 +1687,7 @@ export function Settings({
     claude?: { model?: string };
     codex?: { model?: string };
     instructions?: { text?: string };
+    prompts?: unknown;
     review?: { finders?: unknown; verifiers?: unknown; quorum?: unknown; unconfirmedP0?: unknown };
   };
   const gates = effective.gates ?? {};
@@ -1714,6 +1723,39 @@ export function Settings({
     if (scope === 'project' && inFile(frame.globalRaw, section, key)) return null;
     return <Badge>{unset}</Badge>;
   };
+
+  /** One prompt block, core or pilot: both are adopted, cleared and saved alike (#420). */
+  const drawPromptBlock = (block: PromptsFrame['blocks'][number] & { problem?: string | null }): ReactNode => (
+    <PromptBlock
+      key={block.name}
+      block={block}
+      drafts={drafts}
+      busy={busy}
+      // Empty clears the key, which is what "use the default" means: a
+      // cleared key follows the product forward when the default is
+      // improved, where a copy of today's text pins this project to it.
+      onAdopt={(name, text) => {
+        save({ prompts: { [name]: text } });
+        // The section re-reads the defaults; what is in force arrives with the
+        // config read the save itself causes.
+        prompts.reload();
+      }}
+      onSaveDraft={(draft) =>
+        setDrafts((cur) => {
+          const next = saveDraft(cur, draft);
+          keep(DRAFTS_KEY, next);
+          return next;
+        })
+      }
+      onRemoveDraft={(name, which) =>
+        setDrafts((cur) => {
+          const next = removeDraft(cur, name, which);
+          keep(DRAFTS_KEY, next);
+          return next;
+        })
+      }
+    />
+  );
 
   return (
     <Refusals.Provider value={refusals}>
@@ -2921,7 +2963,7 @@ export function Settings({
           title="Prompts"
           meta={
             prompts.blocks.length > 0 ? (
-              <Badge>{prompts.blocks.length} blocks</Badge>
+              <Badge>{prompts.blocks.length + pilotPromptBlocks(null).length} blocks</Badge>
             ) : undefined
           }
         >
@@ -2933,37 +2975,35 @@ export function Settings({
           {prompts.failure === null && prompts.loading && prompts.blocks.length === 0 && (
             <p className={S.note}>asking the host what every turn is told…</p>
           )}
-          {prompts.blocks.map((block) => (
-            <PromptBlock
-              key={block.name}
-              block={block}
-              drafts={drafts}
-              busy={busy}
-              // Empty clears the key, which is what "use the default" means: a
-              // cleared key follows the product forward when the default is
-              // improved, where a copy of today's text pins this project to it.
-              onAdopt={(name, text) => {
-                save({ prompts: { [name]: text } });
-                // The section re-reads, because the blocks it is drawing are
-                // what the core will now render — and only the core knows that.
-                prompts.reload();
-              }}
-              onSaveDraft={(draft) =>
-                setDrafts((cur) => {
-                  const next = saveDraft(cur, draft);
-                  keep(DRAFTS_KEY, next);
-                  return next;
-                })
-              }
-              onRemoveDraft={(name, which) =>
-                setDrafts((cur) => {
-                  const next = removeDraft(cur, name, which);
-                  keep(DRAFTS_KEY, next);
-                  return next;
-                })
-              }
-            />
-          ))}
+          {/* What is in force is read off the settings this screen holds, not
+              off the host's answer (#420): the core reports its run-time latch,
+              and the service host that answers here never runs a loop, so its
+              latch is always empty and every block read as the default - the
+              box even re-seeded to the default after *use this*. The host still
+              owns the default text, which is what `fallback` is. */}
+          {prompts.blocks
+            .map((b) => ({ ...b, ...inForce(b.name, b.fallback, effective.prompts) }))
+            .map(drawPromptBlock)}
+          {/* **The pilot's own, under a heading of its own** (#420), so a person
+              can tell which agent reads which. Built into the app rather than
+              the core, because the pilot's prompt is built in this webview: the
+              texts come from `brief.ts`, the in-force state from the same
+              `prompts` table, and adopting writes the same kind of key. */}
+          <h4 className={S.h}>pilot</h4>
+          <p className={S.note}>
+            What the pilot in this window is told about itself and its job. The rest of its
+            prompt — the brief, the run as this window holds it, which tools it has and what
+            runs without asking — is assembled for every message and cannot be edited. A
+            project&apos;s branch-naming standard, or any rule about how a brief is written,
+            belongs in <code>pilot: intake</code>.
+          </p>
+          <p className={S.note}>
+            Stored the same way, as <code>prompts.&quot;pilot: intake&quot;</code> and so on in the
+            file this screen edits, and read by the next message the pilot is sent. An edited block
+            no longer follows the app&apos;s improvements to it; <em>use the default</em> clears it
+            and it does again.
+          </p>
+          {pilotPromptBlocks(effective.prompts).map(drawPromptBlock)}
         </Section>
       </section>
 

@@ -1077,6 +1077,23 @@ they are waiting on. Four things in it are worth carrying:
   not a fact about any run. Saving and adopting are separate controls for exactly that reason,
   and *use the default* **clears the key** rather than copying today's text into it — a cleared
   key follows the product forward when the default is improved.
+- **The pilot's blocks are in the same section, and in-force is read off the config** (#420).
+  `pilot: who`, `pilot: intake` and `pilot: how to read` are drawn under a *pilot* heading below
+  the core's blocks, by the same `PromptBlock`, so adopt, *use the default*, the saved-version
+  library and the "where it is stored" wording are one implementation, not two. Their defaults
+  come from `app/src/pilot/brief.ts` rather than from the host, because the pilot's prompt is
+  built in the webview and the core holds only their names; [pilot.md](pilot.md) has why each
+  block is or is not editable.
+
+  **What is in force is now taken from the config this screen read, for the core's blocks as
+  well**, and that fixes a defect rather than restyling one. The `prompts` frame reports
+  `promptBlocks()`, whose `text` and `overridden` are the core's run-time latch - and the host
+  that answers Settings is the service host, which never runs a loop (processes.md), so its latch
+  is always empty. Every block therefore read as *the default*, and after *use this* the reload
+  re-seeded the box with the default text, as though the adopt had been refused. `inForce` in
+  `brief.ts` resolves a block against `effective.prompts` with the host's `fallback`, the same
+  rule `block()` applies (blank is the default) plus the fail-closed half: a value that is not
+  text is not used, and the block says so with a *not used* badge.
 - **Standing instructions are the person's text, not a prompt block** (#273). Asked for as *"a
   way to give vibe instructions it can remember across runs. Kind of like a global agents.md."*
   `instructions.text` is its own config key, empty by default, settable in the global file or a

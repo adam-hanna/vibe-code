@@ -745,6 +745,12 @@ export function Cockpit({
   /** The person's standing instructions (#273), from the same read, for the pilot. */
   const [standing, setStanding] = useState<string | null>(null);
   /**
+   * The settings' `prompts` table, from the same read (#420): the pilot's
+   * edited blocks are in it. Null until read, which the prompt treats as every
+   * block's built-in rather than as an empty one.
+   */
+  const [pilotPrompts, setPilotPrompts] = useState<unknown>(null);
+  /**
    * Bumped by every save in Settings, so a change there reaches this read —
    * including the pilot's safe list, which an open conversation acts on.
    */
@@ -784,6 +790,7 @@ export function Cockpit({
           loop?: Partial<Caps>;
           gates?: Record<string, string>;
           instructions?: { text?: unknown };
+          prompts?: unknown;
         };
         if (cancelled) return;
         // The cap is the machine's and no run reads it, so it is read off the
@@ -793,6 +800,7 @@ export function Cockpit({
         setAccess(frame.pilot);
         const text = effective.instructions?.text;
         setStanding(typeof text === 'string' ? text : null);
+        setPilotPrompts(effective.prompts ?? null);
         if (effective.gates !== undefined) setGates(effective.gates);
         setOrder(frame.gateable);
         const loop = effective.loop;
@@ -3043,6 +3051,7 @@ export function Cockpit({
                       ask={askFor(brief, at)}
                       onAsked={() => setBrief(null)}
                       standing={standing}
+                      pilotPrompts={pilotPrompts}
                       onPending={visible ? setProposals : undefined}
                       limits={limits}
                       statuses={keyStatuses}

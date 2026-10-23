@@ -309,6 +309,14 @@ A failure stops the sequence, so the fixer gets one problem at a time. An unavai
 
 The block names are `respond with JSON`, `review breadth`, `fix breadth`, `simple solution` and `a deferred finding`. A blank value is ignored, so you get the default back. An unknown name is refused, so a typo cannot silently do nothing. A changed block is recorded in the run's configuration, so a run that used a different instruction says so. The desktop app's settings screen shows each block's default text.
 
+The desktop app's pilot has three blocks of its own in the same table: `pilot: who` (who it is and what it may propose), `pilot: intake` (how it takes a request apart before proposing a run) and `pilot: how to read` (how it reads the run block it is given). They follow the same rules: blank gives the built-in text back, an unknown name is refused, and a value that is not text is not used. No run's turns read them; the pilot reads them on its next message. What the pilot is told about the run, its tools, what runs without asking and the brief is built for every message and cannot be replaced. A team's branch-naming standard belongs in `pilot: intake`:
+
+```json
+{ "prompts": { "pilot: intake": "…the built-in text…\n\nBranches here are named feat/<issue>-<slug>." } }
+```
+
+An edited block replaces the built-in one whole, so it no longer picks up improvements a later release makes to it. Clearing it brings them back.
+
 ## `instructions`
 
 | Key | Default | Meaning |

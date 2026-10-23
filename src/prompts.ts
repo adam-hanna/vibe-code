@@ -1976,3 +1976,23 @@ export function promptBlocks(): readonly PromptBlock[] {
 export function promptBlockNames(): readonly string[] {
   return promptBlocks().map((b) => b.name);
 }
+
+/**
+ * The pilot's editable blocks, by name only (#420).
+ *
+ * The desktop pilot's own prompt is built in the webview (`app/src/pilot/
+ * brief.ts`), so its fixed prose - who it is, how it takes in a request, how
+ * it reads the run block - is edited in Settings -> Prompts beside these
+ * blocks and stored in the same `prompts` table, as `prompts."pilot: intake"`
+ * and so on. The core never renders them and does not hold their text: a copy
+ * here would be the core owning a fact about the pilot, going stale on the
+ * release that edits one. What the core does need is the **names**, because
+ * the validator refuses a name this build does not have, and a pilot block
+ * refused as a typo would be an edit nobody could make.
+ *
+ * Prefixed `pilot: ` so they cannot collide with a core block's name and so a
+ * config file says whose they are. Not in `promptBlocks()`: that answers what
+ * the loop's turns are told, and no turn of a run is told these.
+ * `tests/pilot-prompt-names.test.ts` keeps this list equal to the app's.
+ */
+export const PILOT_PROMPT_BLOCKS: readonly string[] = ['pilot: who', 'pilot: intake', 'pilot: how to read'];
