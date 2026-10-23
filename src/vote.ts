@@ -90,3 +90,37 @@ export function describeVotes(v: Votes): string[] {
     }),
   ];
 }
+
+/**
+ * The counts of a recorded vote, or null when they cannot be read (#436).
+ *
+ * `votes` rides through stored state unvalidated, so the end-of-run summary
+ * reads it here rather than trusting the type. Fail closed: a count that is not
+ * a whole number, counts that do not add up to `n`, or ballots that do not
+ * agree with the counts all make the record unreadable, and the summary says
+ * so instead of printing a number it would have had to choose between.
+ */
+export function readTally(
+  raw: unknown,
+): { n: number; quorum: number; real: number; notReal: number; cannotTell: number } | null {
+  if (typeof raw !== 'object' || raw === null) return null;
+  const v = raw as Record<string, unknown>;
+  const count = (key: string): number | null => {
+    const x = v[key];
+    return typeof x === 'number' && Number.isInteger(x) && x >= 0 ? x : null;
+  };
+  const n = count('n');
+  const quorum = count('quorum');
+  const real = count('real');
+  const notReal = count('notReal');
+  const cannotTell = count('cannotTell');
+  if (n === null || quorum === null || real === null || notReal === null || cannotTell === null) return null;
+  if (n === 0 || real + notReal + cannotTell !== n) return null;
+  const ballots = v['ballots'];
+  if (!Array.isArray(ballots) || ballots.length !== n) return null;
+  const counted = (value: VoteValue): number =>
+    ballots.filter((b: unknown) => typeof b === 'object' && b !== null && (b as Record<string, unknown>)['counted'] === value)
+      .length;
+  if (counted('real') !== real || counted('not-real') !== notReal || counted('cannot-tell') !== cannotTell) return null;
+  return { n, quorum, real, notReal, cannotTell };
+}

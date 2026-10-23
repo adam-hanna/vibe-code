@@ -39,7 +39,8 @@ import { mergeHumanAnswers, reconcileAssumed, reconcileQuestionRecords } from '@
 import { acceptMoves, acceptRaised, parseMoves, parseRaised, raisePhase } from '@src/raise.js';
 import type { RaiseProblem, RequestedMove, RequestedMoves } from '@src/raise.js';
 import { assertUsableRunId } from '@src/stored.js';
-import { chooseBase, Escalation, EXIT, orchestrate, writeEscalation } from '@src/orchestrator.js';
+import { chooseBase, Escalation, EXIT, orchestrate, voteMovedFollowUps, writeEscalation } from '@src/orchestrator.js';
+import { readTally } from '@src/vote.js';
 import type { ExitCode } from '@src/orchestrator.js';
 import {
   codexConversations,
@@ -2792,6 +2793,42 @@ function reportTestChanges(state: RunState): void {
 }
 
 /**
+ * Blocking findings the review vote did not confirm (#436), each by name.
+ *
+ * A finding a reviewer called blocking and the vote did not uphold stopped
+ * blocking and went to FOLLOW-UPS.md; the `Votes:` line counts them, and this
+ * names them, for `reportTestChanges`' reason: it is what a person should see
+ * before merging, and the exit code does not move for it. The list is the one
+ * FOLLOW-UPS.md holds (`voteMovedFollowUps`), and each tally is read from the
+ * finding's recorded votes - one that cannot be read says so rather than
+ * printing a count. Silent when nothing was moved by vote, which is every run
+ * with no verifiers and every run whose votes all confirmed.
+ *
+ * Exported for the reason `reportDeferred` is.
+ */
+export function reportUnconfirmedByVote(state: RunState): void {
+  const moved = voteMovedFollowUps(state);
+  if (moved.length === 0) return;
+  log.warn(
+    `${moved.length} blocking finding(s) the review vote did not confirm - no longer blocking, ` +
+      'and listed as unconfirmed by vote in FOLLOW-UPS.md:',
+  );
+  for (const f of moved) {
+    const t = readTally(f.votes);
+    const from: unknown = f.downgraded?.from;
+    const was = typeof from === 'string' && from.length > 0 ? `, was ${from}` : '';
+    const said =
+      t === null
+        ? 'votes unreadable'
+        : `${t.n - t.real} of ${t.n} verifier(s) did not confirm ` +
+          `(${t.notReal} not real, ${t.cannotTell} could not tell; quorum ${t.quorum})`;
+    log.info(`  - \`${f.id}\` ${f.title} - ${said}${was}`);
+  }
+  const file = path.join(state.dir, 'FOLLOW-UPS.md');
+  log.info(existsSync(file) ? `  Detail: ${file}` : '  FOLLOW-UPS.md was not written.');
+}
+
+/**
  * What the last review round was actually shown.
  *
  * Here for the reason `reportGates` is here: a change too large for one turn is
@@ -3115,6 +3152,7 @@ function summary(state: RunState, started: number, recovery?: RecoveryReport): v
   reportReviewMd(state);
   reportReviewFinders(state);
   reportReviewVotes(state);
+  reportUnconfirmedByVote(state);
   if (state.sessionRotations > 0) log.info(`Compacted: ${state.sessionRotations} time(s)`);
   // A record of what `forkedFrom` holds, never a computation over it: the totals
   // above include the inherited spend, and this is what says so. Nothing here
