@@ -1684,10 +1684,29 @@ mod tests {
     #[cfg(not(unix))]
     fn wait_for_no_reader(_hosts: &HostProcess, _handle: &str) {}
 
+    /// Stops every host when dropped, so a case that panics part-way still
+    /// takes its children down with it.
+    ///
+    /// `a_run_host_whose_keys_cannot_be_written_is_closed_before_its_invoke`
+    /// spawns a DEAF child that never exits and a service host, then waits in
+    /// `wait_for_no_reader`, which panics on a timeout or an unexpected poll
+    /// flag. A panic there skipped every line below it, so both processes and
+    /// their pipes outlived the case. `stop` drains what is left, even through
+    /// a poisoned lock, and does nothing when the set is already empty.
+    struct StopOnDrop(HostProcess);
+
+    impl Drop for StopOnDrop {
+        fn drop(&mut self) {
+            self.0.stop();
+        }
+    }
+
     #[test]
     fn a_run_host_whose_keys_cannot_be_written_is_closed_before_its_invoke() {
         let collect = Collect::new();
         let hosts = hosts(&collect);
+        // Before anything is spawned, so every way out of the case stops them.
+        let _stop = StopOnDrop(hosts.clone());
         service(&hosts, &collect);
         let relay: Arc<dyn Relay> = collect.clone();
         hosts.spawn("run-2", node(DEAF, Vec::new(), None), "test-secret".into(), relay).unwrap();

@@ -75,6 +75,16 @@ for (const entry of readdirSync(root, { withFileTypes: true })) {
       broken = `${path.basename(file)}: no findings array`;
       break;
     }
+    // Every entry, before any is used: `authorOf` and `blockers` read fields
+    // off each one, so a `null` or a bare string would end the whole replay
+    // instead of skipping this run as a malformed file is skipped.
+    const bad = findings.findIndex(
+      (f) => f === null || typeof f !== 'object' || Array.isArray(f) || typeof f.id !== 'string',
+    );
+    if (bad !== -1) {
+      broken = `${path.basename(file)}: findings[${bad}] is not a finding with an id`;
+      break;
+    }
     for (const f of findings) if (authorOf(f) === 'human') human.add(f.id);
     const b = blockers(findings);
     recordRound(
