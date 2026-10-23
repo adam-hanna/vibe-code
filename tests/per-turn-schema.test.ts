@@ -25,7 +25,13 @@ import { codexTurnNoMcp as codexTurn } from './helpers/codex-mcp.js';
  *
  * Nothing is spawned: the adapter takes a fake `exec` that writes the `-o` file
  * the real child would, and `runTurn` takes its providers as an argument.
+ *
+ * The adapter still locates the binary before it calls `exec`, so without this
+ * line the file passed only on a machine with `codex` on PATH, and the 1.8.0
+ * release PR's CI, which has none, failed all ten cases with `Could not locate
+ * "codex"`. `codex-cut-off.test.ts` sets it the same way.
  */
+process.env['VIBE_CODEX_BIN'] = process.execPath;
 
 const USAGE = JSON.stringify({
   type: 'turn.completed',

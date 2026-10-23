@@ -65,7 +65,7 @@ const REVIEW_KEYS = ['finders', 'verifiers', 'quorum', 'unconfirmedP0'] as const
  * the installed CLI's `--help` does not declare (`src/cliversions.ts`).
  */
 export const TESTED_CLI_VERSIONS: Readonly<Record<AgentProvider, string>> = {
-  claude: '2.1.303',
+  claude: '2.1.307',
   codex: '0.163.0',
 };
 
