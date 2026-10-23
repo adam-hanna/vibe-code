@@ -169,8 +169,9 @@ export const EVIDENCE_RULE =
  * cost and a model told the cost complies.
  */
 export const REPRODUCER_RULE =
-  'Optional, and only for a P0 or P1 in a **code review** - null everywhere else, always ' +
-  'null when critiquing a plan, since there is no implementation to run a test against.\n\n' +
+  'Always written: null unless this is a P0 or P1 in a **code review** and you have a ' +
+  'failing test to offer - always null when critiquing a plan, since there is no ' +
+  'implementation to run a test against.\n\n' +
   'A test that FAILS because of the defect you are describing and would pass once it is ' +
   'fixed. Give the file, not a command: you name a path and the whole contents, this ' +
   'orchestrator writes it and runs **the project\'s own already-configured verification ' +
@@ -181,11 +182,24 @@ export const REPRODUCER_RULE =
   'What it costs: if the test **passes** against the unfixed code, the finding did not ' +
   'reproduce and is downgraded to P2, exactly as an unresolvable citation is. So write one ' +
   'only when you are confident the defect is real and you can express it as a failing test. ' +
-  'Omitting it costs nothing - a finding with no reproducer is judged exactly as findings ' +
+  'A null reproducer costs nothing - a finding without one is judged exactly as findings ' +
   'have always been judged.\n\n' +
   'The file must stand alone under this project\'s existing test setup, must not already ' +
   'exist, and must test the defect rather than the fix you have in mind. It is removed from ' +
   'the working tree after it has been run and kept in the run record.';
+
+/**
+ * How a finding ends, spelled out once, appended to the `evidence` array's
+ * schema description and never to `EVIDENCE_RULE` (#416).
+ *
+ * `EVIDENCE_RULE` is rendered into the review prompts and so into frozen prompt
+ * fixtures; the schema description is not. The example is the sequence the
+ * reordered schema asks for - every key written, the null ones first, content
+ * last - so the model has seen it end on `}]}` at least once.
+ */
+export const EVIDENCE_EXAMPLE_ENDING =
+  'Each finding ends on its evidence, with every key written, for example: ' +
+  '…,"defer":false,"reproducer":null,"evidence":[{"kind":"code","ref":null,"path":"src/x.ts","line":12,"excerpt":"…"}]}';
 
 /** Shared shape for both plan critique and post-implementation code review. */
 export const FINDINGS_SCHEMA = {
@@ -217,6 +231,35 @@ export const FINDINGS_SCHEMA = {
       items: {
         type: 'object',
         additionalProperties: false,
+        // **Filler first, content last (#416).** The order of `required` and of
+        // `properties` is the order the model writes the keys in, and it is the
+        // whole of the fix for answers that stalled into blank space.
+        //
+        // Across the 136 `codex/*.out.json` in this repo's run archive, 67 had
+        // blank space between JSON values: 150 runs, 89 of them just before
+        // `"reproducer"` (then the last key of a finding, after `evidence`
+        // closed) and 60 just before `"ref"` (then the last key of an evidence
+        // entry, after `excerpt`), and 1 anywhere else. 132 of the 150 were one
+        // or two characters and the longest was 17. Twice it never stopped: a
+        // `review-0` and a `critique-1` each wrote 128,000 output tokens, the
+        // limit, almost all of it blank, and the run died with no answer.
+        //
+        // Inferred, not measured: once the content is written the likeliest next
+        // token is `}`, which the strict schema forbids while a required key is
+        // still missing, so the only legal tokens are `,` and blank space - and
+        // the field still owed is one that is almost always null (`reproducer` in
+        // 259 of 261 findings, `ref` in 742 of 790 entries). A usually-null field
+        // in the *middle* does not do it: 53 entries had `line` and `excerpt` both
+        // null mid-object with no blank run before either. So **a nullable filler
+        // field must never be the last one after content**, and here the null
+        // ones come first and each object ends on what the model wants to close.
+        //
+        // Left alone on the same evidence: `test_verdicts` (last in
+        // `REVIEW_SCHEMA`, often `[]`) shows no blank run before it in the
+        // archive, and `ANSWERS_SCHEMA`, `FIX_SCHEMA` and `PLAN_SCHEMA` end on
+        // fields that are not null. `scripts/count-schema-stalls.mjs` is how a
+        // later archive confirms or refutes this, including whether the stall
+        // simply moved to the new last key.
         required: [
           'id',
           'severity',
@@ -224,12 +267,12 @@ export const FINDINGS_SCHEMA = {
           'detail',
           'suggested_fix',
           'defer',
-          'evidence',
           // Nullable rather than omitted, for the reason the evidence entry's
           // keys are: Codex refuses a closed object whose `required` does not
           // cover every property (#68), and `schema-shape.test.ts` is what
           // caught this one before a run did.
           'reproducer',
+          'evidence',
         ],
         properties: {
           id: {
@@ -283,10 +326,50 @@ export const FINDINGS_SCHEMA = {
               'does. Not deferring costs too: separate work raised without this flag becomes ' +
               'part of the change, and the change is what gets built.',
           },
+          reproducer: {
+            // Nullable and required, for the reason the evidence entry's
+            // optional keys are: Codex's `--output-schema` refuses an object
+            // whose `required` does not cover all of `properties` (#68). A
+            // finding with no reproducer sets this to null.
+            type: ['object', 'null'],
+            description: REPRODUCER_RULE,
+            additionalProperties: false,
+            // `gate` first: it is null when the run has one gate, and a null
+            // last after the contents is the shape that stalled (#416).
+            required: ['gate', 'path', 'contents'],
+            properties: {
+              gate: {
+                type: ['string', 'null'],
+                description:
+                  'Which of the run\'s configured verification gates runs this file, by ' +
+                  'name. Null is correct when the run has exactly one gate. This chooses ' +
+                  'which existing command observes the file; it cannot change what that ' +
+                  'command is.',
+              },
+              path: {
+                type: ['string', 'null'],
+                description:
+                  'Repo-relative path for the new test file, e.g. ' +
+                  '"tests/retry-backoff.test.ts". It must NOT already exist - an existing ' +
+                  'path is refused rather than overwritten, and the reproducer is discarded. ' +
+                  'Put it where this project keeps the tests the gate below already runs.',
+              },
+              contents: {
+                type: ['string', 'null'],
+                description:
+                  'The whole file. It is written verbatim and nothing is added to it, so it ' +
+                  'must compile and run under this project\'s existing test setup with no ' +
+                  'further edits. Assert the defect: the test must FAIL against the code as ' +
+                  'it stands.',
+              },
+            },
+          },
           evidence: {
             type: 'array',
             minItems: 1,
-            description: EVIDENCE_RULE,
+            // The rule, then the example ending - appended here and not to
+            // `EVIDENCE_RULE`, which the prompts render (#416).
+            description: EVIDENCE_RULE + '\n\n' + EVIDENCE_EXAMPLE_ENDING,
             items: {
               type: 'object',
               additionalProperties: false,
@@ -307,7 +390,11 @@ export const FINDINGS_SCHEMA = {
               // `ref` for `external` - are still NOT expressed here. That needs
               // `oneOf`, and the runtime enforces it instead, where a miss costs
               // one citation rather than the whole report (#48).
-              required: ['kind', 'path', 'line', 'excerpt', 'ref'],
+              //
+              // `ref` second rather than last (#416): it is null in 742 of 790
+              // entries, and as the last key after `excerpt` it was where 60 of
+              // the archive's 150 blank runs sat. See the note on the finding.
+              required: ['kind', 'ref', 'path', 'line', 'excerpt'],
               properties: {
                 kind: {
                   type: 'string',
@@ -316,6 +403,12 @@ export const FINDINGS_SCHEMA = {
                     'Which kind of claim this citation makes. `code` and `absence` are checked ' +
                     'against the repository, `artifact` against the run directory, `external` ' +
                     'not at all.',
+                },
+                ref: {
+                  type: ['string', 'null'],
+                  description:
+                    'Always present. `external` only: the URL, spec, or tool documentation being ' +
+                    'relied on. Required for `external`; null for the other kinds.',
                 },
                 path: {
                   type: ['string', 'null'],
@@ -328,58 +421,16 @@ export const FINDINGS_SCHEMA = {
                 line: {
                   type: ['integer', 'null'],
                   description:
-                    'Optional, `code` only - null otherwise. Must be a real line of the file. ' +
+                    'Always present; null unless the kind is `code`. Must be a real line of the file. ' +
                     'Not required to be where an `excerpt` appears.',
                 },
                 excerpt: {
                   type: ['string', 'null'],
                   description:
-                    'Optional, `code` only - null otherwise. Must appear somewhere in the ' +
+                    'Always present; null unless the kind is `code`. Must appear somewhere in the ' +
                     'file; whitespace is normalised before comparing, so re-indenting is safe. ' +
                     'Quote it exactly otherwise - a paraphrase does not resolve.',
                 },
-                ref: {
-                  type: ['string', 'null'],
-                  description:
-                    '`external` only: the URL, spec, or tool documentation being relied on. ' +
-                    'Required for `external`; null for the other kinds.',
-                },
-              },
-            },
-          },
-          reproducer: {
-            // Nullable and required, for the reason the evidence entry's
-            // optional keys are: Codex's `--output-schema` refuses an object
-            // whose `required` does not cover all of `properties` (#68). A
-            // finding with no reproducer sets this to null.
-            type: ['object', 'null'],
-            description: REPRODUCER_RULE,
-            additionalProperties: false,
-            required: ['path', 'contents', 'gate'],
-            properties: {
-              path: {
-                type: ['string', 'null'],
-                description:
-                  'Repo-relative path for the new test file, e.g. ' +
-                  '"tests/retry-backoff.test.ts". It must NOT already exist - an existing ' +
-                  'path is refused rather than overwritten, and the reproducer is discarded. ' +
-                  'Put it where this project keeps the tests the gate below already runs.',
-              },
-              contents: {
-                type: ['string', 'null'],
-                description:
-                  'The whole file. It is written verbatim and nothing is added to it, so it ' +
-                  'must compile and run under this project\'s existing test setup with no ' +
-                  'further edits. Assert the defect: the test must FAIL against the code as ' +
-                  'it stands.',
-              },
-              gate: {
-                type: ['string', 'null'],
-                description:
-                  'Which of the run\'s configured verification gates runs this file, by ' +
-                  'name. Null is correct when the run has exactly one gate. This chooses ' +
-                  'which existing command observes the file; it cannot change what that ' +
-                  'command is.',
               },
             },
           },

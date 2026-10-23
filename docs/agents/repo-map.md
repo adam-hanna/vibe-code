@@ -36,6 +36,7 @@ src/clipaths.ts      where the two CLIs are when the settings say so, and what t
 src/auth.ts          how each vendor is reached, for runs and the pilot: the routes and a child's env
 src/heldkeys.ts      the API keys the app handed the host - in memory, and redacted from everything
 src/codex.ts         Codex adapter (codex exec --json)
+src/cutoff.ts        a Codex answer cut off at its output limit: whole findings salvaged, blank runs shortened (#416)
 src/appserver.ts     Codex app-server JSON-RPC client (rate limits only)
 src/ratelimits.ts    rate-limit windows and the brake
 src/charge.ts        the one seam every token and dollar is charged through

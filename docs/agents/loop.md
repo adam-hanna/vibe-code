@@ -732,3 +732,61 @@ does.
   `git.worktreeTimeoutMs`, so its `review_md` frame answers locally, says "as last fetched" for a
   remote-tracking ref, and calls itself a preview. Neither can know the commit a run will actually
   start at.
+
+## A Codex answer cut off at its output limit (#416)
+
+`src/schemas.ts` (the order), `src/cutoff.ts` (salvage and collapsing), `OutputCutOffError` in
+`src/codex.ts`, `cutOffRetry` in `src/orchestrator.ts` (a retry inside `withRateLimitRetry`). Twice in 16 hours, a read-only Codex
+turn (`review-0` in the #393 run, `critique-1` in the #389 run, both `gpt-5.6-luna` at `xhigh`)
+wrote valid JSON for a while, then wrote only blank space until it reached 128,000 output tokens.
+The run then died with `codex wrote no structured output … reason: max_output_tokens`.
+
+- **It is a wobble at two fixed spots, and it happens all the time.** Of the 136 saved
+  `codex/*.out.json` the brief measured, 67 had blank space between JSON values: 150 runs, 89 just
+  before `"reproducer"`, 60 just before `"ref"`, and 1 anywhere else. 132 were one or two
+  characters, and the longest was 17. `scripts/count-schema-stalls.mjs` prints that table. On
+  2026-10-22 it read 138 outputs (68 with runs, 152 runs: 90, 61 and 1), the archive having grown
+  by two outputs since the brief was measured.
+- **A filler field must not be last after content.** `reproducer` was the last key of a finding
+  and `ref` the last key of an evidence entry, both required by the strict schema and both
+  almost always null (259 of 261, 742 of 790). The inferred mechanism: once the content is
+  written, the model's likeliest token is `}`, which the schema forbids while a key is owed.
+  That leaves `,` or blank space, and twice the blank space fed itself. A usually-null field in
+  the *middle* does not do it: 53 entries had `line` and `excerpt` null mid-object, with no blank
+  run before either. So the order is now `…, defer, reproducer, evidence`, `kind, ref, path, line,
+  excerpt` and `gate, path, contents`, and each object ends on what the model wants to close.
+  `test_verdicts` and the other schemas were left alone, because the archive shows no stall before
+  their last fields. The count is how a later archive confirms this, including whether the stall
+  simply moved to the new last key.
+- **The wording says *always present*.** Every key of a strict schema is required, so
+  "Optional" (on `REPRODUCER_RULE`, `line` and `excerpt`) and "Omitting it costs nothing" told the
+  model it could leave out a key it could not. The costs stay: a null reproducer is judged as
+  findings always were, and a passing one downgrades the finding. The one example ending is
+  appended to the `evidence` array's schema description, never to `EVIDENCE_RULE`, which the
+  review prompts render into frozen fixtures. There is no rule about whitespace. The model is not
+  choosing a layout, and the reorder removes the forbidden `}`.
+- **Only read-only seats retry, and only once.** The critic, the answerer, the reviewer, the
+  finders and the verifiers can be asked again at no cost but the tokens. A writer may already
+  have edited the tree, and running it again would edit it again. One retry, because the
+  reordered schema should all but remove the wobble, so a second cut-off says something about
+  this turn. It ends the turn as one did before, and the error names both attempts. A finder or
+  a verifier gets its retry before the existing absorption. The ceilings are checked first: the
+  first attempt has been charged, and a ceiling it reached escalates instead.
+- **The retry stays on the same thread.** In the #389 thread's session log, the failed turn's
+  answer is kept as an assistant message with `status: "incomplete"`, 124,034 characters long,
+  and compaction carried it forward. The next two turns on that thread still succeeded. A fresh
+  thread would cost the critic its memory of earlier rounds. A seat that runs fresh stays fresh.
+- **A cut-off answer is never repaired into one.** The findings it wrote in full are kept: a
+  bracket-aware scan takes each whole element of `findings` that `parseFinding` accepts, and stops
+  at the first that is not whole. They go in `codex/<label>.cutoff.json` and in a note at the end
+  of the retry's prompt, as unverified. Nothing closes a bracket or fills in `"ref":null`. That
+  would be vibe writing the agent's answer, and it would have passed #389's REVISE with one finding
+  of three, and #393's review with no `test_verdicts`, as whole. A cut-off turn has no verdict.
+- **What is said.** `codex_cut_off` warns, `turn_retried` is recorded, and the summary prints one
+  `Retries:` line when there were any. Codex reports no usage for a cut-off attempt, so none is
+  charged and the warning says so. Reading the figure from the session log is a follow-up.
+- **Blank runs of 1,000 or more are shortened** to `<… N blank characters …>` in `model_said`,
+  in the error and in the `.cutoff.json` text. That is 40 times the longest legitimate blank run
+  in the archive (25 characters of indentation inside an `excerpt`), and far below the 122,409 and
+  756,893 characters of the two failures. A 757 KB `transcript.log` is what the uncollapsed line
+  cost.

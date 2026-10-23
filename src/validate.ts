@@ -217,45 +217,54 @@ export function parsePlan(raw: unknown): Plan {
   };
 }
 
+/**
+ * One finding, read exactly as `parseFindings` reads each element of a report.
+ *
+ * Its own export so that a lone finding can be judged without wrapping it in a
+ * report with an invented verdict: what a cut-off Codex answer had written in
+ * full is kept only where this accepts it (#416). `raw` is what an error quotes.
+ */
+export function parseFinding(f: unknown, i: number, raw: unknown = f): Finding {
+  const r = record(f, `report.findings[${i}]`, raw);
+  const severity = oneOf(r, 'severity', SEVERITIES, `report.findings[${i}]`, raw);
+  const title = str(r, 'title', `report.findings[${i}]`, raw);
+  // An id is the oscillation guard's primary key; derive a stable one rather
+  // than dropping a finding that omitted it.
+  const rawId = r['id'];
+  const id = typeof rawId === 'string' && rawId.trim() ? rawId.trim() : slug(title);
+  // Tolerant on read, for two different reasons. A report stored before this
+  // field existed carries none, and must still parse. And a blocking finding
+  // can never be a follow-up whatever the model claimed, so `defer` on a
+  // P0/P1 is dropped here - the schema states the constraint, this makes it
+  // true on our side of the wire. Both defaults only ever make a finding more
+  // blocking, and `gate` reads severity alone, so no control flow changes.
+  const defer = r['defer'] === true && severity !== 'P0' && severity !== 'P1';
+  // Absent rather than `[]` when nothing usable came back: "cited nothing" is
+  // what actually happened, and an empty list would assert the model offered
+  // a list. Both read the same downstream - `groundFindings` downgrades a
+  // blocker either way - but only one of them is true.
+  const evidence = readEvidence(r['evidence']);
+  // Absent rather than a repaired half-object, for the reason the evidence
+  // list is tolerant: the schema asks for `null` when there is no reproducer,
+  // and a model that returns a path with no contents has described no test
+  // (#113). The finding is kept either way - a missing witness has never been
+  // held against a finding and is not now.
+  const reproducer = readReproducer(r['reproducer']);
+  return {
+    id,
+    severity,
+    title,
+    detail: str(r, 'detail', `report.findings[${i}]`, raw),
+    suggested_fix: str(r, 'suggested_fix', `report.findings[${i}]`, raw),
+    defer,
+    ...(evidence.length > 0 ? { evidence } : {}),
+    ...(reproducer === null ? {} : { reproducer }),
+  };
+}
+
 export function parseFindings(raw: unknown): FindingsReport {
   const o = record(raw, 'report', raw);
-  const findings: Finding[] = arr(o, 'findings', 'report', raw).map((f, i) => {
-    const r = record(f, `report.findings[${i}]`, raw);
-    const severity = oneOf(r, 'severity', SEVERITIES, `report.findings[${i}]`, raw);
-    const title = str(r, 'title', `report.findings[${i}]`, raw);
-    // An id is the oscillation guard's primary key; derive a stable one rather
-    // than dropping a finding that omitted it.
-    const rawId = r['id'];
-    const id = typeof rawId === 'string' && rawId.trim() ? rawId.trim() : slug(title);
-    // Tolerant on read, for two different reasons. A report stored before this
-    // field existed carries none, and must still parse. And a blocking finding
-    // can never be a follow-up whatever the model claimed, so `defer` on a
-    // P0/P1 is dropped here - the schema states the constraint, this makes it
-    // true on our side of the wire. Both defaults only ever make a finding more
-    // blocking, and `gate` reads severity alone, so no control flow changes.
-    const defer = r['defer'] === true && severity !== 'P0' && severity !== 'P1';
-    // Absent rather than `[]` when nothing usable came back: "cited nothing" is
-    // what actually happened, and an empty list would assert the model offered
-    // a list. Both read the same downstream - `groundFindings` downgrades a
-    // blocker either way - but only one of them is true.
-    const evidence = readEvidence(r['evidence']);
-    // Absent rather than a repaired half-object, for the reason the evidence
-    // list is tolerant: the schema asks for `null` when there is no reproducer,
-    // and a model that returns a path with no contents has described no test
-    // (#113). The finding is kept either way - a missing witness has never been
-    // held against a finding and is not now.
-    const reproducer = readReproducer(r['reproducer']);
-    return {
-      id,
-      severity,
-      title,
-      detail: str(r, 'detail', `report.findings[${i}]`, raw),
-      suggested_fix: str(r, 'suggested_fix', `report.findings[${i}]`, raw),
-      defer,
-      ...(evidence.length > 0 ? { evidence } : {}),
-      ...(reproducer === null ? {} : { reproducer }),
-    };
-  });
+  const findings: Finding[] = arr(o, 'findings', 'report', raw).map((f, i) => parseFinding(f, i, raw));
 
   const summaryRaw = o['summary'];
   return {

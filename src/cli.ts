@@ -2998,6 +2998,12 @@ function summary(state: RunState, started: number, recovery?: RecoveryReport): v
     }
   }
   if (state.rateLimitWaits > 0) log.info(`Waits:    ${state.rateLimitWaits} rate-limit pause(s)`);
+  // Only when there were any (#416): a retried turn is the loop recovering, and
+  // the line is how a person learns it had to.
+  const cutOffRetries = state.events.filter((e) => e.type === 'turn_retried').length;
+  if (cutOffRetries > 0) {
+    log.info(`Retries:  ${cutOffRetries} turn(s) retried after Codex's answer was cut off at its output limit`);
+  }
   // Question rounds sit beside the other two rather than being folded into the
   // plan count, and they are the reason #139 exists: three revisions the critic
   // asked for is the loop working, and three the planner asked itself is a
