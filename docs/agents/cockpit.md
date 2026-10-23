@@ -265,7 +265,8 @@ they are waiting on. Four things in it are worth carrying:
   lines below did the navigating. The same applies one level down: a finding row in the
   findings pane was a `<button>` that set an `open` id nothing rendered, so the cursor promised
   a disclosure that did not exist. What is behind that fold is the **provenance** — author,
-  citations, severity history, reproducer outcomes — and what stays out is the severity, the
+  citations, severity history, reproducer outcomes, and since #388 and #393 which seats found it,
+  the vote and what the fixer did with it — and what stays out is the severity, the
   title and the id, which are what make a list of findings scannable.
 
 - **No issue number reaches the screen, and `copy.test.ts` is the gate.** Seven components

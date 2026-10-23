@@ -80,7 +80,7 @@ For each vendor, the pilot and every run use either your **subscription** (the C
 |---|---|
 | Plans | Every version of the plan, one section per round. |
 | Plan critique | The critic's report for each plan round, with each finding's evidence. |
-| Code review | The reviewer's report for each round, and what happened to each finding afterwards. |
+| Code review | The reviewer's report for each round, and what happened to each finding afterwards. Opening a finding shows which seats raised it, how each verifier voted and why, and what the fixer said it did with it. |
 | Code | What each round changed, from the commit it made, and the whole change so far. |
 | Questions | The run's questions, which you answer in place. |
 | Verify | Every verification attempt, with its verdict, and the full log of any that failed. |
@@ -110,6 +110,8 @@ When you quit while runs are going, the app lists them and asks first. Each one 
 ## Settings
 
 Settings has two doors. The ⚙ at the foot of the left bar edits your **settings for all projects**: models, budgets, round caps, `auth`, the pilot's permissions and the type size. The ⚙ on a project's row edits that project's **`vibe.config.json`**: its verification gates, worktree settings and anything it overrides. Each value shows where it comes from: the default, your settings for all projects, or this project. Model pickers list what each CLI says it offers today, and you can always type a name.
+
+Under the roles, Settings edits the review's [finders and verifiers](./configuration#review), the quorum and what a P0 the vote did not confirm does. In a project's settings, a note says whether the repository has a [`REVIEW.md`](./how-it-works#the-repository-s-review-standards-review-md) at the commit the next run would start from.
 
 Settings also shows the standing prompt blocks every turn receives, and lets you override them per project. See [`prompts`](./configuration#prompts).
 

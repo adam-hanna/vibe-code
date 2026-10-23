@@ -30,6 +30,7 @@ A clean run means the critic and the reviewer found nothing blocking, which unde
 - it runs them **more than once**, to catch a race that won the first time;
 - a blocking finding must **cite something real**, and come from a turn that **looked at something**;
 - a reviewer can be asked to **prove** a finding with a test, run by your own gate;
+- with [verifiers](./configuration#review) set, a blocking finding is put to a vote first, and a vote that cannot settle it leaves it blocking;
 - and an edit to the tests or to `vibe.config.json` is **judged**, because a round that changes its own judge is grading its own work.
 
 None of that makes a clean run correct. It makes it harder to be wrong without anyone noticing.
@@ -44,7 +45,7 @@ Every prompt is written to the CLI's standard input, never passed as an argument
 
 ## A severity only goes up by a person
 
-The automatic guards only ever **lower** a finding's severity: an ungrounded P1 becomes a P2, and a reproducer that passes against the unfixed code demotes its finding. Nothing automatic ever raises one. Raising a finding, or restoring one a guard demoted, is something only you do, through `NEEDS-INPUT.md` or the app. Every change is recorded with who made it.
+The automatic guards only ever **lower** a finding's severity: an ungrounded P1 becomes a P2, a reproducer that passes against the unfixed code demotes its finding, and so does a vote of the review's verifiers that does not confirm a P1 (or a P0, if `review.unconfirmedP0` says so). Nothing automatic ever raises one. Raising a finding, or restoring one a guard demoted, is something only you do, through `NEEDS-INPUT.md` or the app. Every change is recorded with who made it.
 
 ## Your working branch is never the run's
 

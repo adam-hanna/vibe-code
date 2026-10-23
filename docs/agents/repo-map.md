@@ -85,6 +85,7 @@ app/src/cockpit/drafts.ts      saved prompt versions - the window's library, not
 src/answers.ts          filling in NEEDS-INPUT.md from somewhere that is not a text editor
 app/src/cockpit/Settings.tsx   every setting, and which of the three places each one goes
 app/src/cockpit/seatform.ts    the review seats as a form: the finder and verifier lists, the quorum (#388)
+app/src/cockpit/reviewmd.ts    the settings note on REVIEW.md at the next run's start, as one sentence (#389)
 app/src/cockpit/outgroups.ts the output cut into rounds, and a finished run's transcript
 app/src/pilot/saved.ts       a conversation kept between launches, and which run it is about
 src/replay.ts           a finished run, said again - and what an archive cannot say
