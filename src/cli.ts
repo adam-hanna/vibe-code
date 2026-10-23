@@ -139,9 +139,13 @@ Options
   --max-question-rounds <n>  Planner self-answer rounds before asking you (default: 3)
   --p1-tolerance <n>         P1s a phase may carry forward rather than fix (default: 1;
                              0 demands a spotless verdict. P0s are never carried)
-  --plan-timeout <min>       Per planning turn (default: 30)
-  --implement-timeout <min>  Per implement/fix turn (default: 90)
-  --codex-timeout <min>      Per Codex turn (default: 45)
+  --plan-timeout <min>       Per read-only Claude turn - planning, under the default roles
+                             (claude.planTimeoutMs; default: 30)
+  --implement-timeout <min>  Per implement/fix turn on Claude (claude.implementTimeoutMs;
+                             default: 90)
+  --codex-timeout <min>      Per read-only Codex turn (codex.timeoutMs; default: 45). A Codex
+                             implementer uses codex.implementTimeoutMs, and a role's own
+                             timeoutMs wins over all three flags
   --verify-timeout <min>     Per verification command run (default: 15)
   --budget <usd>             Work ceiling, API-equivalent, Claude only - Codex reports no
                              cost (default: 25; not a bill on a plan)

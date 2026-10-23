@@ -140,6 +140,8 @@ Options apply to `run`, `plan`, `resume` and `doctor`, and override the configur
 | `--codex-timeout <min>` | Per read-only Codex turn (`codex.timeoutMs`). A Codex implementer's turns use `codex.implementTimeoutMs`. Default 45. |
 | `--verify-timeout <min>` | Per verification command run. Default 15. |
 
+A role's own `timeoutMs` (`--role <role>:timeoutMs=<ms>`, or `roles.<role>.timeoutMs`) wins over all three turn timeouts.
+
 ### Context and progress
 
 | Flag | Meaning |
