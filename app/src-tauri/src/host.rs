@@ -1641,6 +1641,49 @@ mod tests {
         setInterval(() => {}, 1000);
     "#;
 
+    /// Block until nothing anywhere can read `handle`'s stdin.
+    ///
+    /// The `deaf` frame says the host closed its end, which is not the same as
+    /// the pipe having no reader. Tests in this binary spawn children on other
+    /// threads, and a child between its fork and its exec holds a copy of every
+    /// descriptor here, this pipe's read end included, until exec closes it. A
+    /// write in that window lands in the pipe's buffer instead of failing.
+    /// Under a loaded machine it failed the case 1 run in 10 and the rust gate
+    /// 2 runs in 3. A diagnostic caught the write end with no `POLLERR` and,
+    /// moments later, no process holding the read end: a holder that came and
+    /// went. Never in 30 runs of the case alone. The kernel raises `POLLERR` on
+    /// the write end once the last reader is gone, so this waits for exactly
+    /// the precondition the case states, and says so if it never arrives.
+    #[cfg(unix)]
+    fn wait_for_no_reader(hosts: &HostProcess, handle: &str) {
+        use std::os::fd::AsRawFd;
+        let fd = {
+            let guard = hosts.inner.hosts.lock().unwrap();
+            guard.get(handle).and_then(|r| r.stdin.as_ref()).expect("the host has its stdin").as_raw_fd()
+        };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            let mut pfd = libc::pollfd { fd, events: 0, revents: 0 };
+            // SAFETY: one pollfd on a descriptor the host still owns, since
+            // nothing closes its stdin before the delivery below.
+            let ready = unsafe { libc::poll(&mut pfd, 1, left.as_millis().min(i32::MAX as u128) as i32) };
+            if ready > 0 {
+                assert!(pfd.revents & libc::POLLERR != 0, "{handle}'s stdin polled as {:#x}, not as having no reader", pfd.revents);
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{handle}'s stdin still had a reader 10s after the host closed its end",
+            );
+        }
+    }
+
+    /// Windows hands a child only the handles marked for it, under std's own
+    /// spawn lock, so there is no window to wait out.
+    #[cfg(not(unix))]
+    fn wait_for_no_reader(_hosts: &HostProcess, _handle: &str) {}
+
     #[test]
     fn a_run_host_whose_keys_cannot_be_written_is_closed_before_its_invoke() {
         let collect = Collect::new();
@@ -1652,6 +1695,7 @@ mod tests {
         let invoke = r#"{"type":"invoke","id":3,"argv":[]}"#;
         // `launch_host`'s own second step, against a host already deaf so the
         // failure is not a race with the child's start-up.
+        wait_for_no_reader(&hosts, "run-2");
         let why = hosts.deliver_or_close("run-2", Some(invoke)).expect_err("the key write fails");
         assert!(why.contains("keys"), "it failed on the keys, before the invoke: {why}");
         let seen = collect.wait("the orphan to be killed and reaped", |s| collect_exit(s, "run-2"));
