@@ -2109,6 +2109,18 @@ function movedByVote(f: Finding): boolean {
 }
 
 /**
+ * The findings FOLLOW-UPS.md lists as unconfirmed by vote (#436), in its order.
+ *
+ * The same filter and the same last-wins dedupe `writeFollowUps` applies, so
+ * the end-of-run summary names exactly the entries the file it points to holds
+ * under `*Unconfirmed by vote:*` - never a second opinion about which they are.
+ */
+export function voteMovedFollowUps(state: RunState): Finding[] {
+  if (!Array.isArray(state.deferred)) return [];
+  return [...new Map(state.deferred.filter(isDeferrable).map((f) => [f.id, f])).values()].filter(movedByVote);
+}
+
+/**
  * The stored list, or null when the field is genuinely absent. Never throws.
  *
  * The `unknown` hop is defence in depth, kept now that `validateStoredState`

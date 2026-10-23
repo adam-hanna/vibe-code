@@ -128,7 +128,7 @@ By default one reviewer reviews each round. [`review`](./configuration#review) c
 
 The vote is fail-closed. A finding is confirmed when `review.quorum` verifiers say `real` (a majority, by default). It is unconfirmed only when enough say `not-real` that the quorum is out of reach. Otherwise it is undecided and keeps blocking. A verifier whose turn failed counts as `cannot-tell`, so too few usable votes never let a finding through. An unconfirmed P1 is moved to P2 with the tally as its reason, and listed in `FOLLOW-UPS.md`. An unconfirmed P0 keeps blocking by default; `review.unconfirmedP0` can instead stop the run for you (exit 2) or move it to P2. Every vote is recorded on its finding in `code-review-<n>.json`.
 
-Both cost turns inside `budget.maxTokens`, and the run summary's `Finders:` and `Votes:` lines say what they cost in turns and tokens.
+Both cost turns inside `budget.maxTokens`, and the run summary's `Finders:` and `Votes:` lines say what they cost in turns and tokens. Beside the `Votes:` line, the summary names each blocking finding the vote did not confirm: its id, its title, how many verifiers did not confirm it (for example *2 of 3 verifier(s) did not confirm*, with the `not-real` and `cannot-tell` counts and the quorum), the severity it had, and the path to `FOLLOW-UPS.md`. The tally is read from the votes recorded on the finding; if they cannot be read, the line says *votes unreadable* instead of giving a count. A run with no verifiers, or one where every vote confirmed, prints nothing extra.
 
 ### What the fixer did with each finding
 

@@ -624,6 +624,15 @@ the gate. With `review.verifiers: []` nothing runs: no turn, no `votes` key, no 
   verifiers, counts what was voted on and what it came to. The summary's `Votes:` line takes its
   cost from `chargedTurns` (`turn_failed` included) and its outcome from the last tally event,
   Part B's rule.
+- **The summary names what the vote moved** (#436). Beside `Votes:`, `reportUnconfirmedByVote`
+  lists each finding FOLLOW-UPS.md holds as unconfirmed by vote - `voteMovedFollowUps` in
+  `src/orchestrator.ts` is `writeFollowUps`' own filter and dedupe, so the two cannot disagree -
+  with its id, title and tally. The tally is `readTally` (`src/vote.ts`) over the recorded
+  `votes`, which ride unvalidated: counts that are not whole numbers, do not add up to `n`, or
+  disagree with the ballots' `counted` values read as *votes unreadable*, never as a count. A run
+  that moved nothing prints nothing. The window shows no list of its own: `review_votes_tallied`
+  carries counts and no ids, and the report pane already badges each vote-moved finding with its
+  tally from `code-review-<n>.json`; the summary lines reach the window as narration.
 - **Preflight covers every seat.** `mcpRefusals` asks about each verifier's grants by path, and
   `adjudicate`'s Codex sandbox verdict counts a Codex that only a seat uses (`seatProviders`).
   Both agents were already probed on every run. A seat's turn that fails mid-turn names its own
