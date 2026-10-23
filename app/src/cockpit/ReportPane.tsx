@@ -14,6 +14,7 @@ import type { Severity } from '../design';
 import type { Classified, FullFinding } from './artifacts';
 import type { Census, FinderMerge, FindingRow, FixDispositionsFrame } from './model';
 import type { RoundCard } from './rounds';
+import { shownRound } from './rounds';
 
 /**
  * What a judge said about a round, and what each finding actually claims
@@ -601,7 +602,9 @@ export function ReportPane({
           title={
             report.round === null
               ? words.title
-              : `${words.title} · round ${String(report.round)}`
+              // From one, as the headings count (#428); the id, the census
+              // and the link keep the file's round.
+              : `${words.title} · round ${String(shownRound(report.round))}`
           }
           meta={<Summary report={report} census={censusFor(report.round)} />}
         >

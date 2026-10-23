@@ -1,9 +1,16 @@
 import { describe, expect, test } from 'vitest';
 import { emptyRun, reduce } from './model';
 import type { PhaseGroup, Run } from './model';
-import { isFirstImplementation, passLabel, turnRound } from './rounds';
+import { classify } from './artifacts';
+import { isFirstImplementation, passLabel, phaseRound, rounds, shownRound, turnRound } from './rounds';
 import loopColumn from './LoopColumn.tsx?raw';
 import runningRow from './RunningRow.tsx?raw';
+import outputPane from './OutputPane.tsx?raw';
+import codePane from './CodePane.tsx?raw';
+import plansPane from './PlansPane.tsx?raw';
+import reportPane from './ReportPane.tsx?raw';
+import footer from './Footer.tsx?raw';
+import roundCard from '../pilot/RoundCard.tsx?raw';
 import type { Frame } from '../host';
 
 /**
@@ -113,10 +120,15 @@ describe('the Code stage', () => {
     expect(groups(run, 'code').map(passLabel)).toEqual(['implementation']);
   });
 
-  test('the implement turn draws no "round 0" chip; a fix turn keeps its round', () => {
+  test('the implement turn draws no "round 0" chip; a fix turn keeps its own number', () => {
     expect(turnRound({ kind: 'implement', round: 0 })).toBeNull();
     expect(turnRound({ kind: 'review-fix', round: 1 })).toBe(1);
-    expect(turnRound({ kind: 'critique', round: 0 })).toBe(0);
+    expect(turnRound({ kind: 'final-fix', round: 2 })).toBe(2);
+    expect(turnRound({ kind: 'verify-fix', round: 1 })).toBe(1);
+  });
+
+  test('the first implementation has no chip; a fix round\'s chip is its fix round', () => {
+    expect(groups(fold(live), 'code').map(phaseRound)).toEqual([null, 1]);
   });
 });
 
@@ -130,6 +142,53 @@ describe('plan, critique and review count from one, as the headings do', () => {
 
   test('a review round reads `Code review (round N)`\'s N', () => {
     expect(groups(fold(live), 'review').map(passLabel)).toEqual(['round 1', 'round 2']);
+  });
+
+  test('every group chip and pilot round card counts from one', () => {
+    const run = fold(live);
+    for (const kind of ['plan', 'critique', 'review']) {
+      expect(groups(run, kind).map(phaseRound)).toEqual([1, 2]);
+    }
+    // The pilot's cards and the panes' in-flight cards are `rounds()`, asked the same question.
+    expect(rounds(run).map((c) => [c.phase, phaseRound(c)])).toEqual([
+      ['planning', 1],
+      ['critique', 1],
+      ['planning', 2],
+      ['critique', 2],
+      ['implementing', null],
+      ['review', 1],
+      ['implementing', 1],
+      ['review', 2],
+    ]);
+  });
+
+  test('every plan, critique, review and vote turn chip counts from one', () => {
+    for (const kind of ['plan', 'revise', 'critique', 'review', 'vote']) {
+      expect(turnRound({ kind, round: 0 })).toBe(1);
+    }
+    expect(turnRound({ kind: 'critique', round: null })).toBeNull();
+  });
+
+  test('a "round 1" chip still opens round 0\'s file', () => {
+    const run = fold(live);
+    const [critique] = groups(run, 'critique');
+    // What the reader sees, and what the link carries.
+    expect(phaseRound(critique!)).toBe(1);
+    expect(critique!.round).toBe(0);
+    // The file the link lands on is classified by its own name's round.
+    expect(classify({ name: 'plan-critique-0.json', kind: 'file', bytes: 1 }).round).toBe(critique!.round);
+    expect(classify({ name: 'code-review-0.json', kind: 'file', bytes: 1 }).round).toBe(groups(run, 'review')[0]!.round);
+    // The links pass the raw round, and the panes key and reveal by it.
+    expect(loopColumn).toContain("onOpen(census.phase === 'plan' ? 'critique' : 'review', phase.round)");
+    expect(roundCard).toContain('onOpen(PANE[card.cycle], card.round)');
+    expect(reportPane).toContain('id={report.round === null ? undefined : `${kind}-round-${String(report.round)}`}');
+    expect(reportPane).toContain('report.round === openAt');
+    expect(plansPane).toContain('plan.round === openAt');
+  });
+
+  test('the one + 1 is `shownRound`', () => {
+    expect(shownRound(0)).toBe(1);
+    expect(shownRound(4)).toBe(5);
   });
 });
 
@@ -148,8 +207,40 @@ describe('a frame with no round', () => {
   test('the rail draws the label from `passLabel` and the fallback text is gone', () => {
     expect(loopColumn).toContain('const round = passLabel(phase);');
     expect(loopColumn).not.toContain('unnumbered pass');
-    // The live card and the done row ask the same question of a turn.
+  });
+});
+
+/**
+ * Every place a person reads a round asks `rounds.ts`, so the + 1 lives in one
+ * helper and no site draws the archive's number on its own. Source-read, as
+ * `draft-tab-counts.test.ts` is: the panes need a host to mount and the app has
+ * no jsdom.
+ */
+describe('every display site counts from one through `rounds.ts`', () => {
+  test('turn chips: the done row, the live card and the Output pane strip', () => {
     expect(loopColumn).toContain('turnRound(turn) !== null && <Badge>round {turnRound(turn)}</Badge>');
-    expect(runningRow).toContain('turnRound(turn) === null');
+    expect(runningRow).toContain('` · round ${String(turnRound(turn))}`');
+    expect(outputPane).toContain('round {turnRound(turn)}</Badge>');
+  });
+
+  test('group chips: the loop column\'s round heads and the pilot\'s round cards', () => {
+    expect(loopColumn).toContain('round {phaseRound(phase)}</Badge>');
+    expect(roundCard).toContain('round {phaseRound(card)}</Badge>');
+  });
+
+  test('pane titles, the footer and the picked-up row', () => {
+    expect(codePane).toContain('`code · fix round ${String(phaseRound(card))}`');
+    expect(plansPane).toContain('`plan · round ${String(shownRound(plan.round))}`');
+    expect(reportPane).toContain('`${words.title} · round ${String(shownRound(report.round))}`');
+    expect(footer).toContain('plan {shownRound(gate.planRound)}');
+    expect(loopColumn).toContain('`plan ${String(shownRound(from.planRound))}`');
+  });
+
+  test('no display site draws a raw round', () => {
+    const raw = /round \{(turn|phase|card)\.round\}|round \$\{String\((plan|report|card)\.round\)\}|round \$\{(turn|phase)\.round\}/;
+    for (const source of [loopColumn, runningRow, outputPane, codePane, plansPane, reportPane, roundCard]) {
+      expect(source).not.toMatch(raw);
+    }
+    expect(footer).not.toContain('plan {gate.planRound}');
   });
 });

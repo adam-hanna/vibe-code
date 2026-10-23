@@ -4,7 +4,7 @@ import { DiffPane } from './DiffPane';
 import { Section } from './Disclosure';
 import { work as describeWork } from './format';
 import { EMPTY, FILE, NOTE, PANE } from './pane';
-import { committed, isFirstImplementation } from './rounds';
+import { committed, isFirstImplementation, phaseRound } from './rounds';
 import type { Run } from './model';
 
 /**
@@ -125,9 +125,9 @@ export function CodePane({
             // replay files it under review round 0, which read `code · round 0`.
             isFirstImplementation(card)
               ? 'code · implementation'
-              : card.round === null
+              : phaseRound(card) === null
                 ? (card.commit.message ?? 'a round')
-                : `code · round ${String(card.round)}`
+                : `code · fix round ${String(phaseRound(card))}`
           }
           meta={
             <>

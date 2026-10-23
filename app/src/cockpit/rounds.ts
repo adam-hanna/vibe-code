@@ -448,6 +448,49 @@ export function isFirstImplementation(group: Pass): boolean {
 }
 
 /**
+ * The round a person reads, from the round the archive keeps (#428).
+ *
+ * **The one `+ 1` in the window.** The core numbers plan, critique and review
+ * rounds from 0 in its frames and files - `plan-critique-0.json`,
+ * `code-review-0.json` - and from 1 in every sentence it prints: `Plan critique
+ * (round 1)`, `Code review (round 1)`. The window used to draw the file's number
+ * on its chips, on the reasoning that a row has to agree with the file; the
+ * owner's decision on #433 is that it agrees with the headings instead, because
+ * a person reads the chip and never the file name. So every display site asks
+ * this, and every link, pane key and file name keeps the raw round: the chip
+ * that says `round 1` still opens `plan-critique-0.json`.
+ */
+export function shownRound(round: number): number {
+  return round + 1;
+}
+
+/** The phases whose frame round is the archive's, counted from 0. */
+const ARCHIVE_PHASES: ReadonlySet<string> = new Set(['planning', 'critique', 'review']);
+
+/**
+ * The turn kinds whose frame round is the archive's, counted from 0: the plan
+ * round (`plan`, `revise`, `critique`) or the review round (`review`, `vote`).
+ * Fix kinds carry the review round *after* the loop advanced it, which is the
+ * number `Implementing (fix round N)` prints, and `verify-fix` carries
+ * `verifyRound` after its increment; both are already counted from one.
+ */
+const ARCHIVE_KINDS: ReadonlySet<string> = new Set(['plan', 'revise', 'critique', 'review', 'vote']);
+
+/**
+ * The round a group's chip shows, or null for none (#428).
+ *
+ * Plan, critique and review are counted from one (`shownRound`). A fix round is
+ * its own number, already from one. The first implementation has no round of
+ * its own, so no chip, though a replay files it under review round 0. A phase
+ * this build does not know keeps the number it arrived with: there is nothing
+ * to say what it counts from.
+ */
+export function phaseRound(group: Pass): number | null {
+  if (group.round === null || isFirstImplementation(group)) return null;
+  return ARCHIVE_PHASES.has(group.phase) ? shownRound(group.round) : group.round;
+}
+
+/**
  * The phase's own name, which is what a pass with no round reads as. Never
  * "unnumbered pass": that was an internal fallback showing through (#428).
  */
@@ -460,29 +503,17 @@ const PASS_NAMES: Readonly<Record<string, string>> = {
 
 /**
  * What one pass is called in the run rail's expanded stage (#428), numbered the
- * way the terminal's headings number it.
- *
- * - **Plan, critique and review count from one**, as `Plan critique (round N)`
- *   and `Code review (round N)` do. The frame's `round` is the archive's,
- *   0-based - `plan-critique-0.json` is the heading's round 1 - so the rail adds
- *   the one the heading adds. It drew the raw number before, so the first
- *   critique read `round 0` beside a heading saying round 1.
- * - **A fix round is `fix round N`**, with the frame's round as it is: that is
- *   the number `Implementing (fix round N)` prints, already counted from one.
- * - **The first implementation is `implementation`**, never a round
- *   (`isFirstImplementation`). The core is not asked to put `round: 0` on it to
- *   make a label work; that would be a number nothing counted.
- *
- * A pass whose frame carried no round reads as its phase's own name. The links
- * off the row keep the raw round, which is what the panes are keyed by.
+ * way the terminal's headings number it: `round N` for plan, critique and
+ * review (`phaseRound`), `fix round N` for a fix round, and `implementation` for
+ * the first implementation, which is never a round. The core is not asked to put
+ * `round: 0` on it to make a label work; that would be a number nothing counted.
+ * A pass whose frame carried no round reads as its phase's own name.
  */
 export function passLabel(group: Pass): string {
   const name = PASS_NAMES[group.phase] ?? group.phase;
-  if (group.phase === 'implementing') {
-    return isFirstImplementation(group) || group.round === null ? name : `fix round ${String(group.round)}`;
-  }
-  if (group.round === null || PASS_NAMES[group.phase] === undefined) return name;
-  return `round ${String(group.round + 1)}`;
+  const round = phaseRound(group);
+  if (round === null || PASS_NAMES[group.phase] === undefined) return name;
+  return group.phase === 'implementing' ? `fix round ${String(round)}` : `round ${String(round)}`;
 }
 
 /**
@@ -491,10 +522,11 @@ export function passLabel(group: Pass): string {
  * The `implement` turn carries `round: state.reviewRound`, which is 0 for the
  * whole of the first implementation: it is there so the reducer can tell one
  * pass through Code from the next, not because the first implementation is round
- * 0 of anything. Drawn, it read `round 0` beside a rail calling the same pass
- * `implementation`, so the chip is left off and the kind - `implement` - names
- * the pass. Every other turn's chip is the archive's round, as before.
+ * 0 of anything, so it draws no chip. A plan, critique, review or vote turn
+ * carries the archive's round and is shown from one; a fix turn's round is
+ * already from one.
  */
 export function turnRound(turn: Pick<Turn, 'kind' | 'round'>): number | null {
-  return turn.kind === 'implement' ? null : turn.round;
+  if (turn.kind === 'implement' || turn.round === null) return null;
+  return ARCHIVE_KINDS.has(turn.kind) ? shownRound(turn.round) : turn.round;
 }

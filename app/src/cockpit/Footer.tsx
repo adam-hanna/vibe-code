@@ -7,6 +7,7 @@ import { cn } from '@/lib/utils';
 import { boundary, ending, hold, nextHold } from './format';
 import type { Raise } from './argv';
 import { latestQuestions } from './model';
+import { shownRound } from './rounds';
 import type { Run } from './model';
 
 /**
@@ -284,9 +285,15 @@ export function Footer({
             Against the cap where one is known, because "plan 1" is a position
             and "plan 1 of 5" is a position in something — which is what makes it
             a fact somebody can act on. Absent rather than guessed when the
-            config has not been read, for `raiseFor`'s reason. */}
+            config has not been read, for `raiseFor`'s reason.
+
+            The plan round is shown from one (#428), because the cap is checked
+            against `planRound + 1`: at the first plan gate the loop has run plan
+            round 1 of 5, not 0. The review and verify figures are already counts
+            of fix rounds done - each is incremented before its fix - so they are
+            drawn as they arrive. */}
         <div className={NOTE}>
-          plan {gate.planRound}
+          plan {shownRound(gate.planRound)}
           {caps !== null && ` of ${caps.maxPlanRounds}`} · verify {gate.verifyRound} · review{' '}
           {gate.reviewRound}
           {caps !== null && ` of ${caps.maxReviewRounds}`}

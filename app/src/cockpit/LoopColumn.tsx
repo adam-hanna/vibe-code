@@ -7,7 +7,7 @@ import { cn } from '@/lib/utils';
 import { Counts } from './Counts';
 import { Caret } from './Disclosure';
 import { clock, elapsed } from './format';
-import { censusByPhase, isFirstImplementation, passLabel, questionsByPhase, title, turnRound, unplacedQuestions } from './rounds';
+import { censusByPhase, passLabel, phaseRound, questionsByPhase, shownRound, title, turnRound, unplacedQuestions } from './rounds';
 import type { BottomTab, Tab } from './where';
 import { findTurn, nowStatus, RAIL_TITLE, runningGate, turnGroup, verifyRow, verifyRowText } from './rail';
 import type { RailState, VerifyRow } from './rail';
@@ -211,14 +211,15 @@ function Round({
       >
         <Caret open={open} />
         <span className="text-body-sm text-primary group-hover:text-emphasis">{title(phase.phase)}</span>
-        {/* The archive's round, which is the number that names the artifact
-            behind it. The heading in the terminal says "round 1"; the file is
-            `plan-critique-0.json`, and a row has to agree with the file — and
-            since the groups became peers it is also what pairs this row with
-            its other half one group up or down. The first implementation has
-            no round of its own (#428): a replay files it under review round 0,
-            and that chip read `round 0` beside a rail saying `implementation`. */}
-        {phase.round !== null && !isFirstImplementation(phase) && <Badge className="font-mono normal-case tracking-normal">round {phase.round}</Badge>}
+        {/* The round as the terminal's heading counts it, from one: the chip
+            reads `round 1` over `Plan critique (round 1)`, whose file is
+            `plan-critique-0.json`. A person reads the chip and the heading and
+            never the file name, so the chip agrees with the heading (#428); the
+            links keep the raw round, which is what names the file. Since the
+            groups became peers it is also what pairs this row with its other
+            half one group up or down. The first implementation has no round of
+            its own, so no chip: a replay files it under review round 0. */}
+        {phaseRound(phase) !== null && <Badge className="font-mono normal-case tracking-normal">round {phaseRound(phase)}</Badge>}
       </button>
 
       {open && (
@@ -510,7 +511,10 @@ function Step({
  */
 function ResumedRow({ from }: { from: ResumedFrom }) {
   const rounds: string[] = [];
-  if (from.planRound !== null) rounds.push(`plan ${String(from.planRound)}`);
+  // The plan round counted from one, as the cap check counts it (`round:
+  // planRound + 1` against `maxPlanRounds`) and as the footer does (#428). The
+  // review figure is already a count of fix rounds done, so it is drawn as is.
+  if (from.planRound !== null) rounds.push(`plan ${String(shownRound(from.planRound))}`);
   if (from.questionRound !== null && from.questionRound > 0) {
     rounds.push(`question ${String(from.questionRound)}`);
   }

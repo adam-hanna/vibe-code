@@ -839,8 +839,22 @@ they are waiting on. Four things in it are worth carrying:
   and the round alone cannot tell it apart. The core is not asked for `round: 0`, which would be
   a number nothing counted. The same answer takes `round 0` off the implement turn's chip
   (`turnRound`), the replayed group's chip and the Code pane's title (`code · implementation`).
-  The round chips on the loop column, the turns and the pilot's cards still show the archive's
-  round, which names the file behind them.
+- **Every round a person reads counts from one; every file, link and key counts from zero**
+  (#428, the owner's decision on #433). The chips used to show the archive's round, on the
+  reasoning that a row has to agree with the file, so the first critique read `round 0` under a
+  heading saying `Plan critique (round 1)`. A person reads the chip and the heading and never
+  the file name, so the display agrees with the heading. `shownRound` in `rounds.ts` is the one
+  `+ 1`, and `phaseRound` and `turnRound` apply it to plan, critique and review groups and to
+  `plan`, `revise`, `critique`, `review` and `vote` turns. Fix and verify-fix rounds are already
+  counted from one by the core (each is incremented before its turn) and are drawn as they
+  arrive. The loop column's round heads, turn rows, the live card, the Output strip, the pilot's
+  round cards and the Plans, Critique, Review and Code pane titles all ask it, and
+  `pass-label.test.ts` fails on a site that draws a raw round. Links, pane ids and `reveal` keep
+  the raw round, so a `round 1` chip still opens `plan-critique-0.json`. The footer's `plan N of
+  M` counts from one too, because the cap is checked against `planRound + 1`; its review and
+  verify figures are counts of fix rounds done and are drawn as they arrive. The core's
+  revision lines (`Plan round N`, `revising the plan (round N)`) and the replay's census line
+  now count from one as well.
 - **A resume is pointed at the repository, and `dir` is not it.** `run_started`
   carries both and they are not interchangeable: `identity.dir` is the run's
   **own** directory — `<repo>/.vibe/runs/<id>` — and `identity.repo` is the

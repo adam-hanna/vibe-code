@@ -539,7 +539,9 @@ export function replayRun(state: RunState, sources: ReplaySources): Replay {
         censusSaid.add(key);
         push(
           turn.at,
-          say('findings_reported', `${phase} round ${String(round)}`, {
+          // The sentence counts from one, as the live headings do; the key and
+          // the census match keep the archive's round (#428).
+          say('findings_reported', `${phase} round ${String(round + 1)}`, {
             phase,
             counts: census.counts,
           }),
