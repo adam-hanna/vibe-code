@@ -545,9 +545,10 @@ children, and is its own change.
   from scratch, so a `review_finder_failed` from the attempt it replaced must not lower the
   count. The cost half comes from `chargedTurns`, `turn_failed` included. The window's "found by
   n of m" takes `m` from the same frame, which `replayRun` carries, and never the configured count.
-- **⚑ The first finder keeps its memory.** `roles.reviewer` keeps its Codex `review` thread
-  across rounds while additional finders are fresh every round, so it is less independent than
-  the others. Accepted, because a fresh first seat would break the default run's identity.
+- **⚑ The first finder keeps its memory.** `roles.reviewer` keeps its conversation across
+  rounds (the Codex `review` thread by default, Claude's `main` session if it is seated on
+  Claude) while additional finders are fresh every round, so it is less independent than the
+  others. Accepted, because a fresh first seat would break the default run's identity.
 
 **Part C runs the vote.** Inside `runReview`, after the merge and `proveFindings` and before
 the return, so the caller still writes `code-review-<n>.json` once and the votes are in it

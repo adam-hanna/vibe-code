@@ -1,8 +1,10 @@
 # How the loop works
 
-vibe runs two phases. In **planning**, the planner (Claude, by default) writes a plan and the critic (Codex) attacks it, until the plan has no blocking findings. In **implementation**, the implementer (Claude, in the same session that planned) writes the code, vibe runs your verification gates itself, and the reviewer (Codex) reviews the diff, until that has no blocking findings either. Which agent holds each job is the [role table](./configuration#roles).
+vibe runs two phases. In **planning**, the planner writes a plan and the critic attacks it, until the plan has no blocking findings. In **implementation**, the implementer writes the code, vibe runs your verification gates itself, and the reviewer reviews the diff, until that has no blocking findings either. A fifth role, the answerer, answers the planner's questions.
 
-The planner plans in Claude's read-only plan mode. The implementer then resumes **the same session** with permissions bypassed, so it starts with the plan and the whole investigation in context. That is also why vibe works on a branch of its own.
+By default Claude is the planner and the implementer, and Codex is the critic, the answerer and the reviewer. Each role can be seated on either Claude or Codex, with its own model and effort; which agent holds each job is the [role table](./configuration#roles).
+
+Under the default table the planner plans in Claude's read-only plan mode, and the implementer then resumes **the same session** with permissions bypassed, so it starts with the plan and the whole investigation in context. An implementer that does not share the planner's conversation, such as one on Codex, starts without that history and works from the approved plan, which every implement prompt carries. Either way implementation writes to your checkout, which is also why vibe works on a branch of its own.
 
 ## Severities, and when a phase moves on
 
@@ -143,7 +145,7 @@ This is how you overrule a guard. Both guards are deliberately blunt, so a findi
 A headless planner cannot ask you anything, so vibe makes its questions data: the plan must list its open questions and the assumptions it made.
 
 1. **Non-blocking questions** proceed on the planner's own recommended answer. The choice is recorded as an assumption, and the critic is pointed at it, so a wrong assumption comes back as a finding.
-2. **Blocking questions** go to the answerer (Codex) first, which reads the code and answers what it can.
+2. **Blocking questions** go to the answerer (Codex, by default) first, which reads the code and answers what it can.
 3. **Anything the answerer will not guess**, such as product intent, priorities or taste, comes to you, and so does any answer it gives with low confidence. The run exits 2 with the questions in `NEEDS-INPUT.md`.
 
 A round of answered questions does not use up one of the plan's critique rounds; `loop.maxQuestionRounds` bounds it separately. A question that only rephrases one already answered is not asked again, and `REPHRASED.md` records each such match so you can check it. The [`questions`](./configuration#questions) settings change who is asked.
@@ -155,9 +157,9 @@ A round of answered questions does not use up one of the plan's critique rounds;
 1. asks the outgoing session for a dense handoff briefing: what was learned, decisions made, dead ends, what comes next;
 2. continues on a **fresh session**, seeded with that briefing and the current plan of record.
 
-Rotation happens only between turns, and by default it runs while Codex is busy critiquing or reviewing, so it costs no extra time. Each briefing is saved as `handoff-<n>.md`. If compaction fails, the run carries on in the existing session.
+Rotation happens only between turns, and by default it runs while a turn in another conversation is in progress (under the default table, Codex critiquing or reviewing), so it costs no extra time. It rotates the implementer's conversation, so it is off when the implementer is on Codex. Each briefing is saved as `handoff-<n>.md`. If compaction fails, the run carries on in the existing session.
 
-Codex conversations cannot be compacted: `codex exec resume` has no way to start a new thread from a summary. The critic and answerer share one Codex thread, and the reviewer has its own, so the conversation reviewing the code is not the one that approved the plan. Codex never reports its context window to `codex exec`, so occupancy is shown in tokens unless you set `codex.contextWindow`.
+Codex conversations cannot be compacted: `codex exec resume` has no way to start a new thread from a summary. When those roles are on Codex, the critic and answerer share one Codex thread and the reviewer has its own, so the conversation reviewing the code is not the one that approved the plan. Codex never reports its context window to `codex exec`, so occupancy is shown in tokens unless you set `codex.contextWindow`.
 
 ## Progress during a turn
 

@@ -40,7 +40,7 @@ A project file is committed, and a repository you clone must not decide who pays
 
 ## `roles`
 
-`roles` decides which agent does each job. The default is Claude for `planner` and `implementer`, and Codex for `critic`, `answerer` and `reviewer`. Name only the roles you want to change.
+`roles` decides which agent does each job. Every role can be Claude or Codex, with its own model and effort; the default is Claude for `planner` and `implementer`, and Codex for `critic`, `answerer` and `reviewer`. Name only the roles you want to change. `--role <role>:<key>=<value>` changes one key of one role for a single run, and the desktop app's Settings edits this section for you.
 
 A role takes a provider name, or an object:
 
@@ -64,7 +64,7 @@ A role takes a provider name, or an object:
 
 A role's value is replaced whole when files are layered: a project that writes `"reviewer": {"provider": "codex", "effort": "max"}` drops any model the global file named for the reviewer. The `--role` flag is different: it patches one key.
 
-What a role does not choose is decided by its job. Writing roles get a writable sandbox; Codex's reading roles get `codex.sandbox`. Claude roles share one session. The Codex critic and answerer share one thread, the Codex reviewer keeps a separate thread, and a Codex implementer runs each turn fresh, because a resumed Codex turn cannot write. Some tables run with a warning rather than a refusal, for example a reviewer on the same provider as the implementer, which loses the independent second opinion.
+What a role does not choose is decided by its job. Writing roles get a writable sandbox; Codex's reading roles get `codex.sandbox`. Claude roles share one session. The Codex critic and answerer share one thread, the Codex reviewer keeps a separate thread, and a Codex implementer runs each turn fresh, because a resumed Codex turn cannot write. No assignment of providers to roles is refused: the one refusal left, a Codex writer on a carried Codex thread, cannot arise from a `roles` section. Some tables run with a warning, for example a critic, answerer or reviewer on the same provider as the implementer, which loses the independent second opinion, or a Codex implementer, which turns session rotation off.
 
 ## `review`
 
@@ -149,8 +149,8 @@ The six boundaries, and their defaults:
 |---|---|---|
 | `claude.model` | `"default"` | `"default"` sends no `--model`, so Claude Code uses its own default for your account and a new model reaches your runs with no change to vibe. Name a model to pin one. |
 | `claude.effort` | `"medium"` | Reasoning effort: `low`, `medium`, `high`, `xhigh` or `max`. |
-| `claude.planTimeoutMs` | `1800000` (30 min) | Per planning turn, and for the session-handoff turn. |
-| `claude.implementTimeoutMs` | `5400000` (90 min) | Per implement or fix turn. |
+| `claude.planTimeoutMs` | `1800000` (30 min) | Per read-only Claude turn: planning by default, and a critique, answer or review when a table seats that role on Claude. Also the session-handoff turn. |
+| `claude.implementTimeoutMs` | `5400000` (90 min) | Per implement or fix turn, when the implementer is on Claude. |
 
 ## `codex`
 
@@ -159,7 +159,7 @@ The six boundaries, and their defaults:
 | `codex.model` | `"default"` | `"default"` sends no `-m`, so Codex uses its own default. |
 | `codex.effort` | `"xhigh"` | Reasoning effort. |
 | `codex.sandbox` | `"read-only"` | Sandbox for Codex's reading roles: `read-only`, `workspace-write` or `danger-full-access`. A writing role always gets a writable sandbox. |
-| `codex.timeoutMs` | `2700000` (45 min) | Per critique, answer or review turn. |
+| `codex.timeoutMs` | `2700000` (45 min) | Per read-only Codex turn: a critique, answer or review by default, and planning when a table seats the planner on Codex. |
 | `codex.implementTimeoutMs` | `5400000` (90 min) | Per writing turn, when a table seats the implementer on Codex. |
 | `codex.persistSession` | `true` | Continue each Codex conversation across the run, so a judge remembers what it already raised. `false` (`--no-codex-session`) makes every turn a fresh one-shot. |
 | `codex.contextWindow` | `null` | The Codex model's context window, in tokens. Codex never reports it to `codex exec`, so vibe does not guess. Unset, occupancy is shown in tokens with no percentage. |
@@ -172,7 +172,7 @@ The six boundaries, and their defaults:
 | `loop.maxPlanRounds` | `5` | Plan critique rounds before the run stops and asks. A round answering the planner's own questions does not count. |
 | `loop.maxReviewRounds` | `5` | Code review rounds. |
 | `loop.maxVerifyRounds` | `3` | Fix rounds for a failing verification gate. Counted separately from review. |
-| `loop.maxQuestionRounds` | `3` | Rounds of the planner's questions answered by Codex before they come to you. |
+| `loop.maxQuestionRounds` | `3` | Rounds of the planner's questions answered by the answerer before they come to you. |
 | `loop.p1Tolerance` | `1` | How many P1 findings a phase may carry forward instead of fixing. `0` demands a clean verdict. A P0 is never carried. |
 | `loop.oscillationThreshold` | `3` | Stop when the same set of blocking findings comes back this many rounds running. |
 | `loop.convergenceWindow` | `3` | How many recent rounds the convergence trend looks at, late in the round budget. |
@@ -192,10 +192,10 @@ The six boundaries, and their defaults:
 
 | Key | Default | Meaning |
 |---|---|---|
-| `questions.askCodex` | `true` | Send the planner's blocking questions to Codex (the answerer) first. `false` (`--no-codex-answers`) sends every one straight to you. |
-| `questions.answerNonBlocking` | `true` | Send non-blocking questions to Codex too. `false` (`--blocking-questions-only`) lets the planner proceed on its own answer, recorded as an assumption. |
-| `questions.escalateOnDefer` | `true` | A question Codex marks as product intent, priority or taste comes to you. |
-| `questions.escalateOnLowConfidence` | `true` | A question Codex answers with low confidence comes to you. |
+| `questions.askCodex` | `true` | Send the planner's blocking questions to the answerer (Codex, by default) first. The name is historical: it switches the answerer, whichever provider holds it. `false` (`--no-codex-answers`) sends every one straight to you. |
+| `questions.answerNonBlocking` | `true` | Send non-blocking questions to the answerer too. `false` (`--blocking-questions-only`) lets the planner proceed on its own answer, recorded as an assumption. |
+| `questions.escalateOnDefer` | `true` | A question the answerer marks as product intent, priority or taste comes to you. |
+| `questions.escalateOnLowConfidence` | `true` | A question the answerer answers with low confidence comes to you. |
 
 ## `git`
 
@@ -243,7 +243,7 @@ Two runs may not both work in the repository itself at once. Two runs that each 
 |---|---|---|
 | `context.enabled` | `true` | Rotate Claude's session when its context fills. `--no-compact` turns it off. |
 | `context.compactAboveRatio` | `0.5` | Rotate once the prompt passes this share of the model's context window. |
-| `context.compactDuringCodex` | `true` | Do the rotation while a Codex turn is running, so it costs no extra wall-clock. |
+| `context.compactDuringCodex` | `true` | Do the rotation while a turn in another conversation is running (a Codex turn, under the default table), so it costs no extra wall-clock. |
 
 See [Context compaction](./how-it-works#context-compaction).
 

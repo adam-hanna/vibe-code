@@ -10,8 +10,8 @@ Most files are conditional: a missing one means the run had nothing to put in it
 |---|---|
 | `PLAN.md` | The approved plan. |
 | `plan-<n>.json` | Each plan round: the plan, its declared assumptions, open questions, out-of-scope list and acceptance criteria. |
-| `plan-critique-<n>.json` | Codex's findings on each plan round. |
-| `answers-<n>.json` | Codex's answers to the planner's questions, one file per question round. |
+| `plan-critique-<n>.json` | The critic's findings on each plan round. |
+| `answers-<n>.json` | The answerer's answers to the planner's questions, one file per question round. |
 | `implementation-report.md` | What the implementer says it did, under five fixed headings. It is handed to the reviewer as a claim, not as evidence. |
 | `fix-report-<n>.md`, `verify-fix-<n>.md` | The same report after a review fix round, or after a verification repair. |
 | `code-review-<n>.json` | The reviewer's findings on each round, including its verdict on any test or config file the round changed. |

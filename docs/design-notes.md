@@ -24,7 +24,7 @@ vibe drives Codex as `codex exec`, and nothing that interface returns says how l
 
 ## Agreement is not proof
 
-A clean run means two different models agreed and your tests passed several times. Both models can still be wrong in the same way, and a test suite only checks what it checks. That is why vibe does not stop at agreement:
+A clean run means the critic and the reviewer found nothing blocking, which under the default roles is two different models agreeing, and your tests passed several times. Both models can still be wrong in the same way, and a test suite only checks what it checks. That is why vibe does not stop at agreement:
 
 - it runs your **verification gates itself** rather than believing a report that they passed;
 - it runs them **more than once**, to catch a race that won the first time;

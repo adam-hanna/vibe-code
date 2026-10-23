@@ -135,9 +135,9 @@ Options apply to `run`, `plan`, `resume` and `doctor`, and override the configur
 
 | Flag | Meaning |
 |---|---|
-| `--plan-timeout <min>` | Per planning turn. Default 30. |
-| `--implement-timeout <min>` | Per implement or fix turn. Default 90. |
-| `--codex-timeout <min>` | Per Codex turn. Default 45. |
+| `--plan-timeout <min>` | Per read-only Claude turn (`claude.planTimeoutMs`): planning, by default. Default 30. |
+| `--implement-timeout <min>` | Per implement or fix turn on Claude (`claude.implementTimeoutMs`). Default 90. |
+| `--codex-timeout <min>` | Per read-only Codex turn (`codex.timeoutMs`). A Codex implementer's turns use `codex.implementTimeoutMs`. Default 45. |
 | `--verify-timeout <min>` | Per verification command run. Default 15. |
 
 ### Context and progress
@@ -153,8 +153,8 @@ Options apply to `run`, `plan`, `resume` and `doctor`, and override the configur
 
 | Flag | Meaning |
 |---|---|
-| `--no-codex-answers` | Send every blocking question straight to you. |
-| `--blocking-questions-only` | Send Codex only the questions marked blocking. |
+| `--no-codex-answers` | Send every blocking question straight to you, skipping the answerer whichever provider holds it. |
+| `--blocking-questions-only` | Send the answerer only the questions marked blocking. |
 
 ### Git and verification
 
