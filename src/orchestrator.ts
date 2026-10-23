@@ -1126,9 +1126,20 @@ async function planPhase(
       // the move and here changes nothing. A plain resume moves nothing and
       // revises as it always did.
       const moved = carried.some((f) => severityChangesOf(f).some((c) => c.by === 'human'));
-      const accepted = moved ? gate(carried, cfg.loop.p1Tolerance) : null;
-      if (accepted?.pass === true) {
-        if (state.planRevisedByAnswer !== true) {
+      if (moved && state.planRevisedByAnswer === true) {
+        // An answer wins: approving now would approve a plan revised against
+        // it that no critic has read. Said whether or not the gate would have
+        // passed, because the person who demoted and also answered is owed the
+        // sentence either way - a partial demotion with an answer is the same
+        // combination, and staying silent there left them guessing (review of
+        // #394 part 2).
+        log.info(
+          'Your severity changes were not taken as accepting the plan, because an answer was ' +
+            'also given - revising against the answer and the findings, then critiquing.',
+        );
+      } else if (moved) {
+        const accepted = gate(carried, cfg.loop.p1Tolerance);
+        if (accepted.pass) {
           log.info(
             'A person changed a severity since the last critique and the gate now passes - ' +
               'approving the plan without another critique.',
@@ -1136,12 +1147,6 @@ async function planPhase(
           approvePlan(state, plan, carried, accepted, { byPerson: true });
           break;
         }
-        // An answer wins: approving now would approve a plan revised against
-        // it that no critic has read.
-        log.info(
-          'Your severity changes were not taken as accepting the plan, because an answer was ' +
-            'also given - revising against the answer and the findings, then critiquing.',
-        );
       }
       if (firstPass) {
         log.info(

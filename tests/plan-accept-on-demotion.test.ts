@@ -197,6 +197,28 @@ test('an answer given beside demotions is revised and critiqued, and nothing is 
   assert.equal(state.planRevisedByAnswer, undefined, 'cleared by the findings revision');
 });
 
+test('an answer beside a partial demotion, where the gate still fails, is still told why nothing was accepted', async (t) => {
+  // The review of #394 part 2: the sentence used to sit under "the gate now
+  // passes", so a person who answered and demoted only some blockers got
+  // nothing. The combination is the same, so the sentence is too.
+  const { state, error } = await escalated();
+  escalationFile(state, error);
+  answerNeedsInput(state, () => 'Continue, but keep the parser out of it.');
+  moveInNeedsInput(state, [{ id: 'r5-a', to: 'P2', why: DEMOTE }]);
+  const said: string[] = [];
+  setSink((n) => said.push(n.message));
+  t.after(() => setSink(null));
+
+  const calls: string[] = [];
+  await orchestrate(state, loop(), true, agents({ claude: () => planFixture(), codex: () => report([]) }, calls));
+
+  assert.deepEqual(calls, ['revise-q0', 'revise-6', 'critique-6']);
+  assert.equal(approval(state)['byPerson'], undefined);
+  assert.ok(
+    said.some((m) => m.startsWith('Your severity changes were not taken as accepting the plan, because an answer was also given')),
+  );
+});
+
 test('a stop after the answer revision has saved still does not accept on the next resume', async () => {
   const state = await answeredAndDemoted();
   // Dies on the findings revision, after the answers revision has been saved.
