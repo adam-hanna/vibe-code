@@ -575,6 +575,22 @@ children, and is its own change.
   rounds (the Codex `review` thread by default, Claude's `main` session if it is seated on
   Claude) while additional finders are fresh every round, so it is less independent than the
   others. Accepted, because a fresh first seat would break the default run's identity.
+  **Still open (#435).** The trade is memory of what it raised and of the fixer's reports
+  (fewer findings re-raised under new ids) against independence (fewer findings anchored on its
+  own last round). What would settle it is a measurement across runs with `review.finders` set:
+  how often, from round 2 on, the first finder re-raises a finding the fixer reported fixed or
+  rebutted, against how often a fresh finder does, read from `foundBy` and
+  `fix-dispositions-<n>.json`. As of #435 no such run exists: none of the 27 runs archived in
+  the main checkout's `.vibe/runs/` has a `review-<n>-f<k>` or `vote-` turn, so there is no
+  number and none is given. #435 changed only the user-facing pages (`configuration.md`,
+  `how-it-works.md`, the README's `review.finders` row), which now say it. The facts they
+  state: a Codex reviewer is on `SLOTS.review`, carried under `codex.persistSession`, and
+  `--no-codex-session` makes it fresh along with every Codex role; a Claude reviewer is on
+  `main`, the planner's and implementer's session, whose `persists` is constant; additional
+  finders are on `fresh-claude`/`fresh-codex` and get `hasMemory: false`. Every seat gets the
+  same `latestReport`; only the carried reviewer also has its earlier findings and earlier
+  reports in context, and no reviewer is shown the dispositions. If it changes, it goes behind
+  a setting or is justified by that measurement, and a run with no finders stays byte-identical.
 
 **Part C runs the vote.** Inside `runReview`, after the merge and `proveFindings` and before
 the return, so the caller still writes `code-review-<n>.json` once and the votes are in it
