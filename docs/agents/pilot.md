@@ -565,6 +565,16 @@ What a person presses is unchanged: `start_run`, `answer_gate`, `run_command` an
 make a change itself rather than propose a run for it, and to use `run_command` for
 long-running processes, since only those can be followed and stopped by the window.
 
+**The pilot names the run's branch, on the card** (#356). `start_run` takes an optional
+`branch`, which `launchArgv` sends as `--branch <name>`, so the name is in the argv the card
+draws and in its summary line (*"…, on branch fix/x"*). The prompt asks for a short,
+descriptive name on every proposal, a naming rule from the person's instructions where there
+is one, and a fresh proposal when the person asks for another name. vibe enforces no
+convention: the tool refuses only shapes git would refuse (`branchShapeRefusal`, a cheap
+abridgement), and the core's `git check-ref-format` and its refusal of an existing branch are
+the authority. The rejected alternative - the planner naming it and vibe renaming the branch at
+plan approval - is recorded in `docs/plans/2026-10-21-branch-naming-design.md`.
+
 **It may read the repository and nothing else, and the four layers are named in
 the argv.** #193 decided the read: a pilot that can open `PLAN.md` and the diff is
 what somebody asking *"what is this doing"* wants, and it is what makes this

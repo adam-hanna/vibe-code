@@ -248,10 +248,47 @@ export async function stashesFor(cwd: string, branch: string): Promise<StashEntr
  */
 export function runBranch(
   cfg: { git: { useBranch: boolean; branchPrefix: string } },
-  state: { id: string; branch: string | null },
+  state: { id: string; branch: string | null; requestedBranch?: string },
 ): string | null {
   if (!cfg.git.useBranch) return null;
-  return state.branch ?? `${cfg.git.branchPrefix}${state.id}`;
+  // The name `--branch` asked for comes second, after the one the run already
+  // took (#356): it is what a fresh run will be on, so the setup script's
+  // `VIBE_BRANCH`, the branch `prepareGit` makes and `run_branch` all read it
+  // from here rather than each spelling the override again.
+  return state.branch ?? state.requestedBranch ?? `${cfg.git.branchPrefix}${state.id}`;
+}
+
+/**
+ * Why `name` cannot be a run's branch, or null when it can (#356).
+ *
+ * **git is the authority**, through `git check-ref-format --branch`, so the
+ * rule is the one `git checkout -b` applies rather than a second copy of it
+ * that drifts. Two refusals come before it: a name starting with `-` would be
+ * read as an option by every git command it is handed to, and `HEAD` is a
+ * name every git command reads as something else. The output is compared with
+ * the input because `--branch` also EXPANDS `@{-1}` to the previous branch,
+ * and a name that means a different branch is not the name that was asked for.
+ *
+ * A git that cannot be run refuses rather than passing: a name nobody checked
+ * is not a checked one (fail closed).
+ */
+export async function branchNameRefusal(cwd: string, name: string): Promise<string | null> {
+  const why = (reason: string): string =>
+    `--branch "${name}" is not a branch name git accepts: ${reason}. Nothing has been created.`;
+  if (name.trim() === '') return why('it is empty');
+  if (name.startsWith('-')) return why('it starts with "-", which git would read as an option');
+  if (name === 'HEAD') return why('"HEAD" is not a branch');
+  let result: GitResult;
+  try {
+    result = await git(cwd, ['check-ref-format', '--branch', name], { allowFail: true });
+  } catch (err) {
+    return why(`git could not be run to check it (${err instanceof Error ? err.message : String(err)})`);
+  }
+  if (result.code !== 0) {
+    return why(result.stderr === '' ? 'git check-ref-format refused it' : result.stderr);
+  }
+  if (result.stdout !== name) return why(`git reads it as "${result.stdout}"`);
+  return null;
 }
 
 /**

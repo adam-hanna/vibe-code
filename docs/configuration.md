@@ -202,7 +202,7 @@ The six boundaries, and their defaults:
 | Key | Default | Meaning |
 |---|---|---|
 | `git.useBranch` | `true` | Work on a branch of the run's own. Implementation runs with permissions bypassed, so this keeps it off your branch. `--no-branch` turns it off. |
-| `git.branchPrefix` | `"vibe/"` | The branch is this prefix plus the run id. |
+| `git.branchPrefix` | `"vibe/"` | The branch is this prefix plus the run id, unless the run was started with `--branch <name>`. |
 | `git.commitEachRound` | `true` | Commit after every implement and fix round, so you get a history to bisect. |
 | `git.worktree` | `false` | Run in a git worktree of its own, at `.worktrees/<run-id>`. See [Worktrees](#worktrees). Project only. |
 | `git.worktreeCommand` | `null` | Your own command for making that worktree, instead of `git worktree add`. Project only. |

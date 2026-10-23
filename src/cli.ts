@@ -156,6 +156,9 @@ Options
   --progress-interval <sec>  Heartbeat cadence during a turn (default: 30)
   --no-progress              Do not emit the in-turn progress heartbeat
   --no-branch                Do not create an isolated branch
+  --branch <name>            The run's branch, instead of git.branchPrefix + the run id
+                             (run and plan only). Checked with git check-ref-format, and
+                             refused if a branch of that name already exists
   --no-codex-answers         Escalate every blocking question straight to you
   --blocking-questions-only  Only send Codex the questions marked blocking
   --no-codex-session         Run each Codex turn as a fresh one-shot (no memory)
@@ -204,6 +207,12 @@ interface ParsedArgs {
     progressInterval?: number;
     noProgress?: boolean;
     noBranch?: boolean;
+    /**
+     * The run's branch name, instead of `branchPrefix + id` (#356). Not a
+     * config setting and absent from `buildOverrides`: it names one run's
+     * branch, and a resume keeps the branch the run already took.
+     */
+    branch?: string;
     noCodexAnswers?: boolean;
     noCodexSession?: boolean;
     blockingQuestionsOnly?: boolean;
@@ -369,6 +378,7 @@ export function parseArgs(args: readonly string[]): ParsedArgs {
       case '--progress-interval': out.flags.progressInterval = nextNum(); break;
       case '--no-progress': out.flags.noProgress = true; break;
       case '--no-branch': out.flags.noBranch = true; break;
+      case '--branch': out.flags.branch = next(); break;
       case '--no-codex-answers': out.flags.noCodexAnswers = true; break;
       case '--no-codex-session': out.flags.noCodexSession = true; break;
       case '--blocking-questions-only': out.flags.blockingQuestionsOnly = true; break;
@@ -581,6 +591,70 @@ export function buildOverrides(flags: ParsedArgs['flags']): ConfigOverrides {
   return { claude, codex, loop, budget, git: gitCfg, questions, context, gates, verify, progress };
 }
 
+/**
+ * Why `vibe run --branch <name>` cannot start, or null (#356).
+ *
+ * **Every refusal is before anything is created**, so a bad name costs a
+ * sentence and leaves no run directory, no lock and no ref behind.
+ *
+ * - With branch isolation off there is no run branch for the name to be,
+ *   and running on whatever is checked out after somebody named a branch is the
+ *   silent outcome this refuses.
+ * - The name is git's to judge (`branchNameRefusal`).
+ * - **A branch that already exists is refused, by name** - and that includes
+ *   one checked out in some other worktree, since a worktree's branch is a ref
+ *   in the same repository. Adopting an existing branch was safe only because
+ *   run ids are unique and `branchPrefix + id` could only ever be this run's
+ *   own (#223); a name a person or the pilot chose has no such guarantee, and
+ *   committing onto somebody's branch is the loss. A resume never comes here:
+ *   it keeps adopting the branch it already took.
+ */
+async function branchFlagRefusal(
+  targetDir: string,
+  cfg: Config,
+  name: string,
+  noBranch: boolean,
+): Promise<{ code: ExitCode; reason: string } | null> {
+  if (!cfg.git.useBranch) {
+    return {
+      code: EXIT.ERROR,
+      reason: noBranch
+        ? '--branch and --no-branch cannot be used together: one names the run\'s branch and the ' +
+          'other says it has none. Drop one of them. Nothing has been created.'
+        : `--branch "${name}" names a run branch, but git.useBranch is off in this project's ` +
+          'config, so the run would have none. Turn git.useBranch on, or drop --branch. ' +
+          'Nothing has been created.',
+    };
+  }
+  const bad = await git.branchNameRefusal(targetDir, name);
+  if (bad !== null) return { code: EXIT.ERROR, reason: bad };
+  if (!(await git.isRepo(targetDir))) {
+    return {
+      code: EXIT.ERROR,
+      reason:
+        `--branch "${name}" names a branch, but ${targetDir} is not a git repository, so there ` +
+        'is nothing to put it in. Nothing has been created.',
+    };
+  }
+  if (await git.branchExists(targetDir, name)) {
+    return { code: EXIT.PREFLIGHT, reason: branchTakenReason(name) };
+  }
+  return null;
+}
+
+/**
+ * The one sentence for a `--branch` name that is already a branch (#356).
+ * `outcome` is what the refusal left behind, which differs between the two
+ * sites: `cmdRun` has created nothing, the preflight gate has a run directory.
+ */
+function branchTakenReason(name: string, outcome = 'Nothing has been created.'): string {
+  return (
+    `A branch named "${name}" already exists in this repository (perhaps checked out in another ` +
+    'worktree). vibe will not put a new run on a branch it did not create - its commits would ' +
+    `land on top of somebody else's. Choose another name, or delete that branch. ${outcome}`
+  );
+}
+
 async function cmdRun(
   args: readonly string[],
   planOnly: boolean,
@@ -614,6 +688,15 @@ async function cmdRun(
       return EXIT.ERROR;
     }
     extraContext = readFileSync(file, 'utf8');
+  }
+
+  // Before anything is allocated, so a refused name leaves nothing behind (#356).
+  if (flags.branch !== undefined) {
+    const refused = await branchFlagRefusal(targetDir, cfg, flags.branch, flags.noBranch === true);
+    if (refused !== null) {
+      log.fail(refused.reason, { id: 'run_failed', data: { code: refused.code, reason: refused.reason } });
+      return refused.code;
+    }
   }
 
   // Before anything is allocated, so a refused start leaves no run directory
@@ -702,6 +785,7 @@ async function startRun(
     config: cfg,
     extraContext,
     worktree: cfg.git.worktree,
+    requestedBranch: flags.branch,
   });
 
   log.attachTranscript(path.join(state.dir, 'transcript.log'));
@@ -859,6 +943,12 @@ async function cmdResume(
   if (flags.help) {
     console.log(USAGE);
     return EXIT.OK;
+  }
+  // Refused rather than ignored (#356): a resume keeps the branch the run took,
+  // and a name that silently did nothing would read as a rename that happened.
+  if (flags.branch !== undefined) {
+    log.fail('--branch names a NEW run\'s branch; a resume stays on the branch the run already has.');
+    return EXIT.ERROR;
   }
 
   const targetDir = path.resolve(flags.cwd ?? process.cwd());
@@ -1235,6 +1325,12 @@ async function cmdFork(args: readonly string[]): Promise<ExitCode> {
     return EXIT.OK;
   }
 
+  // A fork's branch is `branchPrefix + its id`, made from its checkpoint; naming
+  // it is not part of #356, so the flag is refused rather than ignored.
+  if (flags.branch !== undefined) {
+    log.fail('--branch names a new run\'s branch and is not taken by vibe fork.');
+    return EXIT.ERROR;
+  }
   const targetDir = path.resolve(flags.cwd ?? process.cwd());
   const sourceId = positional[0];
   if (sourceId === undefined) {
@@ -2186,6 +2282,15 @@ export async function runPreflight(
   // recorded together by `prepareGit` - so a run stopped in preflight comes back
   // exactly as it was.
   const fresh = options.resume !== true && state.branch === null;
+  // The `--branch` collision, again here because this is the last point before
+  // the worktree site makes the ref (#356). `cmdRun` refused it before anything
+  // was created; this closes the gap between the two and covers any caller that
+  // reaches the gate with a requested name some other way.
+  if (fresh && cfg.git.useBranch && state.requestedBranch !== undefined) {
+    if (await git.branchExists(state.targetDir, state.requestedBranch)) {
+      return refuse(branchTakenReason(state.requestedBranch, 'Nothing has been spent.'));
+    }
+  }
   let base: string | null = null;
   const ref = cfg.git.baseRef;
   if (fresh && ref !== null) {

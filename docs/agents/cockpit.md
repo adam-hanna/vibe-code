@@ -586,7 +586,8 @@ they are waiting on. Four things in it are worth carrying:
   deleted a capability. The owner then asked for exactly that — *"There should
   only be one start button and it should follow the 'talk it through' path"* —
   so the capability **moved** instead: `start_run` now takes `gates`,
-  `max_tokens` and `p1_tolerance`, built by the same `launchArgv`, and `1b`'s one
+  `max_tokens` and `p1_tolerance` (and, since #356, `branch`, which the pilot
+  fills with a name it proposes and the card shows as `--branch`), built by the same `launchArgv`, and `1b`'s one
   button is `start`. `briefFor` puts the composer's settings into the message
   under the brief, where the person can see them, and the pilot passes them on
   the call.

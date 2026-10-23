@@ -33,6 +33,11 @@ export interface Overrides {
   roles?: readonly { role: string; key: string; value: string }[];
   /** `--p1-tolerance`. How many P1s a phase may carry rather than fix. */
   p1Tolerance?: number | null;
+  /**
+   * `--branch`. The run's branch name, which the pilot proposes on the card
+   * (#356). Absent leaves the core's `git.branchPrefix` + run id.
+   */
+  branch?: string | null;
 }
 
 export function launchArgv(
@@ -46,6 +51,11 @@ export function launchArgv(
   // a path is a directory that does not exist and the error it produces says so
   // in the least helpful possible way.
   const argv: string[] = [planOnly ? 'plan' : 'run', task.trim(), '-C', dir.trim()];
+
+  // First of the flags, so the card shows the branch right under the directory
+  // it is made in (#356). The core's `git check-ref-format` is the authority on
+  // the name; `start_run` only refuses the shapes that are obviously not one.
+  if (typeof over.branch === 'string') argv.push('--branch', over.branch);
 
   // Sorted, so the same overrides always build the same argv. Two forms that
   // differ only in the order a person clicked would otherwise produce two
@@ -249,6 +259,8 @@ export interface Launched {
   task: string;
   dir: string;
   planOnly: boolean;
+  /** The `--branch` it named, present only when it named one (#356). */
+  branch?: string;
 }
 
 /**
@@ -278,6 +290,7 @@ export interface Launched {
  * silently free to drift, which is the failure this pair exists to catch.
  */
 const KNOWN_FLAGS: ReadonlySet<string> = new Set([
+  '--branch',
   '--gate',
   '--role',
   '--max-tokens',
@@ -295,10 +308,15 @@ export function readLaunchArgv(argv: readonly string[]): Launched | null {
   // this build knows. An argv from a newer build, or one a pilot proposed with a
   // flag this version has never seen, is `null` rather than a partially
   // understood launch - absent is a legal answer here and a guess is not.
+  let branch: string | undefined;
   for (let i = 4; i < argv.length; i += 2) {
     const flag = argv[i];
     if (flag === undefined || !KNOWN_FLAGS.has(flag)) return null;
-    if (argv[i + 1] === undefined) return null;
+    const value = argv[i + 1];
+    if (value === undefined) return null;
+    if (flag === '--branch') branch = value;
   }
-  return { task, dir, planOnly: command === 'plan' };
+  return branch === undefined
+    ? { task, dir, planOnly: command === 'plan' }
+    : { task, dir, planOnly: command === 'plan', branch };
 }

@@ -1687,6 +1687,27 @@ function readBranchPending(raw: unknown, ctx: ReadContext): true | undefined {
   );
 }
 
+/**
+ * The branch name `--branch` asked for (#356) - **refused when present and
+ * unreadable**, on `branchPending`'s reasoning: it is an instruction about which
+ * branch the run's commits land on, and dropped it would put a run that was
+ * stopped in preflight onto `branchPrefix + id` instead of the name the person
+ * approved on the card. A non-empty string is the only value any writer
+ * produces; git's own check ran before it was written.
+ */
+function readRequestedBranch(raw: unknown, ctx: ReadContext): string | undefined {
+  if (raw === undefined) return undefined;
+  if (isString(raw) && raw.trim() !== '') return raw;
+  return refuse(
+    'requestedBranch',
+    raw,
+    'a branch name, or nothing at all',
+    ctx,
+    'It is the branch --branch asked this run to be on; dropping it would put the run on a ' +
+      'branch nobody chose. Nothing was rewritten.',
+  );
+}
+
 function readTool(entry: unknown): AgentEnvironmentFacts['tools'][number] | null {
   if (!isRecord(entry)) return null;
   const version = entry['version'];
@@ -2014,6 +2035,8 @@ const READERS = {
   forkedFrom: (raw, ctx) => readForkOrigin(raw, ctx),
   forkPending: (raw, ctx) => readForkPending(raw, ctx),
   branchPending: (raw, ctx) => readBranchPending(raw, ctx),
+  // Absent stays absent: a run started without --branch (#356).
+  requestedBranch: (raw, ctx) => readRequestedBranch(raw, ctx),
   // Absent stays absent: a run from before #249, or one never put on a branch.
   start: (raw, ctx) => readStart(raw, ctx),
   // Absent stays absent: a run from before #389, or one not yet reviewed.

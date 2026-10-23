@@ -343,8 +343,51 @@ const READ_OUTPUT: ToolDef = {
  * refuses an unknown one by name when the run starts, and a second list of them
  * in the window is one that can disagree.
  */
+/**
+ * Why `name` is plainly not a branch name, or null (#356).
+ *
+ * **A cheap first pass, not the rule.** The core runs `git check-ref-format
+ * --branch` before anything is created, and that is the authority; this only
+ * refuses the shapes a model can be told about in one sentence before the card
+ * is drawn, so a proposal the core would refuse never reaches the button. It
+ * is git's rules, abridged - never a naming convention: vibe enforces none,
+ * and a project's standard lives in the person's instructions.
+ */
+export function branchShapeRefusal(name: string): string | null {
+  if (name === '') return 'it is empty';
+  if (/\s/.test(name)) return 'it has whitespace in it';
+  // Control characters and git's reserved punctuation.
+  if (/[\x00-\x1f\x7f~^:?*[\\]/.test(name)) return 'it has a character git does not allow in a branch name';
+  if (name.startsWith('-')) return 'it starts with "-"';
+  if (name === 'HEAD' || name === '@') return `"${name}" is not a branch`;
+  if (name.includes('..') || name.includes('@{') || name.includes('//')) {
+    return 'it has "..", "@{" or "//" in it';
+  }
+  if (name.startsWith('/') || name.endsWith('/') || name.endsWith('.')) {
+    return 'it starts or ends with "/", or ends with "."';
+  }
+  if (name.split('/').some((part) => part.startsWith('.') || part.endsWith('.lock'))) {
+    return 'a part of it starts with "." or ends with ".lock"';
+  }
+  return null;
+}
+
 function overridesOf(input: Readonly<Record<string, unknown>>): Overrides | string {
-  const over: { gates?: Record<string, string>; maxTokens?: number; p1Tolerance?: number } = {};
+  const over: {
+    gates?: Record<string, string>;
+    maxTokens?: number;
+    p1Tolerance?: number;
+    branch?: string;
+  } = {};
+  const branch = input['branch'];
+  if (branch !== undefined) {
+    if (typeof branch !== 'string') return '"branch" has to be a branch name, such as "fix/login-timeout".';
+    const why = branchShapeRefusal(branch);
+    if (why !== null) {
+      return `"branch" is not a branch name git would take: ${why}. Propose the run again with one that is.`;
+    }
+    over.branch = branch;
+  }
   const gates = input['gates'];
   if (gates !== undefined) {
     if (!isRecord(gates)) return '"gates" has to be an object of boundary to mode.';
@@ -425,6 +468,17 @@ const START_RUN: ToolDef = {
           'How many P1 findings a phase may carry rather than fix, if the user chose one. Omit ' +
           'otherwise.',
       },
+      // #356: the pilot names the branch, on the card, and the person can ask
+      // for another before pressing. vibe enforces no convention of its own.
+      branch: {
+        type: 'string',
+        description:
+          'The git branch the run works on: short, descriptive of the work, no spaces - for ' +
+          'example "fix/login-timeout". Follow any branch-naming rule in the user\'s ' +
+          'instructions. vibe creates it; do not create it yourself. A branch that already ' +
+          'exists is refused, so propose a new name. Omit only to let vibe name it after the ' +
+          'run id.',
+      },
     },
     required: ['task', 'directory', 'plan_only'],
     additionalProperties: false,
@@ -466,11 +520,12 @@ const START_RUN: ToolDef = {
     const over = overridesOf(input);
     if (typeof over === 'string') return { kind: 'refused', content: over };
     const argv = launchArgv(task, dir, planOnly, over);
+    const onBranch = over.branch === undefined || over.branch === null ? '' : `, on branch ${over.branch}`;
     return {
       kind: 'proposes',
       summary: planOnly
-        ? `plan only, in ${dir.trim()}`
-        : `a full run — this one writes code and commits — in ${dir.trim()}`,
+        ? `plan only, in ${dir.trim()}${onBranch}`
+        : `a full run — this one writes code and commits — in ${dir.trim()}${onBranch}`,
       effect: { kind: 'invoke', argv },
     };
   },
