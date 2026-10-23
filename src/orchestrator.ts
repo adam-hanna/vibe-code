@@ -4261,7 +4261,7 @@ async function codexDispatch(
       'codex',
       attempt(prompt),
       undefined,
-      cutOffRetry(state, cfg, req.label, spec.access, prompt, attempt),
+      cutOffRetry(state, cfg, req.label, spec.access, req.jsonSchema ?? spec.schema, prompt, attempt),
     );
   } catch (err: unknown) {
     throw noteRoleProvenance(err, req.role, cfg, roles, req.timeoutMs, req.seatPath);
@@ -4377,6 +4377,8 @@ function cutOffRetry(
   cfg: Config,
   label: string,
   access: RoleSpec['access'],
+  /** The schema the turn was sent with, which is what the note is worded for (#429). */
+  schema: object | undefined,
   prompt: string,
   attempt: (prompt: string) => () => Promise<CodexTurnResult>,
 ): (err: unknown) => (() => Promise<CodexTurnResult>) | null {
@@ -4428,7 +4430,7 @@ function cutOffRetry(
     );
     if (ceiling !== null) throw ceiling;
     recordEvent(state, 'turn_retried', { label, reason: 'max_output_tokens', attempt: 2 });
-    return attempt(`${prompt}\n\n${cutOffNote(err.findings)}`);
+    return attempt(`${prompt}\n\n${cutOffNote(err.findings, schema)}`);
   };
 }
 

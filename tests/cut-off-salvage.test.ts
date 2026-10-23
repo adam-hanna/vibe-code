@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { collapseBlankRuns, cutOffNote, salvageFindings, trailingBlank } from '@src/cutoff.js';
 import { emptySnapshot, parseCodexLine } from '@src/progress.js';
+import { FINDINGS_SCHEMA } from '@src/schemas.js';
 import { parseFinding } from '@src/validate.js';
 
 /**
@@ -56,6 +57,18 @@ test('a "findings" key that is not the top-level one is not mistaken for it', ()
   );
 });
 
+test('a top-level value that is the word "findings" is scanned past, not taken for the end (#429)', () => {
+  // Before #429 the scan returned null at the first `"findings"` at depth 1 that
+  // was not followed by `:`, so a summary of one word lost every whole finding.
+  const text = `{"verdict":"REVISE","summary":"findings","findings":[${whole('after-the-word')},${' '.repeat(2_000)}`;
+  assert.deepEqual(
+    salvageFindings(text).map((f) => f.id),
+    ['after-the-word'],
+  );
+  // Still nothing when the word is the only "findings" there is.
+  assert.deepEqual(salvageFindings('{"verdict":"REVISE","summary":"findings",'), []);
+});
+
 test('anything unreadable gives an empty list rather than an error', () => {
   for (const text of ['', '   ', 'not json', '{"findings":', '{"findings":{"a":1}}', '{"findings":["x"]}', '[]']) {
     assert.deepEqual(salvageFindings(text), [], JSON.stringify(text));
@@ -83,12 +96,12 @@ test('a model_said line for a message that stalled into blank space is short', (
 
 test('the retry note hands the findings over as unverified, and says so when there are none', () => {
   const finding = parseFinding(JSON.parse(whole('one')) as unknown, 0);
-  const note = cutOffNote([finding]);
+  const note = cutOffNote([finding], FINDINGS_SCHEMA);
   assert.match(note, /^## An earlier attempt at this turn was cut off/);
   assert.match(note, /It had written these findings in full\. Check each one again as if it were new; it has not been verified\./);
   assert.ok(note.includes('"id": "one"'));
 
-  const none = cutOffNote([]);
+  const none = cutOffNote([], FINDINGS_SCHEMA);
   assert.match(none, /cut off at its output limit before it finished/);
   assert.ok(!none.includes('```'), 'no findings, no findings block');
 });

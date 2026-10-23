@@ -12,7 +12,7 @@ import { detail, warn } from '@src/log.js';
 import { createHeartbeat, parseCodexLine, watchCodexItems, withHeartbeat } from '@src/progress.js';
 import type { ProgressOptions } from '@src/progress.js';
 import type { Effort, Finding, Sandbox, TokenUsage, TurnActivity } from '@src/types.js';
-import { collapseBlankRuns, salvageFindings, trailingBlank } from '@src/cutoff.js';
+import { collapseBlankRuns, collapseEscapedBlankRuns, salvageFindings, trailingBlank } from '@src/cutoff.js';
 
 let cachedBin: string | null = null;
 
@@ -884,8 +884,10 @@ export async function codexTurn(
         new Error(
           `codex wrote no structured output (${describeEnding({ code, signal })}).${cause}\n` +
             // Collapsed before the tail is taken: a stream of blank space would
-            // otherwise make the tail nothing but blank space.
-            `stderr:\n${stderr.slice(-2000)}\nstdout:\n${collapseBlankRuns(stdout).slice(-1000)}`,
+            // otherwise make the tail nothing but blank space. The escaped form,
+            // because this is the JSONL stream, where a message's newlines are
+            // the two characters `\n` (#429); it is error text, never parsed.
+            `stderr:\n${stderr.slice(-2000)}\nstdout:\n${collapseEscapedBlankRuns(stdout).slice(-1000)}`,
         ),
         spent,
       );
