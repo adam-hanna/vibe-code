@@ -789,6 +789,17 @@ The run then died with `codex wrote no structured output … reason: max_output_
   overwriting the one before, and the error for a second cut-off names both. Nothing closes a bracket or fills in `"ref":null`. That
   would be vibe writing the agent's answer, and it would have passed #389's REVISE with one finding
   of three, and #393's review with no `test_verdicts`, as whole. A cut-off turn has no verdict.
+- **The retry is gated on the role's access, not on its sandbox.** A `codex.sandbox` that gives
+  the read-only roles a writable sandbox therefore means a "read-only" turn can have side effects,
+  and a cut-off one is still run again, side effects and all.
+- **The retry note is in the schema's own shape, and worded for it** (#429). Salvaged findings
+  are shown as the turn's schema puts them on the wire: the keys in its `properties` order, read
+  from the schema rather than restated, with every key and its nulls, not `parseFinding`'s shape
+  with `reproducer` after `evidence` and the nulls dropped. A schema with no `findings` (the
+  answerer's, a verifier's vote) is told only that it was cut off, and salvage finds nothing in
+  it. The error's stdout tail also collapses blank runs written as escapes (`\n`, `\r`, `\t`),
+  because that is how a message's newlines arrive in the JSONL stream. Nothing that is parsed
+  goes through it.
 - **What is said.** `codex_cut_off` warns, `turn_retried` is recorded, and the summary prints one
   `Retries:` line when there were any. Codex reports no usage for a cut-off attempt, so none is
   charged and the warning says so. Reading the figure from the session log is a follow-up. The

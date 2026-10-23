@@ -1,9 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { OutputCutOffError } from '@src/codex.js';
+import { collapseEscapedBlankRuns } from '@src/cutoff.js';
 import type { CodexTurnOptions } from '@src/codex.js';
 import type { RunFn, RunResult } from '@src/proc.js';
 import { codexTurnNoMcp as codexTurn } from './helpers/codex-mcp.js';
@@ -233,4 +234,60 @@ test("a plain failure's stdout tail is collapsed rather than a tail of blank spa
   );
   assert.ok(err instanceof Error && !(err instanceof OutputCutOffError));
   assert.match(err.message, /<… 20,000 blank characters …>/);
+});
+
+test('escaped blank runs in the JSONL stream are collapsed, counted as the characters they encode (#429)', () => {
+  // In the stream a message's newlines are the two characters `\n`, so the #389
+  // stall of newlines and `\r ` pairs never makes a literal run.
+  const stalled = JSON.stringify({ text: `{"verdict":${'\n\r '.repeat(500)}` });
+  assert.equal(collapseEscapedBlankRuns(stalled), '{"text":"{\\"verdict\\":<… 1,500 blank characters …>"}');
+  // Below the threshold, and real indentation, are left alone.
+  const indented = JSON.stringify({ excerpt: `if (a) {\n${' '.repeat(25)}return b;` });
+  assert.equal(collapseEscapedBlankRuns(indented), indented);
+  const short = JSON.stringify({ text: '\n'.repeat(999) });
+  assert.equal(collapseEscapedBlankRuns(short), short);
+  // An escaped backslash followed by `n` is a backslash and a letter, not a newline.
+  const backslashes = JSON.stringify({ text: '\\n'.repeat(2_000) });
+  assert.equal(collapseEscapedBlankRuns(backslashes), backslashes);
+  // Literal runs are still collapsed, as `collapseBlankRuns` does.
+  assert.equal(collapseEscapedBlankRuns(`a${' '.repeat(1_000)}b`), 'a<… 1,000 blank characters …>b');
+});
+
+test("a plain failure's stdout tail collapses a stall of escaped newlines (#429)", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'vibe-cut-off-'));
+  const err: unknown = await codexTurn(
+    options(dir),
+    stream([
+      message(`{"verdict":${'\n\r '.repeat(40_000)}`),
+      JSON.stringify({ type: 'turn.failed', error: { message: 'boom' } }),
+    ]),
+  ).then(
+    () => assert.fail('a failed turn must not succeed'),
+    (e: unknown) => e,
+  );
+  assert.ok(err instanceof Error && !(err instanceof OutputCutOffError));
+  assert.match(err.message, /<… 120,000 blank characters …>/);
+  assert.ok(err.message.includes('"turn.failed"'), 'the tail reaches the line after the stall');
+});
+
+test('a parsed answer keeps every blank character an excerpt quotes, escaped or not (#429)', async () => {
+  // The collapse is for error text only. An accepted turn's output, and the raw
+  // text beside it, are what the model wrote, including a whitespace run far
+  // longer than the collapse threshold.
+  const dir = mkdtempSync(path.join(tmpdir(), 'vibe-cut-off-'));
+  const excerpt = `if (a) {\n${' '.repeat(25)}return b;\n}${'\n'.repeat(1_500)}${' '.repeat(1_500)}// end`;
+  const answer = {
+    verdict: 'REVISE',
+    summary: 's',
+    findings: [{ evidence: [{ kind: 'code', ref: null, path: 'src/x.ts', line: 1, excerpt }] }],
+  };
+  const written = JSON.stringify(answer);
+  const lines = [message(written), JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } })];
+  const result = await codexTurn(options(dir), (_bin, _args, opts): Promise<RunResult> => {
+    for (const line of lines) opts?.onLine?.(line);
+    writeFileSync(path.join(dir, 'critique-1.out.json'), written, 'utf8');
+    return Promise.resolve({ code: 0, signal: null, stdout: lines.map((l) => `${l}\n`).join(''), stderr: '' });
+  });
+  assert.equal(result.raw, written);
+  assert.deepEqual(result.structured, answer);
 });

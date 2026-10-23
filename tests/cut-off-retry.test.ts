@@ -8,13 +8,16 @@ import { DEFAULTS } from '@src/config.js';
 import * as log from '@src/log.js';
 import type { Narration } from '@src/log.js';
 import { Escalation, EXIT, orchestrate } from '@src/orchestrator.js';
+import { FINDINGS_SCHEMA } from '@src/schemas.js';
 import type { Config, Finding, RunState } from '@src/types.js';
 import {
   agents,
+  answersReport,
   config,
   freshRun,
   p1,
   planFixture,
+  questionFixture,
   report,
   reviewingRun,
   work,
@@ -267,4 +270,46 @@ test("a second cut-off's error points at both attempts' records", async () => {
   assert.ok(error instanceof OutputCutOffError);
   assert.ok(error.message.includes(path.join(state.dir, 'codex', 'review-0.cutoff.json')), error.message);
   assert.ok(error.message.includes(path.join(state.dir, 'codex', 'review-0.cutoff-2.json')), error.message);
+});
+
+test('an answerer cut off once is retried with a note that says nothing about findings (#429)', async () => {
+  // Its schema has no findings, so "it had not written any finding in full"
+  // would be about a key its answer cannot contain.
+  const state = freshRun({ prefix: 'vibe-cutoff-answerer-' });
+  let answered = 0;
+  const { calls, prompts, error } = await drive(state, config(), {
+    claude: (label) =>
+      label === 'plan' ? planFixture({ open_questions: [questionFixture()] }) : planFixture(),
+    codex: (label) => {
+      if (!label.startsWith('answers-')) return report([]);
+      answered += 1;
+      if (answered === 1) throw cutOff([]);
+      return answersReport([{}]);
+    },
+  });
+
+  assert.equal(error, null);
+  assert.equal(count(calls, 'answers-1'), 2, 'exactly one retry');
+  const [firstPrompt, retryPrompt] = prompts.get('answers-1') ?? [];
+  assert.ok(firstPrompt !== undefined && retryPrompt !== undefined);
+  assert.equal(
+    retryPrompt,
+    `${firstPrompt}\n\n## An earlier attempt at this turn was cut off\n\n` +
+      'An earlier attempt at this turn was cut off at its output limit before it finished.',
+  );
+});
+
+test("a critic's retry shows the salvaged finding in the schema's order, with its nulls (#429)", async () => {
+  const state = freshRun({ prefix: 'vibe-cutoff-wire-' });
+  const { prompts, error } = await drive(state, config(), { codex: cutOffFirst('critique-0', 1) });
+
+  assert.equal(error, null);
+  const retryPrompt = prompts.get('critique-0')?.[1] ?? '';
+  const block = /```json\n([\s\S]*)\n```$/.exec(retryPrompt)?.[1];
+  assert.ok(block !== undefined, 'the retry carries the findings block');
+  const [shown] = JSON.parse(block) as Record<string, unknown>[];
+  assert.deepEqual(Object.keys(shown ?? {}), [
+    ...FINDINGS_SCHEMA.properties.findings.items.required,
+  ]);
+  assert.equal(shown?.['reproducer'], null);
 });
