@@ -1855,6 +1855,19 @@ export interface RunState {
   baseSha: string | null;
   branch: string | null;
   /**
+   * The branch name `vibe run --branch` asked for (#356), in the FIRST state
+   * write. Absent on every run that did not pass the flag, which is what keeps
+   * `runBranch` at `branchPrefix + id` for all of them.
+   *
+   * A request rather than a record, and that is why it is not `branch`:
+   * `branch` stays null until `prepareGit` has actually put the run on it, and
+   * three sites read that null as "a fresh run that has not taken its branch
+   * yet" - the base resolution, the worktree's ref, and `prepareGit`'s create
+   * path. `runBranch` reads this one second, so the name the setup script is
+   * told, the branch made and `run_branch` agree.
+   */
+  requestedBranch?: string;
+  /**
    * The checkpoint this state came from (#78).
    *
    * Written into every `checkpoint-<n>.json`, and present on a live

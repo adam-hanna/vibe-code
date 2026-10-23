@@ -161,6 +161,7 @@ Options apply to `run`, `plan`, `resume` and `doctor`, and override the configur
 | Flag | Meaning |
 |---|---|
 | `--no-branch` | Do not create an isolated branch. Use only if you have your own isolation. |
+| `--branch <name>` | `vibe run` and `vibe plan` only: the run's branch, instead of `git.branchPrefix` plus the run id. The name is checked with `git check-ref-format --branch`, and refused if a branch of that name already exists - including one checked out in another worktree. Refused with `--no-branch`, with `git.useBranch` off, outside a git repository, and by `vibe resume` and `vibe fork`. |
 | `--verify-command <cmd>` | The verification command. Default: `npm test` when there is a `test` script. Refused when `verify.gates` is configured. |
 | `--verify-runs <n>` | Times it must pass. Default 3. |
 | `--no-verify` | Do not run the verification gates. |

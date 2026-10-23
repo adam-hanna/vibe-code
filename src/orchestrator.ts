@@ -2586,7 +2586,10 @@ export async function prepareGit(
     // worktree has its branch created as a ref before the setup script runs, so
     // the script can be told `VIBE_BRANCH` and put the worktree on it. Adopt it
     // rather than `checkout -b` it again, which would fail on a branch that is
-    // there. Run ids are unique, so nothing else leaves one of these behind.
+    // there. Run ids are unique, so nothing else leaves one of these behind -
+    // and a name `--branch` chose is refused by `cmdRun` and again by the
+    // preflight gate when it already exists (#356), so the one this adopts is
+    // still only ever the ref the worktree site made for this run.
     if (await git.branchExists(cwd, branch)) {
       if ((await git.currentBranch(cwd)) !== branch) {
         // **Never move a worktree silently** (#249). A checkout that moves

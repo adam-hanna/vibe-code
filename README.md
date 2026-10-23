@@ -57,7 +57,7 @@ A long brief works better than a one-liner. Write it to a file, state the decisi
 
 **When a run stops for you,** it exits with code 2 and writes `NEEDS-INPUT.md`. Answer under each question's **Your answer:** heading, then `vibe resume <run-id>`.
 
-**It works on its own branch.** Implementation runs with permissions bypassed, so vibe creates `vibe/<run-id>` and commits after every round. To throw a run away, delete the branch. `--no-branch` turns this off.
+**It works on its own branch.** Implementation runs with permissions bypassed, so vibe creates `vibe/<run-id>` and commits after every round. To throw a run away, delete the branch. `--branch <name>` names it instead (the desktop app's pilot proposes one), and `--no-branch` turns this off.
 
 ## The desktop app
 

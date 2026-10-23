@@ -307,6 +307,11 @@ const INTAKE = [
   '',
   'The person still presses the button. What you are deciding is when to put it',
   'in front of them.',
+  '',
+  'Name the branch on every start_run, in its "branch" field: short and',
+  'descriptive of the work, such as fix/login-timeout. vibe creates it; you do',
+  'not. If the person\'s instructions give a naming rule, follow it. If they ask',
+  'for a different name, propose the run again with that one.',
 ].join('\n');
 
 /** The brief, or the fact that this window has not launched anything. */

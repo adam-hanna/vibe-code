@@ -1,5 +1,28 @@
 # How a run's branch gets its name (#356)
 
+## Superseded (2026-10-22)
+
+**This design is not being built.** The owner dropped the planner-proposes, vibe-renames shape
+in favour of a smaller one:
+
+- **The pilot names the branch on its proposal card.** `start_run` takes an optional `branch`,
+  and the command the card shows carries `--branch <name>`. A person who wants another name
+  tells the pilot, it proposes again, and they press "run it". The name is fixed before the run
+  starts, so nothing is ever renamed.
+- **`vibe run --branch <name>`** (and `vibe plan`) is the one new thing in the core. git judges
+  the name (`git check-ref-format --branch`), and a name that is already a branch is refused
+  before anything is created, because adopting an existing branch was only safe while the name
+  was derived from a unique run id. A resume keeps adopting the branch it took.
+- **A project's naming standard goes in the pilot's prompt**, which the person can edit
+  (Settings → Prompts, #420). vibe enforces no convention: no template, no prefix list, no
+  rename, no new state step.
+
+Why: the pilot is already the front door and already shows the exact command before anything
+runs, so the name is decided where the person can see and change it, at no cost to the loop.
+A rename after plan approval would have touched every reader of the name listed below, for a
+choice the person can make before the run exists. The rest of this note is kept as the record
+of what was considered.
+
 Status: design only, for agreement before any brief. No code changes with this note.
 
 The owner chose option 5 on the issue: the planner proposes a name and vibe renames the branch at

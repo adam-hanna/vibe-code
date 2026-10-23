@@ -213,6 +213,12 @@ export interface RunInit {
    * what a resume goes through - so one site covers both.
    */
   worktree?: boolean | undefined;
+  /**
+   * The branch `--branch` named (#356), in the first write for the reason
+   * `worktree` is: a run stopped in preflight and resumed must come back asking
+   * for the same name its worktree's ref was made under.
+   */
+  requestedBranch?: string | undefined;
 }
 
 export function createRun(
@@ -246,6 +252,7 @@ export function createRun(
     rateLimitWaits: 0,
     baseSha: null,
     branch: null,
+    ...(init.requestedBranch === undefined ? {} : { requestedBranch: init.requestedBranch }),
     p1Rounds: [],
     verifyRounds: [],
     verifyRound: 0,
