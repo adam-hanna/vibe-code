@@ -248,6 +248,19 @@ export interface LoopConfig {
    * Not a cap: reaching it never stops a run by itself.
    */
   stallAfter: number;
+  /**
+   * Whether a passing round's non-blocking findings are still worked on (#425).
+   *
+   * Run `20261022-224848` passed its review with the verdict REVISE and two P2s
+   * in the task's own files, said "Review clean", and ran no fix: the gate
+   * passed because P2s do not block, and nothing else read them. On, a passing
+   * review with a P2 to address buys the one final fix round the carried-P1
+   * path already has (never re-reviewed), what that round leaves goes to
+   * FOLLOW-UPS.md, and an approved plan hands its non-blocking findings to the
+   * implementer. The fixer still judges each one under #228's scope rule.
+   * `false` restores the behaviour before #425 exactly.
+   */
+  fixNonBlocking: boolean;
 }
 
 /**
@@ -1195,6 +1208,20 @@ export interface Votes {
 
 /** What the fixer said it did with one review finding (#393). */
 export type Disposition = 'fixed' | 'rebutted' | 'deferred' | 'not-addressed';
+
+/**
+ * One non-blocking finding a passing review left unfixed, and why (#425).
+ *
+ * `unreadable` is a final round whose dispositions could not be read - never
+ * `not-addressed`, which would claim the fixer ignored it. `not-attempted` is a
+ * pass whose findings to address were P3s only, which buys no turn.
+ */
+export interface UnaddressedFinding {
+  finding: Finding;
+  outcome: 'not-addressed' | 'deferred' | 'rebutted' | 'unreadable' | 'not-attempted';
+  /** The fixer's reason; `''` when it gave none or was never asked. */
+  reason: string;
+}
 
 /** One seat a finding is credited to, in the shape `FoundBy` writes it. */
 export interface DispositionSeat {
@@ -2366,6 +2393,34 @@ export interface RunState {
    * re-reviewed and so nothing has confirmed they are gone.
    */
   outstanding?: Finding[];
+  /**
+   * The approving plan critique's non-blocking findings that are not
+   * deferrable (#425), stated to the implementer in a section of their own.
+   *
+   * Assigned on the same save as `declined`, and removed rather than left
+   * standing when an approving round has none. Absent on every run from before
+   * #425 and on every run with `loop.fixNonBlocking` off.
+   */
+  planNonBlocking?: Finding[];
+  /**
+   * The ids of the non-blocking findings the final fix round carried (#425),
+   * set with `finalFixDone` before its turn.
+   *
+   * The second witness beside `outstanding`: a round run for P2s alone leaves
+   * `outstanding` empty on purpose, and the resumed round, the completion line
+   * and the CLI summary all run after `pendingFindings` is cleared - possibly
+   * in another process - so without this an empty `outstanding` could not be
+   * told from a repaired one. Absent when the round carried only P1s.
+   */
+  finalFixNonBlocking?: string[];
+  /**
+   * What a passing review left of its non-blocking findings (#425): what the
+   * final fix round did not fix, or the P3s a pass ran no round for. Rendered
+   * into FOLLOW-UPS.md as "Left by the final fix round". Only P2s and P3s that
+   * are not deferrable - the file's header claims everything in it was
+   * non-blocking, and deferrable findings are already listed there.
+   */
+  unaddressed?: UnaddressedFinding[];
   /**
    * Findings the critic or the reviewer marked `defer`: real work that belongs
    * in separate effort, collected across every plan-critique and code-review

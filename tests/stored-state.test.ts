@@ -1153,3 +1153,58 @@ test('a healthy checkpoint record survives a round trip', () => {
   assert.deepEqual(state.checkpoint, meta);
   assert.deepEqual(repairs(state), []);
 });
+
+// ---- the #425 fields ----------------------------------------------------------
+
+test('a state written before #425 loads with its three fields absent and no repair', () => {
+  const loaded = load(() => undefined);
+  assert.equal('planNonBlocking' in loaded, false);
+  assert.equal('unaddressed' in loaded, false);
+  assert.equal('finalFixNonBlocking' in loaded, false);
+  assert.deepEqual(repairs(loaded), []);
+});
+
+test('the #425 fields drop what is unusable, by path, and keep the rest', () => {
+  const deferred = { ...FINDING, id: 'deferred', defer: true };
+  const moved = {
+    ...FINDING,
+    id: 'moved',
+    votes: { outcome: 'unconfirmed' },
+    downgraded: { from: 'P1', reason: 'the vote did not confirm it' },
+  };
+  const loaded = load((raw) => {
+    raw['planNonBlocking'] = [FINDING, { id: 'junk' }];
+    raw['finalFixNonBlocking'] = ['good-finding', 7];
+    raw['unaddressed'] = [
+      { finding: FINDING, outcome: 'rebutted', reason: 'unreachable' },
+      { finding: { id: 'junk' }, outcome: 'rebutted', reason: '' },
+      { finding: { ...FINDING, id: 'a-p1', severity: 'P1' }, outcome: 'not-addressed', reason: '' },
+      { finding: deferred, outcome: 'not-addressed', reason: '' },
+      { finding: moved, outcome: 'not-addressed', reason: '' },
+      { finding: FINDING, outcome: 'ignored', reason: '' },
+      { finding: FINDING, outcome: 'deferred' },
+    ];
+  });
+
+  assert.deepEqual(loaded.planNonBlocking?.map((f) => f.id), ['good-finding']);
+  assert.deepEqual(loaded.finalFixNonBlocking, ['good-finding']);
+  assert.deepEqual(
+    loaded.unaddressed?.map((u) => [u.finding.id, u.outcome, u.reason]),
+    [['good-finding', 'rebutted', 'unreachable']],
+  );
+  const byField = new Map(
+    loaded.events
+      .filter((e) => e.type === 'state_repaired')
+      .map((e) => [String(e['field']), e['droppedPaths']]),
+  );
+  assert.deepEqual(byField.get('planNonBlocking'), ['planNonBlocking[1]']);
+  assert.deepEqual(byField.get('finalFixNonBlocking'), ['finalFixNonBlocking[1]']);
+  assert.deepEqual(byField.get('unaddressed'), [
+    'unaddressed[1]',
+    'unaddressed[2]',
+    'unaddressed[3]',
+    'unaddressed[4]',
+    'unaddressed[5]',
+    'unaddressed[6]',
+  ]);
+});

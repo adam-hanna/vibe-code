@@ -1698,6 +1698,8 @@ export function Settings({
   };
   const gates = effective.gates ?? {};
   const loop = effective.loop ?? {};
+  // The one boolean in `loop` (#425), read on its own so the caps keep their number type.
+  const fixNonBlocking: unknown = (loop as Record<string, unknown>)['fixNonBlocking'];
   const progress = effective.progress ?? {};
   const budget = effective.budget ?? {};
   const git = effective.git ?? {};
@@ -2180,8 +2182,27 @@ export function Settings({
         <div className={S.fact}>
           <span className={S.factname}>P2 and P3</span>
           <span>
-            Never block anything. They are recorded on the round and carried into{' '}
-            <code>FOLLOW-UPS.md</code>, which is what that file is for.
+            Never block anything. With this on, a review that passes with a P2 to address still
+            gets <strong>one final fix round</strong>, which is not reviewed again: the fixer fixes
+            what belongs to the task, and what it leaves goes to <code>FOLLOW-UPS.md</code> with its
+            reason. P3s alone run no round and are recorded there. An approved plan hands its P2s
+            and P3s to the implementer. Off, they are recorded only when deferred.
+            {/* A two-option select rather than a checkbox, for the reason the
+                `git.worktree` one gives: this screen has no checkbox, and an
+                unstyled one takes the platform's light control on a dark
+                window. Not in LIMITS: that list is numeric, with `--max-*` flags. */}
+            <span className={S.inline}>
+              <select
+                id="loop-fixNonBlocking"
+                value={fixNonBlocking === false ? 'off' : 'on'}
+                disabled={busy}
+                onChange={(e) => save({ loop: { fixNonBlocking: e.target.value === 'on' } })}
+              >
+                <option value="on">on — fix what belongs to the task, record the rest</option>
+                <option value="off">off — record them only</option>
+              </select>
+              {source('loop', 'fixNonBlocking')}
+            </span>
           </span>
         </div>
         <h4 className={S.h4}>when a turn has gone quiet</h4>

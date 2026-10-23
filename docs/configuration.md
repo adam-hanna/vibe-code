@@ -177,6 +177,7 @@ The six boundaries, and their defaults:
 | `loop.oscillationThreshold` | `3` | Stop when the same set of blocking findings comes back this many rounds running. |
 | `loop.convergenceWindow` | `3` | How many recent rounds the convergence trend looks at, late in the round budget. |
 | `loop.stallAfter` | `3` | Plan critiques before the plan loop can be called stalled: the number of blocking findings is not falling and most of them are new. The first stall asks the planner to step back and reconsider its approach; the next one stops and asks you. Not a cap: reaching it never stops a run by itself. `0` turns it off. There is no command-line flag for it. |
+| `loop.fixNonBlocking` | `true` | What a passing round does with its non-blocking findings. A review that passes with a P2 to address gets the one final fix round, which is not reviewed again; the fixer fixes what belongs to the task, and what it leaves goes to `FOLLOW-UPS.md` with its reason. A pass whose only findings to address are P3s runs no fix round and records them there. An approved plan hands its non-blocking findings to the implementer. Deferred findings go to `FOLLOW-UPS.md` either way. `false` restores the earlier behaviour: a pass with no P1 to carry ends there, and a P2 or P3 is recorded only if it was deferred. |
 
 ## `budget`
 

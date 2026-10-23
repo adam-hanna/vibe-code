@@ -456,6 +456,12 @@ function hasBar(items: readonly AcceptanceCriterion[] | undefined): items is rea
  * above it rather than below. And the carried section stays the tail of the
  * prompt, byte for byte, which `declined-findings.test.ts` pins as the frozen
  * output of the build before `findingBullet` was extracted (#31).
+ *
+ * The plan critique's non-blocking findings (#425) go between this and the
+ * carried section, for both reasons at once: their own "say in your report"
+ * has its antecedent above it, and the carried section is still the tail
+ * before the declined one, byte for byte. The declined section's "Unlike
+ * anything listed above" stays true, because those findings are work to do.
  */
 function reportRequest(
   criteria: readonly AcceptanceCriterion[] | undefined,
@@ -1018,7 +1024,21 @@ export function implementPrompt(
   acceptanceCriteria: readonly AcceptanceCriterion[] | undefined = [],
   /** The approved boundary, rather than relying on the planner's conversation. */
   outOfScope?: readonly OutOfScopeItem[] | undefined,
+  /**
+   * The approving critique's non-blocking findings that are not deferrable
+   * (#425). Their own section, not "Known open issues": that text gives a P1's
+   * reason, and these are framed the #228 way - address what belongs to the
+   * task, leave the rest.
+   */
+  nonBlocking: readonly Finding[] = [],
 ): string {
+  const alsoRaised =
+    nonBlocking.length === 0
+      ? ''
+      : `\n## Non-blocking findings from the plan critique\n\nThe plan critique also raised these non-blocking findings. Address each one that belongs to the task as you implement, and leave the rest; say in your report what you did about each.\n\n${nonBlocking
+          .map(findingBullet)
+          .join('\n')}\n`;
+
   const known =
     carried.length === 0
       ? ''
@@ -1064,7 +1084,7 @@ ${planMd}
 ## Out of scope
 
 ${formatOutOfScope(outOfScope)}
-${implementerCriteria(acceptanceCriteria)}${reportRequest(acceptanceCriteria, 'implement')}${known}${notDoing}`;
+${implementerCriteria(acceptanceCriteria)}${reportRequest(acceptanceCriteria, 'implement')}${alsoRaised}${known}${notDoing}`;
 }
 
 /** One part of a review round, as the reviewer is told about it. */

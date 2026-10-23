@@ -20,6 +20,8 @@ A phase moves on when there are **no P0s and at most `loop.p1Tolerance` P1s.** T
 
 A P1 carried out of planning goes into the implementation prompt as a known open issue. A P1 carried out of review gets one final fix round, which is committed and re-verified but deliberately not re-reviewed, because a fresh review could reopen the argument the tolerance just settled. Those findings are listed in `OUTSTANDING.md` as worked on but unconfirmed.
 
+A pass is not the end of the non-blocking findings. A review that passes with a P2 it did not defer gets the same one final fix round, also not reviewed again. The fixer fixes what belongs to the task and says what it did with each finding; whatever it did not fix goes to `FOLLOW-UPS.md` with its reason. A pass whose only such findings are P3s runs no round and records them there. A plan that passes hands its non-deferred P2s and P3s to the implementer, to address what belongs to the task. Deferred findings go to `FOLLOW-UPS.md` either way. `loop.fixNonBlocking: false` turns this off.
+
 ## A plan says how you would know it worked
 
 Every plan carries **acceptance criteria**: each has an id, the observable criterion, the kind of check that settles it, and how to run it. A revision restates the whole list, so dropping a criterion is visible and has to be explained.

@@ -702,6 +702,65 @@ read it. Now it is data, and it is recorded per round.
   The second case covers a run from before #393. The decision is `outcomeFor`, a pure function. The finding row, the round
   card and the stats view are unchanged.
 
+## Non-blocking findings on a passing round (#425)
+
+Run `20261022-224848` passed its review with the verdict REVISE and two P2s in the task's own
+files, said `Review clean - 2 non-blocking finding(s)`, and ended `complete`. No fix turn ran and
+neither finding reached `FOLLOW-UPS.md`; a person found both in `code-review-0.json`. The gate was
+right that P2s do not block. Nothing after the gate read them. `loop.fixNonBlocking` (default on)
+is what does now; `false` restores the earlier loop exactly, on both sides.
+
+- **To address** is `isToAddress` (`src/stored.ts`): a P2 or P3 that is not `isDeferrable` and was
+  not downgraded by a guard. Deferred and vote-moved findings keep going to FOLLOW-UPS.md as before
+  and trigger nothing. **A guard-downgraded finding triggers nothing either**: a P1 that cited
+  nothing that resolves, or came from a review turn that ran nothing, is a claim nobody
+  established, and buying the unreviewed round for one is what #66 measured and removed (about
+  1.3M tokens editing working code to satisfy a false premise). `final-fix-round.test.ts`,
+  `inert-review.test.ts` and `uncited-findings.test.ts` pin that it buys no round.
+- **Review: one final round, never two, never re-reviewed.** A pass with tolerated P1s, *or* with
+  at least one P2 to address, buys the carried-P1 final round. The turn gets every finding of the
+  review, as it always did. It is not reviewed again for the reason the carried-P1 round is not:
+  another review could raise something new, and the loop would never end. The gates run after it.
+- **#228's scope rule still governs it.** Nothing was added to `fixPrompt` or `FIX_BREADTH`. The
+  fixer judges each finding, fixes what belongs to the task, and gives a disposition for the rest.
+  What changes is where the rest goes: everything it did not mark `fixed` is put on
+  `state.unaddressed` with its disposition and reason, and rendered as **Left by the final fix
+  round** in FOLLOW-UPS.md, so a rebuttal can be judged by a person. An unreadable answer puts
+  every non-blocking finding there as *the fixer's answer could not be read*, never as not
+  addressed, which `recordDispositions` forbids. It is written after `recordDispositions` and
+  before the findings are consumed, so a stop after the turn keeps it and a resumed round writes it
+  again.
+- **P3s alone buy no turn.** The fix prompt tells the fixer to skip P3s unless they are incidental
+  to required work, so a turn for P3s only would buy nothing. They go straight to the new section,
+  marked *not attempted: P3s only*, and the `review_approved` sentence no longer says clean.
+- **`confirmFixed` stays over the tolerated P1s.** The non-blocking findings are recorded by
+  `recordDispositions`, which already says what the fixer did with each. **OUTSTANDING.md is only
+  written when P1s were carried**: it says the review raised P1s within `loop.p1Tolerance`, and the
+  gate-time rewrites already do nothing on an empty `outstanding`.
+- **Exactly one `review_approved` per approving review**, because the cockpit reads it as the run
+  ending. When the round runs it is the one at the end of `runFinalFix`, counted from the
+  dispositions record, and it names FOLLOW-UPS.md only when something was put there. A round for
+  tolerated P1s alone, and a review with nothing to address, say and record exactly what they did
+  before.
+- **Plan: no extra revision.** The owner's decision, so the plan loop's round count does not move.
+  The approving round's findings to address (P2s and P3s alike, since no turn is bought) are stored
+  on `state.planNonBlocking`, on the same save as `declined`, and `implementPrompt` renders them as
+  **Non-blocking findings from the plan critique**, between the report request and the carried
+  section, which stays where `declined-findings.test.ts` pins it. What the implementer leaves gets
+  no follow-up entry: the review sees the code and raises it again if it still matters.
+- **`state.finalFixNonBlocking` is the second witness.** A round for P2s alone leaves `outstanding`
+  empty on purpose, so the resumed round, the completion line and the CLI summary
+  (`finalFixSummary` in `src/cli.ts`) read these ids to tell it from a repaired state. The summary
+  fails closed on `unaddressed`: absent, or repaired on load, is said to be unknown rather than
+  read as "every one fixed".
+- **The setting and a resume.** Every new decision reads the effective config, so a plan approved
+  with the setting on and resumed with it off gets the old implement prompt. A final round already
+  in flight resumes as itself, from the ids it persisted (#393's `fixInFlight`), and
+  `unaddressed` is a record of what happened, rendered whatever the setting now says.
+- **Forks copy all three fields**, as they copy `carried`: `fork.ts` copies the checkpoint's state
+  whole. `unaddressed` is only present in a checkpoint at or after the final fix, whose tree and
+  dispositions the fork shares.
+
 ## The repository's REVIEW.md (#389)
 
 `src/review-md.ts`. A repository's owners add their own review standards in a root
