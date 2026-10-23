@@ -176,6 +176,7 @@ The six boundaries, and their defaults:
 | `loop.p1Tolerance` | `1` | How many P1 findings a phase may carry forward instead of fixing. `0` demands a clean verdict. A P0 is never carried. |
 | `loop.oscillationThreshold` | `3` | Stop when the same set of blocking findings comes back this many rounds running. |
 | `loop.convergenceWindow` | `3` | How many recent rounds the convergence trend looks at, late in the round budget. |
+| `loop.stallAfter` | `3` | Plan critiques before the plan loop can be called stalled: the number of blocking findings is not falling and most of them are new. The first stall asks the planner to step back and reconsider its approach; the next one stops and asks you. Not a cap: reaching it never stops a run by itself. `0` turns it off. There is no command-line flag for it. |
 
 ## `budget`
 
@@ -307,7 +308,7 @@ A failure stops the sequence, so the fixer gets one problem at a time. An unavai
 { "prompts": { "simple solution": "Prefer the smallest change that is correct." } }
 ```
 
-The block names are `respond with JSON`, `review breadth`, `fix breadth`, `simple solution` and `a deferred finding`. A blank value is ignored, so you get the default back. An unknown name is refused, so a typo cannot silently do nothing. A changed block is recorded in the run's configuration, so a run that used a different instruction says so. The desktop app's settings screen shows each block's default text.
+The block names are `respond with JSON`, `review breadth`, `fix breadth`, `simple solution`, `a deferred finding` and `stall`. `stall` is the instruction the planner is given after the plan loop stops converging (see `loop.stallAfter`); the line before it, saying how many blocking findings each of the last critiques found and how many were new, is written by vibe and is kept whatever the block says. A blank value is ignored, so you get the default back. An unknown name is refused, so a typo cannot silently do nothing. A changed block is recorded in the run's configuration, so a run that used a different instruction says so. The desktop app's settings screen shows each block's default text.
 
 The desktop app's pilot has three blocks of its own in the same table: `pilot: who` (who it is and what it may propose), `pilot: intake` (how it takes a request apart before proposing a run) and `pilot: how to read` (how it reads the run block it is given). They follow the same rules: blank gives the built-in text back, an unknown name is refused, and a value that is not text is not used. No run's turns read them; the pilot reads them on its next message. What the pilot is told about the run, its tools, what runs without asking and the brief is built for every message and cannot be replaced. A team's branch-naming standard belongs in `pilot: intake`:
 
