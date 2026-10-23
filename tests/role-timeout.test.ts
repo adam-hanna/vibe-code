@@ -323,7 +323,7 @@ test('NaN and Infinity are refused, and NaN is shown as NaN', () => {
     [Number.NEGATIVE_INFINITY, '-Infinity'],
   ] as const) {
     assert.throws(
-      () => roleSetting('reviewer', { provider: 'codex', timeoutMs: bad }),
+      () => roleSetting('roles.reviewer', { provider: 'codex', timeoutMs: bad }),
       new RegExp(`roles\\.reviewer\\.timeoutMs is ${text}`),
       `${text}, not "is null", which is what JSON.stringify would have said`,
     );

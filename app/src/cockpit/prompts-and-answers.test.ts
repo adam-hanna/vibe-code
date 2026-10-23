@@ -117,6 +117,14 @@ describe('how many rounds, and what it will accept', () => {
     }
   });
 
+  test('stallAfter is on the screen, and is not presented as a cap', () => {
+    // #394: reaching it asks the planner to step back and never stops a run,
+    // so the section's "reaching one stops the run" must not cover it.
+    expect(settings).toMatch(/key: 'stallAfter'/);
+    expect(settings).toMatch(/note: 'not a cap:/);
+    expect(settings).toMatch(/it is a threshold, not a cap/);
+  });
+
   test('P0 is stated as having no setting, not offered as one', () => {
     // `gate()` refuses a round with any P0 before it looks at the tolerance at
     // all, so a run cannot be configured to accept one. A control would be a

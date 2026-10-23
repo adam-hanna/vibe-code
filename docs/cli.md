@@ -73,7 +73,7 @@ vibe stats
 vibe stats --json
 ```
 
-Reads every run in the repository's archive and reports how the loop has behaved: plan revisions and question rounds per run, how often a final fix round was needed, the tokens each kind of turn took, and more. Each rate states how many runs could not answer it. `--json` prints the document instead of the table. Nothing is written.
+Reads every run in the repository's archive and reports how the loop has behaved: plan revisions and question rounds per run, how often a final fix round was needed, the tokens each kind of turn took, and more. Each rate states how many runs could not answer it. It also reports what the fixer did with each reviewer finding: fixed, rebutted by the fixer, deferred or not addressed. Those are shown per reviewer seat and by severity, each beside the others and the total, together with how many fix rounds recorded no dispositions. Findings a person raised are not counted. `--json` prints the document instead of the table. Nothing is written.
 
 ## `vibe doctor`
 
@@ -81,7 +81,9 @@ Reads every run in the repository's archive and reports how the loop has behaved
 vibe doctor [options]
 ```
 
-Checks that `claude` and `codex` are installed, logged in and able to run the tools each role needs, and prints the configuration a run would use. It takes the same options `vibe run` does, so `vibe doctor --role reviewer:effort=max` shows the effect of that flag, and an invalid flag fails doctor exactly as it would fail a run. It also prints the gate table, including which `step` gates a terminal run will run through. Run it first.
+Checks that `claude` and `codex` are installed, logged in and able to run the tools each role needs, and prints the configuration a run would use. It takes the same options `vibe run` does, so `vibe doctor --role reviewer:effort=max` shows the effect of that flag, and an invalid flag fails doctor exactly as it would fail a run. It also prints the gate table, including which `step` gates a terminal run will run through.
+
+It also prints one `REVIEW.md:` line about the [repository's review standards](./how-it-works). The line says whether the commit the next run would start from has a `REVIEW.md`. That commit is `git.baseRef` if set, else `HEAD`. The line gives the ref, the short commit and the size, a warning when the file is over 32 KiB, and the reason when it would be refused or is unreadable. For a remote-tracking `git.baseRef`, doctor fetches first, as a run would. If the fetch fails, doctor says so and gives the reason. It may add what the local copy holds, labelled possibly stale, and never presents that as the commit the next run will start from. The line never changes doctor's exit code. Run it first.
 
 ## Options
 
@@ -133,10 +135,12 @@ Options apply to `run`, `plan`, `resume` and `doctor`, and override the configur
 
 | Flag | Meaning |
 |---|---|
-| `--plan-timeout <min>` | Per planning turn. Default 30. |
-| `--implement-timeout <min>` | Per implement or fix turn. Default 90. |
-| `--codex-timeout <min>` | Per Codex turn. Default 45. |
+| `--plan-timeout <min>` | Per read-only Claude turn (`claude.planTimeoutMs`): planning, by default. Default 30. |
+| `--implement-timeout <min>` | Per implement or fix turn on Claude (`claude.implementTimeoutMs`). Default 90. |
+| `--codex-timeout <min>` | Per read-only Codex turn (`codex.timeoutMs`). A Codex implementer's turns use `codex.implementTimeoutMs`. Default 45. |
 | `--verify-timeout <min>` | Per verification command run. Default 15. |
+
+A role's own `timeoutMs` (`--role <role>:timeoutMs=<ms>`, or `roles.<role>.timeoutMs`) wins over all three turn timeouts.
 
 ### Context and progress
 
@@ -151,14 +155,15 @@ Options apply to `run`, `plan`, `resume` and `doctor`, and override the configur
 
 | Flag | Meaning |
 |---|---|
-| `--no-codex-answers` | Send every blocking question straight to you. |
-| `--blocking-questions-only` | Send Codex only the questions marked blocking. |
+| `--no-codex-answers` | Send every blocking question straight to you, skipping the answerer whichever provider holds it. |
+| `--blocking-questions-only` | Send the answerer only the questions marked blocking. |
 
 ### Git and verification
 
 | Flag | Meaning |
 |---|---|
 | `--no-branch` | Do not create an isolated branch. Use only if you have your own isolation. |
+| `--branch <name>` | `vibe run` and `vibe plan` only: the run's branch, instead of `git.branchPrefix` plus the run id. The name is checked with `git check-ref-format --branch`, and refused if a branch of that name already exists - including one checked out in another worktree. Refused with `--no-branch`, with `git.useBranch` off, outside a git repository, and by `vibe resume` and `vibe fork`. |
 | `--verify-command <cmd>` | The verification command. Default: `npm test` when there is a `test` script. Refused when `verify.gates` is configured. |
 | `--verify-runs <n>` | Times it must pass. Default 3. |
 | `--no-verify` | Do not run the verification gates. |

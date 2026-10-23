@@ -32,6 +32,21 @@ purpose. `src-tauri/src/update.rs` holds all of it, behind two commands:
   constant in Rust, spawned with `xdg-open`, `open` or `explorer.exe`, because the app had no
   link opener and the window must never name a URL. `update_install` asks again rather than
   trusting what the window drew.
+- **An AppImage installs only over a file that is there** (#390). The plugin's AppImage
+  installer overwrites `$APPIMAGE` and starts by reading that path's metadata, so an app whose
+  file was deleted after launch - started from a worktree's `target/release/bundle/appimage/`,
+  and the worktree pruned while it ran; Linux keeps the open file alive, so nothing else looks
+  wrong - downloaded the whole bundle, stopped every host, and failed with a bare `No such file
+  or directory (os error 2)`. `action_for` now decides on the file, not the variable:
+  `appimage_file` reads `$APPIMAGE` through two probes (a regular file; its folder writable by
+  `access(W_OK)`, since the plugin renames the old file aside and writes the new one there) and
+  anything but `Ready` gets **Download**. That holds for a patched AppImage binary without
+  `APPIMAGE` too, because the plugin then falls back to `current_exe()`, inside the read-only
+  mount. `update_install` asks before the download and **again after it, before any host is
+  stopped**, since a download takes minutes. A refusal, and an `install()` failure when the file
+  has since gone, is a sentence naming the path and saying to download from the release page and
+  put it somewhere permanent; the raw error goes to the log, and a check that offers Download
+  for this reason says why there too. The window's popover is unchanged: it draws Download.
 - **Rust decides whether to ask, by `has_run_hosts()`.** With runs going, `update_install`
   answers `confirm` before downloading or stopping anything - a host set it cannot read counts
   as runs going - and the window draws the quit confirmation's shape and words, listing its

@@ -11,7 +11,7 @@ Download the latest version:
 | Platform | Download |
 |---|---|
 | Windows (x64) | [installer (`.exe`)](https://github.com/adam-hanna/vibe-code/releases/latest/download/Vibe-windows-x64-setup.exe) or [`.msi`](https://github.com/adam-hanna/vibe-code/releases/latest/download/Vibe-windows-x64.msi) |
-| macOS (Apple Silicon only) | [`.dmg`](https://github.com/adam-hanna/vibe-code/releases/latest/download/Vibe-macos-arm64.dmg) |
+| macOS (Apple Silicon and Intel, macOS 11 or later) | [`.dmg`](https://github.com/adam-hanna/vibe-code/releases/latest/download/Vibe-macos-universal.dmg) |
 | Linux (x86-64) | [`.AppImage`](https://github.com/adam-hanna/vibe-code/releases/latest/download/Vibe-linux-x86_64.AppImage) or [`.deb`](https://github.com/adam-hanna/vibe-code/releases/latest/download/Vibe-linux-amd64.deb) |
 | Android phone | [`.apk`](https://github.com/adam-hanna/vibe-code/releases/latest/download/Vibe-android.apk) - see [On your phone](./phone.md) |
 | iPhone | [`.ipa`](https://github.com/adam-hanna/vibe-code/releases/latest/download/Vibe-ios-unsigned.ipa), unsigned, for AltStore or Sideloadly - see [On your phone](./phone.md) |
@@ -20,7 +20,7 @@ These links always point at the newest published release. Older versions, and pr
 
 The builds are **unsigned**, so each operating system warns before the first launch:
 
-- **macOS**: if it says the app is damaged or comes from an unidentified developer, move it to Applications and run `xattr -cr /Applications/Vibe.app`. There is no Intel build; Intel Macs build from source.
+- **macOS**: if it says the app is damaged or comes from an unidentified developer, move it to Applications and run `xattr -cr /Applications/Vibe.app`. The one `.dmg` is a universal build: the same app runs natively on Apple Silicon and on Intel.
 - **Windows**: SmartScreen says it protected your PC. Click **More info**, then **Run anyway**.
 
 Or build it from source. You need Rust and the [Tauri prerequisites](https://tauri.app/start/prerequisites/) for your platform:
@@ -31,14 +31,14 @@ cd vibe-code && npm install && npm run build
 cd app && npm install && npm run app:build
 ```
 
-`npm run app:build` produces an installer and an executable under `app/src-tauri/target/release/`. The app needs the same `claude` and `codex` CLIs as the command line, installed and logged in.
+`npm run app:build` produces an installer and an executable under `app/src-tauri/target/release/`, for the machine you build on. On a Mac, `VIBE_SIDECAR_TARGET=universal-apple-darwin npm run app:build -- --target universal-apple-darwin` builds the universal app instead, under `app/src-tauri/target/universal-apple-darwin/release/`: it needs `rustup target add aarch64-apple-darwin x86_64-apple-darwin`, and it downloads the official arm64 and x64 Node of the version you are running and checks them against Node's `SHASUMS256.txt`. The app needs the same `claude` and `codex` CLIs as the command line, installed and logged in.
 
 ## Verifying a download
 
 Every file on a release has a build provenance attestation, made by this repository's release workflow when it built the file. With the [GitHub CLI](https://cli.github.com/):
 
 ```bash
-gh attestation verify Vibe-macos-arm64.dmg --repo adam-hanna/vibe-code
+gh attestation verify Vibe-macos-universal.dmg --repo adam-hanna/vibe-code
 ```
 
 This is what ties a file to this repository's workflow and to the commit it was built from; the output names both.
@@ -46,7 +46,7 @@ This is what ties a file to this repository's workflow and to the commit it was 
 Every release also has a `SHA256SUMS` file listing the checksum of each other file on it. Without `gh`, download it into the same folder as the installer and check against it:
 
 - **Linux**: `sha256sum -c SHA256SUMS --ignore-missing`
-- **macOS**: `shasum -a 256 Vibe-macos-arm64.dmg`, then compare the hash with that file's line in `SHA256SUMS`.
+- **macOS**: `shasum -a 256 Vibe-macos-universal.dmg`, then compare the hash with that file's line in `SHA256SUMS`.
 - **Windows** (PowerShell): `Get-FileHash Vibe-windows-x64-setup.exe`, then compare the hash with that file's line in `SHA256SUMS`. PowerShell prints it in capitals; the letters are the same.
 
 On its own, a checksum only shows that the file matches what the release page lists. The attestation is what ties it to this repository.
@@ -80,7 +80,7 @@ For each vendor, the pilot and every run use either your **subscription** (the C
 |---|---|
 | Plans | Every version of the plan, one section per round. |
 | Plan critique | The critic's report for each plan round, with each finding's evidence. |
-| Code review | The reviewer's report for each round, and what happened to each finding afterwards. |
+| Code review | The reviewer's report for each round, and what happened to each finding afterwards. Opening a finding shows which seats raised it, how each verifier voted and why, and what the fixer said it did with it. |
 | Code | What each round changed, from the commit it made, and the whole change so far. |
 | Questions | The run's questions, which you answer in place. |
 | Verify | Every verification attempt, with its verdict, and the full log of any that failed. |
@@ -110,6 +110,8 @@ When you quit while runs are going, the app lists them and asks first. Each one 
 ## Settings
 
 Settings has two doors. The ⚙ at the foot of the left bar edits your **settings for all projects**: models, budgets, round caps, `auth`, the pilot's permissions and the type size. The ⚙ on a project's row edits that project's **`vibe.config.json`**: its verification gates, worktree settings and anything it overrides. Each value shows where it comes from: the default, your settings for all projects, or this project. Model pickers list what each CLI says it offers today, and you can always type a name.
+
+Under the roles, Settings edits the review's [finders and verifiers](./configuration#review), the quorum and what a P0 the vote did not confirm does. In a project's settings, a note says whether the repository has a [`REVIEW.md`](./how-it-works#the-repository-s-review-standards-review-md) at the commit the next run would start from.
 
 Settings also shows the standing prompt blocks every turn receives, and lets you override them per project. See [`prompts`](./configuration#prompts).
 

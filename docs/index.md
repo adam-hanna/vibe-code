@@ -4,7 +4,7 @@ layout: home
 hero:
   name: vibe
   text: The plan, critique, implement, review loop, without you as the go-between.
-  tagline: vibe runs Claude Code and Codex against each other until the plan and the code both clear review and your tests pass, and stops only when it actually needs you.
+  tagline: vibe seats Claude Code and Codex as planner, critic, implementer and reviewer, runs the loop until the plan and the code both clear review and your tests pass, and stops only when it actually needs you.
   actions:
     - theme: brand
       text: Get started
@@ -16,7 +16,9 @@ hero:
 
 ## What it does
 
-Claude plans and Codex critiques, until the plan has no blocking findings. Then Claude implements, vibe runs your tests itself, and Codex reviews the diff, until that is clean too.
+A planner writes a plan and a critic attacks it, until the plan has no blocking findings. Then an implementer writes the code, vibe runs your tests itself, and a reviewer reviews the diff, until that is clean too.
+
+By default Claude plans and implements, and Codex critiques, reviews and answers the planner's questions. Each of those roles can be seated on either Claude or Codex, with its own model and effort: see [`roles`](./configuration#roles). The review can also seat more finders and a vote of verifiers: see [`review`](./configuration#review).
 
 ```
 PLAN ──> CRITIQUE ──blocking?──> REVISE ─┐
@@ -27,7 +29,7 @@ PLAN ──> CRITIQUE ──blocking?──> REVISE ─┐
   │      VERIFY ──fails?──> FIX ─┐        your test suite, run by vibe
   │         │ passes          └──┘
   │         v
-  │      REVIEW ──blocking?──> FIX ─┐
+  │      REVIEW ──blocking?──> FIX ─┐        the reviewer, any finders, and a vote
   │         │ clear              └──┘
   └─────────v  DONE
 ```

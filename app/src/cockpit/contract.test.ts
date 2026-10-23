@@ -269,6 +269,27 @@ test('every path that begins a run says which run it is', () => {
 });
 
 /**
+ * Who asked for the run, on every path that begins one (#365).
+ *
+ * *Started from <phone>* is drawn from `run_started`'s `origin` and from nothing
+ * else, so a site that dropped it would quietly stop attributing that road - the
+ * fresh start especially, which no core test can reach without real agents. And
+ * the field is a spread, never `origin: origin`: an invoke with none must carry
+ * no key at all, `gate_released`'s rule, which `originData` holds.
+ */
+test('every path that begins a run says who asked for it, and only when somebody did', () => {
+  const carried = [...cli.matchAll(/id: 'run_started',\s*data: \{([^}]*)\}/g)];
+  expect(carried.length, 'one start and two resume paths').toBe(3);
+  for (const m of carried) {
+    expect(m[1] ?? '', 'run_started no longer spreads its origin').toContain('...originData(origin)');
+    expect(m[1] ?? '').not.toMatch(/\borigin:/);
+  }
+  const helper = /function originData\([\s\S]*?\n\}/.exec(cli)?.[0];
+  if (helper === undefined) throw new Error('originData not found in src/cli.ts');
+  expect(helper).toContain('origin === null ? {} : { origin }');
+});
+
+/**
  * The two ids the diffstat line depends on, and the fields it reads (#198).
  *
  * The same silent failure mode as the phase map, and it already happened once:

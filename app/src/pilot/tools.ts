@@ -8,6 +8,8 @@ import { allowedDir, NO_ACCESS } from './access';
 import type { PilotAccess } from './access';
 import type { Tool } from './pilot';
 import type { Run } from '../cockpit/model';
+import { bindingHeader } from './bound';
+import type { Binding } from './bound';
 
 /**
  * What the pilot may touch, and through what (#144).
@@ -144,12 +146,28 @@ export type Read =
   /** The repository's run archive and its scorecard (#114): two host reads, one answer. */
   | { kind: 'reads'; op: 'archive' };
 
+/**
+ * A read of the run that cannot be answered truthfully yet (#438): the run the
+ * conversation is bound to is an opened one whose record the host is still
+ * reading. The call stays owed, and the pane settles it when the record arrives.
+ * Answering now would answer with an empty run, which is how the pilot came to
+ * tell a finished run's chat that setup was still going.
+ */
+export type Wait = { kind: 'waits'; why: string };
+
 /** What running a call produced, including a read still to be made. */
-export type Outcome = Settlement | Read;
+export type Outcome = Settlement | Read | Wait;
 
 /** What a read may see: the run as the window holds it, and nothing else. */
 export interface ToolContext {
+  /** The bound run's `Run`, or an empty one when there is none (`boundRun`). */
   run: Run;
+  /**
+   * Which run this conversation reads and where it stands (#438), from
+   * `bindingOf`. Optional so a caller with no window need not invent one; the
+   * pane always passes it, and then every run read says which run it is.
+   */
+  bound?: Binding;
   /** Commands this window started, so `read_command` has something to read. */
   commands: Commands;
   /** The repository: where a command runs unless it names another directory. */
@@ -278,18 +296,41 @@ export function describeRun(run: Run): Record<string, unknown> {
 const READ_RUN: ToolDef = {
   name: 'read_run',
   description:
-    'The run as the cockpit currently holds it: cycles, phases, turns, any gate it is holding ' +
-    'at, and how it ended. Everything here came off the wire from the loop; nothing is inferred. ' +
+    'The run this conversation is about - the run it started, or the run it belongs to, live or ' +
+    'finished - as the cockpit holds it: cycles, phases, turns, any gate it is holding at, and ' +
+    'how it ended. `run` names it by id and says whether it is starting, live, ended or lost, or ' +
+    'that there is no run. Everything here came off the wire from the loop; nothing is inferred. ' +
     'Call this before saying anything about what the run is doing.',
   input_schema: { type: 'object', properties: {}, additionalProperties: false },
-  call: (_input, ctx) => ({ kind: 'ran', content: JSON.stringify(describeRun(ctx.run)) }),
+  call: (_input, ctx) => {
+    if (ctx.bound?.kind === 'reading') return waiting(ctx.bound.runId);
+    return { kind: 'ran', content: JSON.stringify(describeBound(ctx.run, ctx.bound ?? null)) };
+  },
 };
+
+/**
+ * `describeRun` under the header saying which run it is (#438), for `read_run`
+ * and the prompt's run block, so the two stay one answer.
+ *
+ * With no run, or none readable, the header is the whole answer: the fields of
+ * an empty run beside it would read as a run that has done nothing yet.
+ */
+export function describeBound(run: Run, bound: Binding | null): Record<string, unknown> {
+  if (bound === null) return describeRun(run);
+  if (bound.kind !== 'run') return { run: bindingHeader(bound) };
+  return { run: bindingHeader(bound), ...describeRun(run) };
+}
+
+function waiting(runId: string): Wait {
+  return { kind: 'waits', why: `the record of ${runId} is still being read` };
+}
 
 const READ_OUTPUT: ToolDef = {
   name: 'read_output',
   description:
-    `The tail of the run's narration, oldest first, at most ${String(OUTPUT_KEEP)} lines — the ` +
-    'same lines the output pane shows. Each carries its level and, where the loop gave one, a ' +
+    `The tail of the narration of the run read_run names, oldest first, at most ` +
+    `${String(OUTPUT_KEEP)} lines — the same lines the output pane shows, under the same \`run\`. ` +
+    'Each carries its level and, where the loop gave one, a ' +
     'stable id. Use the ids rather than the sentences: the sentences change.',
   input_schema: {
     type: 'object',
@@ -319,10 +360,16 @@ const READ_OUTPUT: ToolDef = {
       }
       want = asked;
     }
+    if (ctx.bound?.kind === 'reading') return waiting(ctx.bound.runId);
+    const header = ctx.bound === undefined ? {} : { run: bindingHeader(ctx.bound) };
+    if (ctx.bound !== undefined && ctx.bound.kind !== 'run') {
+      return { kind: 'ran', content: JSON.stringify({ ...header, returned: 0, kept: 0, lines: [] }) };
+    }
     const lines = ctx.run.output.slice(-want);
     return {
       kind: 'ran',
       content: JSON.stringify({
+        ...header,
         // Both numbers, because "40 of 40" and "40 of 500" are different facts
         // and only one of them means there is more to ask for.
         returned: lines.length,
@@ -343,8 +390,51 @@ const READ_OUTPUT: ToolDef = {
  * refuses an unknown one by name when the run starts, and a second list of them
  * in the window is one that can disagree.
  */
+/**
+ * Why `name` is plainly not a branch name, or null (#356).
+ *
+ * **A cheap first pass, not the rule.** The core runs `git check-ref-format
+ * --branch` before anything is created, and that is the authority; this only
+ * refuses the shapes a model can be told about in one sentence before the card
+ * is drawn, so a proposal the core would refuse never reaches the button. It
+ * is git's rules, abridged - never a naming convention: vibe enforces none,
+ * and a project's standard lives in the person's instructions.
+ */
+export function branchShapeRefusal(name: string): string | null {
+  if (name === '') return 'it is empty';
+  if (/\s/.test(name)) return 'it has whitespace in it';
+  // Control characters and git's reserved punctuation.
+  if (/[\x00-\x1f\x7f~^:?*[\\]/.test(name)) return 'it has a character git does not allow in a branch name';
+  if (name.startsWith('-')) return 'it starts with "-"';
+  if (name === 'HEAD' || name === '@') return `"${name}" is not a branch`;
+  if (name.includes('..') || name.includes('@{') || name.includes('//')) {
+    return 'it has "..", "@{" or "//" in it';
+  }
+  if (name.startsWith('/') || name.endsWith('/') || name.endsWith('.')) {
+    return 'it starts or ends with "/", or ends with "."';
+  }
+  if (name.split('/').some((part) => part.startsWith('.') || part.endsWith('.lock'))) {
+    return 'a part of it starts with "." or ends with ".lock"';
+  }
+  return null;
+}
+
 function overridesOf(input: Readonly<Record<string, unknown>>): Overrides | string {
-  const over: { gates?: Record<string, string>; maxTokens?: number; p1Tolerance?: number } = {};
+  const over: {
+    gates?: Record<string, string>;
+    maxTokens?: number;
+    p1Tolerance?: number;
+    branch?: string;
+  } = {};
+  const branch = input['branch'];
+  if (branch !== undefined) {
+    if (typeof branch !== 'string') return '"branch" has to be a branch name, such as "fix/login-timeout".';
+    const why = branchShapeRefusal(branch);
+    if (why !== null) {
+      return `"branch" is not a branch name git would take: ${why}. Propose the run again with one that is.`;
+    }
+    over.branch = branch;
+  }
   const gates = input['gates'];
   if (gates !== undefined) {
     if (!isRecord(gates)) return '"gates" has to be an object of boundary to mode.';
@@ -425,6 +515,17 @@ const START_RUN: ToolDef = {
           'How many P1 findings a phase may carry rather than fix, if the user chose one. Omit ' +
           'otherwise.',
       },
+      // #356: the pilot names the branch, on the card, and the person can ask
+      // for another before pressing. vibe enforces no convention of its own.
+      branch: {
+        type: 'string',
+        description:
+          'The git branch the run works on: short, descriptive of the work, no spaces - for ' +
+          'example "fix/login-timeout". Follow any branch-naming rule in the user\'s ' +
+          'instructions. vibe creates it; do not create it yourself. A branch that already ' +
+          'exists is refused, so propose a new name. Omit only to let vibe name it after the ' +
+          'run id.',
+      },
     },
     required: ['task', 'directory', 'plan_only'],
     additionalProperties: false,
@@ -466,11 +567,12 @@ const START_RUN: ToolDef = {
     const over = overridesOf(input);
     if (typeof over === 'string') return { kind: 'refused', content: over };
     const argv = launchArgv(task, dir, planOnly, over);
+    const onBranch = over.branch === undefined || over.branch === null ? '' : `, on branch ${over.branch}`;
     return {
       kind: 'proposes',
       summary: planOnly
-        ? `plan only, in ${dir.trim()}`
-        : `a full run — this one writes code and commits — in ${dir.trim()}`,
+        ? `plan only, in ${dir.trim()}${onBranch}`
+        : `a full run — this one writes code and commits — in ${dir.trim()}${onBranch}`,
       effect: { kind: 'invoke', argv },
     };
   },
@@ -975,7 +1077,10 @@ export function execute(
   ctx: ToolContext,
 ): Settlement {
   const out = settleCall(call, ctx);
-  return out.kind === 'reads'
-    ? { kind: 'refused', content: `${call.name} is answered by the host, and there is none here.` }
-    : out;
+  if (out.kind === 'reads') {
+    return { kind: 'refused', content: `${call.name} is answered by the host, and there is none here.` };
+  }
+  // Nothing here will ever finish the read, so the wait is said rather than kept.
+  if (out.kind === 'waits') return { kind: 'refused', content: `${out.why}; ask again in a moment.` };
+  return out;
 }

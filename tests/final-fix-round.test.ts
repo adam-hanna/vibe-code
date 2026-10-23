@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { orchestrate } from '@src/orchestrator.js';
 import {
@@ -83,10 +83,12 @@ test('the tolerated P1 is fixed, committed and re-verified, but never re-reviewe
  *
  * The finding is inside `p1Tolerance` either way, so it never blocks - what it
  * buys is the final fix round, which `reviewPhase` buys only when
- * `decision.tolerated` is non-empty. A P2 is never tolerated, so the inert
- * turn's version buys nothing at all. On the real run that round cost ~1.3M
- * tokens and edited working code to satisfy a false premise, in a round that is
- * by design not re-reviewed.
+ * `decision.tolerated` is non-empty. A P2 is never tolerated, so before #425 the
+ * inert turn's version bought nothing at all. On the real run that round cost
+ * ~1.3M tokens and edited working code to satisfy a false premise, in a round
+ * that is by design not re-reviewed. Since #425 a passing review's P2 buys that
+ * round as a non-blocking finding - the owner's decision - so what the guard
+ * still decides is that it is never carried as a P1.
  *
  * The two cases share everything except `activity`, deliberately: if the fixture
  * differed anywhere else the comparison would prove nothing.
@@ -116,37 +118,53 @@ test('a tolerated P1 from a turn that ran commands still buys the final fix roun
   assert.equal(state.finalFixDone, true);
 });
 
-test('the same P1 from a turn that ran nothing buys no round at all', async () => {
-  const state = reviewingRun({ ...RUN, commit: true });
-  const calls: string[] = [];
+test('the same P1 from a turn that ran nothing is no longer carried: it is a P2 to address', async () => {
+  // #66's guard still holds - the finding is downgraded, so it is not
+  // tolerated and nothing is carried as a P1. What moved is #425: a passing
+  // review's non-deferred P2 buys the one final round, never re-reviewed, and
+  // the fixer judges it under #228's scope rule. With the setting off the
+  // inert version buys nothing at all, exactly as before.
+  for (const fixNonBlocking of [true, false]) {
+    const state = reviewingRun({ ...RUN, commit: true });
+    const calls: string[] = [];
 
-  await orchestrate(
-    state,
-    config({}, { ...committing(), ...verifying(state) }),
-    true,
-    agents(
-      {
-        claude: (label) => work(state, `${label}.txt`),
-        codex: (() => {
-          let asked = 0;
-          return (): unknown => (asked++ > 0 ? report([]) : report([p1('tolerated-one')]));
-        })(),
-        activity: () => inert(3),
-      },
-      calls,
-    ),
-  );
+    await orchestrate(
+      state,
+      config({ fixNonBlocking }, { ...committing(), ...verifying(state) }),
+      true,
+      agents(
+        {
+          claude: (label) => work(state, `${label}.txt`),
+          codex: (() => {
+            let asked = 0;
+            return (): unknown => (asked++ > 0 ? report([]) : report([p1('tolerated-one')]));
+          })(),
+          activity: () => inert(3),
+        },
+        calls,
+      ),
+    );
 
-  assert.deepEqual(calls, ['review-0'], 'no final-fix turn was bought');
-  assert.notEqual(state.finalFixDone, true);
-  // Not tolerated, because it is no longer a P1: the loop ends clean rather
-  // than ending on a carried finding.
-  assert.equal(state.outstanding ?? null, null);
-  assert.equal(state.phase, 'complete');
-  // Kept, not deleted, and the run says why.
-  const downgraded = state.events.filter((e) => e.type === 'finding_downgraded');
-  assert.deepEqual(downgraded.map((e) => e['id']), ['tolerated-one']);
-  assert.match(String(downgraded[0]?.['reason']), /used no tools/);
+    if (fixNonBlocking) {
+      assert.deepEqual(calls, ['review-0', 'final-fix-1'], 'one final round, not reviewed again');
+      assert.equal(state.finalFixDone, true);
+      // Not carried as a P1: the round was bought for a non-blocking finding.
+      assert.deepEqual(state.outstanding, []);
+      assert.deepEqual(state.finalFixNonBlocking, ['tolerated-one']);
+      assert.equal(existsSync(path.join(state.dir, 'OUTSTANDING.md')), false);
+    } else {
+      assert.deepEqual(calls, ['review-0'], 'no final-fix turn was bought');
+      assert.notEqual(state.finalFixDone, true);
+      // Not tolerated, because it is no longer a P1: the loop ends clean rather
+      // than ending on a carried finding.
+      assert.equal(state.outstanding ?? null, null);
+    }
+    assert.equal(state.phase, 'complete');
+    // Kept, not deleted, and the run says why.
+    const downgraded = state.events.filter((e) => e.type === 'finding_downgraded');
+    assert.deepEqual(downgraded.map((e) => e['id']), ['tolerated-one']);
+    assert.match(String(downgraded[0]?.['reason']), /used no tools/);
+  }
 });
 
 test('a final fix that breaks the suite stops the run rather than finishing it', async () => {

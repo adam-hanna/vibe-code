@@ -5,15 +5,16 @@ import { Button } from '@/ui/button';
 import { cn } from '@/lib/utils';
 import { Counts } from './Counts';
 import { Caret, Section } from './Disclosure';
-import { ofKind, readReport } from './artifacts';
-import { SEVERITIES } from './model';
+import { ballotLine, foundByLine, ofKind, outcomeFor, readDispositions, readReport, votesLine } from './artifacts';
+import { SEVERITIES, gateSentence } from './model';
 import { DOCUMENT, EMPTY, FILE, HEAD, LABEL, NOTE, PANE } from './pane';
 import { useArtifact, useArtifacts, noText } from './useArtifacts';
 import { sizeOf } from './PlansPane';
 import type { Severity } from '../design';
 import type { Classified, FullFinding } from './artifacts';
-import type { Census, FindingRow } from './model';
+import type { Census, FinderMerge, FindingRow, FixDispositionsFrame } from './model';
 import type { RoundCard } from './rounds';
+import { shownRound } from './rounds';
 
 /**
  * What a judge said about a round, and what each finding actually claims
@@ -83,14 +84,26 @@ const ABSENT = 'm-0 text-body-sm text-tertiary';
  * the file has the prose and the census has what happened to the finding since,
  * and a pane that read only one of them would be missing half.
  */
-function History({ row }: { row: FindingRow }) {
+function History({
+  row,
+  byVote = false,
+}: {
+  row: FindingRow;
+  /**
+   * The downgrade was the review vote's (#388 Part C), which the report file
+   * says and the census does not. Named as the vote rather than as *guard*: it
+   * is the one move that rests on what other agents concluded, not on a
+   * mechanical check, and a reader weighing an override needs to know which.
+   */
+  byVote?: boolean;
+}) {
   const changes = row.severityChanges ?? [];
   if (row.downgraded === null && changes.length === 0) return null;
   return (
     <ul className={FACTS}>
       {row.downgraded !== null && (
         <li>
-          <Badge>guard</Badge> downgraded from {row.downgraded.from} — {row.downgraded.reason}
+          <Badge>{byVote ? 'vote' : 'guard'}</Badge> downgraded from {row.downgraded.from} — {row.downgraded.reason}
         </li>
       )}
       {changes.map((c, i) => (
@@ -168,8 +181,22 @@ function Reproducer({ outcomes }: { outcomes: FindingRow['reproducer'] }) {
  * no detail"* reads as what it is, which is a reviewer that wrote a title and
  * stopped.
  */
-function Finding({ finding, row }: { finding: FullFinding; row: FindingRow | null }) {
+function Finding({
+  finding,
+  row,
+  reported,
+  outcome,
+}: {
+  finding: FullFinding;
+  row: FindingRow | null;
+  /** How many finders reported this round, or null when no merge frame said. */
+  reported: number | null;
+  /** What the fixer did with it and what came after, as `outcomeLine` says it (#393). */
+  outcome: readonly string[];
+}) {
   const [open, setOpen] = useState(false);
+  // The report file says the vote moved it; the census row only says a guard did (#388 Part C).
+  const movedByVote = finding.votes?.outcome === 'unconfirmed' && finding.downgraded !== null;
   const w = weight(finding.severity);
   return (
     <div className="rounded-sm border border-rule-inner bg-panel">
@@ -192,13 +219,26 @@ function Finding({ finding, row }: { finding: FullFinding; row: FindingRow | nul
             ) : (
               <Badge>raised by {finding.raisedBy}</Badge>
             )}
+            {/* Who found it, behind the fold and never on the row (#388 Part B).
+                A finding with no `foundBy` adds nothing here. */}
+            {finding.foundBy !== null && <Badge>{foundByLine(finding.foundBy, reported)}</Badge>}
+            {/* The vote, below who found it and never on the row (#388 Part C).
+                A finding nobody voted on adds nothing here. */}
+            {finding.votes !== null && <Badge>{votesLine(finding.votes)}</Badge>}
+            {/* What the fixer did with it, below the vote and beside the
+                severity history (#393). Later evidence is its own badge. */}
+            {outcome.map((line) => (
+              <Badge key={line}>{line}</Badge>
+            ))}
             {finding.deferred && <Badge>deferred — real, and for separate work</Badge>}
             {/* The guards' downgrade, which is a fact about the severity above
                 and has to be readable beside it. Never rewritten and never
                 cleared, including by a person restoring the severity (#142). */}
             {finding.downgraded !== null && (
               <Badge variant="alarm">
-                guard downgraded it from {finding.downgraded.from}
+                {movedByVote
+                  ? `${finding.downgraded.reason}, moved from ${finding.downgraded.from}`
+                  : `guard downgraded it from ${finding.downgraded.from}`}
               </Badge>
             )}
             {/* Said out loud rather than left as an empty row. *Nobody tried to
@@ -209,6 +249,15 @@ function Finding({ finding, row }: { finding: FullFinding; row: FindingRow | nul
               <Badge>no reproducer was written</Badge>
             )}
           </div>
+          {/* One line per ballot: the seat, its vote and its reason. Every
+              verifier saw the same claim and none saw another's vote. */}
+          {finding.votes !== null && finding.votes.ballots.length > 0 && (
+            <ul className={FACTS}>
+              {finding.votes.ballots.map((b) => (
+                <li key={b.seat}>{ballotLine(b)}</li>
+              ))}
+            </ul>
+          )}
 
           <h5 className={CAPTION}>What is wrong</h5>
           {finding.detail === null ? (
@@ -259,7 +308,7 @@ function Finding({ finding, row }: { finding: FullFinding; row: FindingRow | nul
           {row !== null && (row.downgraded !== null || (row.severityChanges ?? []).length > 0) && (
             <>
               <h5 className={CAPTION}>How it reached this severity</h5>
-              <History row={row} />
+              <History row={row} byVote={movedByVote} />
             </>
           )}
           {row !== null && row.reproducer !== null && (
@@ -274,23 +323,73 @@ function Finding({ finding, row }: { finding: FullFinding; row: FindingRow | nul
   );
 }
 
+/**
+ * A round's counts and what the gate made of them, at the head of its report.
+ *
+ * The loop's own sentence where it blocked, never one composed from the counts.
+ * Where no gate decision reached this window - no census at all, which is every
+ * round of a run it joined late, or a census without a `pass`, which is every
+ * replayed one (#437) - the report's own verdict stands in, labelled as the
+ * judge's word and not the gate's. It was *"The gate blocked this round."*,
+ * read off a missing field, over a review the loop called clean.
+ */
+export function GateHead({
+  census,
+  verdict,
+}: {
+  census: Census | null;
+  verdict: string | null;
+}) {
+  const sentence = census === null ? null : gateSentence(census);
+  return (
+    <>
+      {census !== null && <Counts counts={census.counts} tolerance={census.tolerance} compact />}
+      {sentence !== null && <p className="m-0 text-body text-primary">{sentence}</p>}
+      {sentence === null && verdict !== null && (
+        <p className="m-0 text-body text-primary">
+          <Badge>{verdict}</Badge> the judge’s own verdict. No gate decision was
+          narrated to this window for this round.
+        </p>
+      )}
+    </>
+  );
+}
+
 /** The round's report, once its section is open. */
 function ReportBody({
   dir,
   runId,
   name,
   census,
+  finders,
   revision,
+  dispositions = null,
+  nextReview = null,
+  notRecorded = false,
 }: {
   dir: string;
   runId: string;
   name: string;
   /** What the gate made of this round, or null when nothing narrated one. */
   census: Census | null;
+  /** What this round's review finders came to, or null when nothing narrated one. */
+  finders: FinderMerge | null;
   revision: number;
+  /** The fix round's `fix-dispositions-<n+1>.json` answering this review, or null (#393). */
+  dispositions?: Classified | null;
+  /** The next review's `code-review-<n+1>.json`, or null. */
+  nextReview?: Classified | null;
+  /** The fix round answering this review ran and recorded no dispositions. */
+  notRecorded?: boolean;
 }) {
   const { read, failure, loading } = useArtifact(dir, runId, name, revision);
   const missing = noText(read, failure);
+  const fixed = useArtifact(dir, runId, dispositions?.name ?? null, revision);
+  const next = useArtifact(dir, runId, nextReview?.name ?? null, revision);
+  const file = fixed.read?.kind === 'text' ? readDispositions(fixed.read.text) : null;
+  const raised =
+    next.read?.kind === 'text' ? new Set(readReport(next.read.text)?.findings.map((f) => f.id) ?? []) : null;
+  const answering = { listed: dispositions?.round ?? null, file, unrecorded: notRecorded, raised };
 
   if (loading && read === null && missing === null) {
     return <p className={NOTE}>reading {name}…</p>;
@@ -328,25 +427,7 @@ function ReportBody({
           the gate decided on; a tally of the list below would be this pane's
           arithmetic wearing the gate's clothes. The loop's own sentence where it
           blocked, never one composed from the counts. */}
-      {census !== null && (
-        <>
-          <Counts counts={census.counts} tolerance={census.tolerance} compact />
-          <p className="m-0 text-body text-primary">
-            {census.pass
-              ? 'The gate passed.'
-              : (census.reason ?? 'The gate blocked this round.')}
-          </p>
-        </>
-      )}
-      {census === null && report.verdict !== null && (
-        // The report's own word, when no census was narrated for this round -
-        // which is every round of a run this window joined late. It is the
-        // judge's verdict and not the gate's decision, and it says which.
-        <p className="m-0 text-body text-primary">
-          <Badge>{report.verdict}</Badge> the judge’s own verdict. No gate decision was
-          narrated to this window for this round.
-        </p>
-      )}
+      <GateHead census={census} verdict={report.verdict} />
 
       {/* The summary is the paragraph a person reads before any individual
           finding, and no frame has ever carried it. */}
@@ -364,6 +445,8 @@ function ReportBody({
             // round of an earlier session - the prose is still there, and what
             // is missing is what happened to the finding afterwards.
             row={census?.findings.find((r) => r.id === f.id) ?? null}
+            reported={finders?.reported ?? null}
+            outcome={outcomeFor(f.id, answering)}
           />
         ))
       )}
@@ -400,6 +483,7 @@ export function ReportPane({
   rounds,
   openAt,
   revision = 0,
+  fixDispositions = [],
 }: {
   dir: string;
   runId: string | null;
@@ -423,9 +507,31 @@ export function ReportPane({
    * unless the run says so.
    */
   revision?: number;
+  /**
+   * The run's fix-round dispositions frames (#393): what says a round's
+   * dispositions could not be read, which no file on disk can say.
+   */
+  fixDispositions?: readonly FixDispositionsFrame[];
 }) {
   const { entries, failure, loading, reload } = useArtifacts(dir, runId, revision);
   const reports = ofKind(entries, kind);
+  // Classified out of the listing, never composed from a round: the fix round
+  // that answers `code-review-<n>.json` is `n + 1`, and so is the next review.
+  const answering = (round: number | null): Classified | null =>
+    kind !== 'review' || round === null
+      ? null
+      : (ofKind(entries, 'dispositions').find((c) => c.round === round + 1) ?? null);
+  const nextReviewOf = (round: number | null): Classified | null =>
+    kind !== 'review' || round === null ? null : (reports.find((c) => c.round === round + 1) ?? null);
+  // A round that ran and recorded nothing: the frame that says its answer could
+  // not be read, or - for a run from before #393, or an archive opened without
+  // its frames - the round's report with no dispositions file beside it.
+  const unrecordedFor = (round: number | null): boolean =>
+    kind === 'review' &&
+    round !== null &&
+    // The last frame for the round: a round redone after a stop says again.
+    (fixDispositions.filter((d) => d.answers === round).at(-1)?.recorded === false ||
+      ofKind(entries, 'fix-report').some((c) => c.round === round + 1));
   const [open, setOpen] = useState<string | null>(null);
   /** See `PlansPane`: the pane follows the run until the reader touches it. */
   const touched = useRef(false);
@@ -439,6 +545,12 @@ export function ReportPane({
     if (round === null) return null;
     const card = rounds.find((c) => c.cycle === kind && c.round === round);
     return card?.census ?? null;
+  };
+  // The finder merge for a round, matched the same way and for the same reason.
+  const findersFor = (round: number | null): FinderMerge | null => {
+    if (round === null) return null;
+    const card = rounds.find((c) => c.cycle === kind && c.round === round);
+    return card?.finders ?? null;
   };
 
   useEffect(() => {
@@ -504,7 +616,9 @@ export function ReportPane({
           title={
             report.round === null
               ? words.title
-              : `${words.title} · round ${String(report.round)}`
+              // From one, as the headings count (#428); the id, the census
+              // and the link keep the file's round.
+              : `${words.title} · round ${String(shownRound(report.round))}`
           }
           meta={<Summary report={report} census={censusFor(report.round)} />}
         >
@@ -513,7 +627,11 @@ export function ReportPane({
             runId={runId}
             name={report.name}
             census={censusFor(report.round)}
+            finders={findersFor(report.round)}
             revision={revision}
+            dispositions={answering(report.round)}
+            nextReview={nextReviewOf(report.round)}
+            notRecorded={unrecordedFor(report.round)}
           />
         </Section>
       ))}

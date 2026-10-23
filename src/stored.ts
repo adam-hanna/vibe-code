@@ -26,18 +26,22 @@ import type {
   OutOfScopeItem,
   PendingFindings,
   Plan,
+  PlanStallEntry,
   QuestionKind,
   ResolvedQuestion,
   ReviewCoverage,
+  ReviewSeat,
   FileChangeStatus,
   JudgeFile,
   TestChanges,
+  UnaddressedFinding,
   RoundClaim,
   RoundRecord,
   RunCheckpointMeta,
   RunEvent,
   RunPhase,
   RunStart,
+  ReviewMdRecord,
   CliVersions,
   RunState,
   RunStatus,
@@ -277,6 +281,8 @@ const SLOT_NAMES = {
   judge: 'judge',
   review: 'review',
   write: 'write',
+  'fresh-claude': 'fresh-claude',
+  'fresh-codex': 'fresh-codex',
 } satisfies Record<SlotName, SlotName>;
 
 const FILE_CHANGE_STATUSES = {
@@ -758,6 +764,98 @@ export function hasFindingShape(f: unknown): f is Finding {
   );
 }
 
+/**
+ * What may appear in FOLLOW-UPS.md.
+ *
+ * Written against `unknown` on purpose. `validateStoredState` now owns this
+ * invariant on the way in; the check remains as defence in depth, since the
+ * field is also appended to mid-run from parsed model output.
+ * Severity is checked as well as `defer`, even though `parseFindings` already
+ * normalises, because the artifact this feeds asserts in prose that everything
+ * in it was non-blocking - and an invariant a boundary states should be one the
+ * boundary keeps. The string fields are checked - by `hasFindingShape`, which
+ * the carried findings read through too, so the codebase holds one answer to
+ * "is this stored object a finding" - because an entry missing one renders
+ * `undefined` into a human-facing document.
+ *
+ * Here rather than in the orchestrator since #425, unchanged: the reader for
+ * `unaddressed` below has to refuse a deferrable finding, and this module
+ * imports nothing from the loop.
+ */
+export function isDeferrable(f: unknown): f is Finding {
+  return (
+    hasFindingShape(f) &&
+    (f.defer === true || movedByVote(f)) &&
+    (f.severity === 'P2' || f.severity === 'P3')
+  );
+}
+
+/**
+ * A finding the review vote moved to P2 (#388 Part C).
+ *
+ * It goes to FOLLOW-UPS.md like a deferral, but is never marked `defer: true`:
+ * the fixer's prompt reads a deferral as *real, and agreed to belong in
+ * separate work*, and an unconfirmed claim is neither. The record says which of
+ * the two it is instead (`*Unconfirmed by vote:*`). Read tolerantly, because
+ * `votes` rides through stored state unvalidated.
+ */
+export function movedByVote(f: Finding): boolean {
+  const votes: unknown = f.votes;
+  return (
+    typeof votes === 'object' &&
+    votes !== null &&
+    (votes as Record<string, unknown>)['outcome'] === 'unconfirmed' &&
+    f.downgraded !== undefined
+  );
+}
+
+/**
+ * A finding a passing round still has work for (#425): a P2 or P3 that is not
+ * deferrable. Deferrable ones already go to FOLLOW-UPS.md and never trigger
+ * anything on their own; P0s and P1s are the gate's business.
+ *
+ * A finding a guard downgraded (`downgraded`, #44/#66) is one: Decision 2 of
+ * #425 makes every non-deferrable P2 and P3 work, and the guard's reason stays
+ * on the finding, in the round's artifact and in its `finding_downgraded`
+ * event. The fixer judges it under #228's scope rule like any other, and a
+ * claim it rebuts goes to FOLLOW-UPS.md with the rebuttal.
+ */
+export function isToAddress(f: unknown): f is Finding {
+  return (
+    hasFindingShape(f) &&
+    (f.severity === 'P2' || f.severity === 'P3') &&
+    !isDeferrable(f)
+  );
+}
+
+const UNADDRESSED_OUTCOMES: ReadonlySet<string> = new Set([
+  'not-addressed',
+  'deferred',
+  'rebutted',
+  'unreadable',
+  'not-attempted',
+]);
+
+/**
+ * One entry of `unaddressed`, checked rather than asserted (#425). Its finding
+ * must be one to address, because the section it renders into sits under a
+ * header claiming everything in the file was non-blocking, and a deferrable
+ * finding is already listed under "Deferred by review".
+ */
+export function isUnaddressed(entry: unknown): entry is UnaddressedFinding {
+  return (
+    isRecord(entry) &&
+    isToAddress(entry['finding']) &&
+    isString(entry['outcome']) &&
+    UNADDRESSED_OUTCOMES.has(entry['outcome']) &&
+    isString(entry['reason'])
+  );
+}
+
+function readUnaddressed(entry: unknown): UnaddressedFinding | null {
+  return isUnaddressed(entry) ? entry : null;
+}
+
 function readFinding(entry: unknown): Finding | null {
   return hasFindingShape(entry) ? entry : null;
 }
@@ -806,6 +904,32 @@ const roundReader =
     });
     return { signature, count, ids, ...claims };
   };
+
+/**
+ * One stall of the plan loop (#394).
+ *
+ * All or nothing, unlike a round's `ids`: `position` decides which rounds a
+ * later stall may judge and `action` decides whether the next one asks a
+ * person, so an entry with either unreadable is not something to half-keep.
+ * Dropped, and the drop is reported, by `repairedArray`.
+ */
+function readPlanStall(entry: unknown): PlanStallEntry | null {
+  if (!isRecord(entry)) return null;
+  const { position, action, counts, fresh, sent } = entry;
+  if (!isCounter(position)) return null;
+  if (action !== 'step-back' && action !== 'escalated') return null;
+  if (!Array.isArray(counts) || !counts.every(isCounter)) return null;
+  if (!Array.isArray(fresh) || !fresh.every(isCounter)) return null;
+  if (counts.length !== fresh.length) return null;
+  if (sent !== undefined && typeof sent !== 'boolean') return null;
+  return {
+    position,
+    action,
+    counts: [...counts],
+    fresh: [...fresh],
+    ...(sent === undefined ? {} : { sent }),
+  };
+}
 
 /**
  * The claims of one round, on the same terms as its ids.
@@ -1361,6 +1485,30 @@ function readTestChanges(raw: unknown, ctx: ReadContext): TestChanges | undefine
   return { round: raw['round'], patterns: [...(raw['patterns'] as string[])], files };
 }
 
+/**
+ * The seat that took the last recorded review round's turn, or nothing (#393).
+ *
+ * Dropped whole rather than repaired, for `readTestChanges`'s reason: a
+ * fix's dispositions are credited to this seat, and a repaired value would
+ * credit a seat nobody recorded. `isCounter` rather than `isPositiveInt`,
+ * because round 0 is the first review round's own number.
+ */
+function readReviewSeat(raw: unknown, ctx: ReadContext): ReviewSeat | undefined {
+  if (raw === undefined) return undefined;
+  if (
+    !isRecord(raw) ||
+    !isCounter(raw['round']) ||
+    !isString(raw['provider']) ||
+    raw['provider'] === '' ||
+    !isString(raw['model']) ||
+    raw['model'] === ''
+  ) {
+    ctx.repairs.dropped('reviewSeat', 'reviewSeat');
+    return undefined;
+  }
+  return { round: raw['round'], provider: raw['provider'], model: raw['model'] };
+}
+
 /** A full object id, never an abbreviation. The same rule `src/git.ts` applies. */
 const FULL_SHA = /^[0-9a-f]{40}$/;
 
@@ -1383,6 +1531,52 @@ function readStart(raw: unknown, ctx: ReadContext): RunStart | undefined {
     return { sha: raw['sha'], ref: raw['ref'] };
   }
   ctx.repairs.dropped('start', 'start');
+  return undefined;
+}
+
+/** A blob id: SHA-1, or SHA-256 in a repository that uses it. */
+const BLOB_ID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+const REVIEW_MD_OUTCOMES: readonly string[] = ['present', 'absent', 'refused', 'unreadable'];
+
+/**
+ * What the run found as `REVIEW.md` (#389), or nothing at all.
+ *
+ * `readStart`'s rule and reason: it describes a read of a commit, and a repaired
+ * one would describe a read nobody made, so a malformed record is dropped whole
+ * and the drop is logged. Dropping is safe: the next review reads afresh from
+ * the start commit, which cannot have changed.
+ */
+function readReviewMdRecord(raw: unknown, ctx: ReadContext): ReviewMdRecord | undefined {
+  if (raw === undefined) return undefined;
+  const ok = (): ReviewMdRecord | null => {
+    if (!isRecord(raw)) return null;
+    const commit = raw['commit'];
+    const outcome = raw['outcome'];
+    const blob = raw['blob'];
+    const bytes = raw['bytes'];
+    const reason = raw['reason'];
+    if (!isString(commit) || !FULL_SHA.test(commit)) return null;
+    if (!isString(outcome) || !REVIEW_MD_OUTCOMES.includes(outcome)) return null;
+    if (blob !== undefined && !(isString(blob) && BLOB_ID.test(blob))) return null;
+    if (bytes !== undefined && !isCounter(bytes)) return null;
+    if (reason !== undefined && !(isString(reason) && reason !== '')) return null;
+    if (outcome === 'present') {
+      if (blob === undefined || bytes === undefined) return null;
+      return { commit, outcome, blob, bytes };
+    }
+    if (outcome === 'absent') return { commit, outcome };
+    if (reason === undefined) return null;
+    return {
+      commit,
+      outcome: outcome === 'refused' ? 'refused' : 'unreadable',
+      ...(blob === undefined ? {} : { blob }),
+      ...(bytes === undefined ? {} : { bytes }),
+      reason,
+    };
+  };
+  const record = ok();
+  if (record !== null) return record;
+  ctx.repairs.dropped('reviewMd', 'reviewMd');
   return undefined;
 }
 
@@ -1610,6 +1804,27 @@ function readBranchPending(raw: unknown, ctx: ReadContext): true | undefined {
     ctx,
     'It says the run has not yet been put on the branch its fork created; dropping it would ' +
       'let the run commit to whatever branch happens to be checked out. Nothing was rewritten.',
+  );
+}
+
+/**
+ * The branch name `--branch` asked for (#356) - **refused when present and
+ * unreadable**, on `branchPending`'s reasoning: it is an instruction about which
+ * branch the run's commits land on, and dropped it would put a run that was
+ * stopped in preflight onto `branchPrefix + id` instead of the name the person
+ * approved on the card. A non-empty string is the only value any writer
+ * produces; git's own check ran before it was written.
+ */
+function readRequestedBranch(raw: unknown, ctx: ReadContext): string | undefined {
+  if (raw === undefined) return undefined;
+  if (isString(raw) && raw.trim() !== '') return raw;
+  return refuse(
+    'requestedBranch',
+    raw,
+    'a branch name, or nothing at all',
+    ctx,
+    'It is the branch --branch asked this run to be on; dropping it would put the run on a ' +
+      'branch nobody chose. Nothing was rewritten.',
   );
 }
 
@@ -1849,6 +2064,11 @@ const READERS = {
   // Records: repaired to the empty value their type implies.
   events: (raw, ctx) => repairedArray('events', raw, ctx, readEvent),
   p1Rounds: (raw, ctx) => repairedArray('p1Rounds', raw, ctx, roundReader(ctx)),
+  // Optional, unlike its neighbours: absent is what a run that never stalled
+  // looks like, so nothing is repaired into existence (#394).
+  planStalls: (raw, ctx) =>
+    raw === undefined ? undefined : repairedArray('planStalls', raw, ctx, readPlanStall),
+  planRevisedByAnswer: (raw, ctx) => optionalBool('planRevisedByAnswer', raw, ctx),
   verifyRounds: (raw, ctx) => repairedArray('verifyRounds', raw, ctx, roundReader(ctx)),
   answeredQuestions: (raw, ctx) => repairedArray('answeredQuestions', raw, ctx, readString),
   deferredQuestions: (raw, ctx) =>
@@ -1910,6 +2130,19 @@ const READERS = {
   // Absent stays absent: a round that touched no judge file records nothing,
   // and a damaged record is dropped rather than guessed into one (#112).
   testChanges: (raw, ctx) => readTestChanges(raw, ctx),
+  // Absent stays absent: a run from before #393, or one that has not recorded a
+  // review round. A damaged value is dropped, so its round credits no seat.
+  reviewSeat: (raw, ctx) => readReviewSeat(raw, ctx),
+  // Absent stays absent: no fix round is in flight. A damaged marker is dropped,
+  // which resumes the way every run did before it existed - a new round.
+  fixInFlight: (raw, ctx) => {
+    if (raw === undefined) return undefined;
+    if (isRecord(raw) && isPositiveInt(raw['round']) && isBool(raw['final'])) {
+      return { round: raw['round'], final: raw['final'] };
+    }
+    ctx.repairs.dropped('fixInFlight', 'fixInFlight');
+    return undefined;
+  },
   // Absent stays absent again, and a present value is checked rather than
   // trusted: this one becomes a path under the run directory and its contents
   // are rendered into a prompt, so a stored `../../something` would read a file
@@ -1927,8 +2160,12 @@ const READERS = {
   forkedFrom: (raw, ctx) => readForkOrigin(raw, ctx),
   forkPending: (raw, ctx) => readForkPending(raw, ctx),
   branchPending: (raw, ctx) => readBranchPending(raw, ctx),
+  // Absent stays absent: a run started without --branch (#356).
+  requestedBranch: (raw, ctx) => readRequestedBranch(raw, ctx),
   // Absent stays absent: a run from before #249, or one never put on a branch.
   start: (raw, ctx) => readStart(raw, ctx),
+  // Absent stays absent: a run from before #389, or one not yet reviewed.
+  reviewMd: (raw, ctx) => readReviewMdRecord(raw, ctx),
   // Absent stays absent: a run from before #298, or one started --skip-probe.
   cliVersions: (raw, ctx) => readCliVersions(raw, ctx),
   // The three question-record fields (#65). Optional every one: absent is what
@@ -1957,6 +2194,14 @@ const READERS = {
       : repairedArray('acceptanceCriteria', raw, ctx, readAcceptanceCriterion),
   outstanding: (raw, ctx) =>
     raw === undefined ? undefined : repairedArray('outstanding', raw, ctx, readFinding),
+  // The three #425 fields. Absent stays absent, with no repair recorded: every
+  // run from before #425, and every run with `loop.fixNonBlocking` off, has none.
+  planNonBlocking: (raw, ctx) =>
+    raw === undefined ? undefined : repairedArray('planNonBlocking', raw, ctx, readFinding),
+  finalFixNonBlocking: (raw, ctx) =>
+    raw === undefined ? undefined : repairedArray('finalFixNonBlocking', raw, ctx, readString),
+  unaddressed: (raw, ctx) =>
+    raw === undefined ? undefined : repairedArray('unaddressed', raw, ctx, readUnaddressed),
   deferred: (raw, ctx) =>
     raw === undefined ? undefined : repairedArray('deferred', raw, ctx, readFinding),
   config: unvalidated<'config'>('config'),

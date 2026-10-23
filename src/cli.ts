@@ -39,7 +39,8 @@ import { mergeHumanAnswers, reconcileAssumed, reconcileQuestionRecords } from '@
 import { acceptMoves, acceptRaised, parseMoves, parseRaised, raisePhase } from '@src/raise.js';
 import type { RaiseProblem, RequestedMove, RequestedMoves } from '@src/raise.js';
 import { assertUsableRunId } from '@src/stored.js';
-import { chooseBase, Escalation, EXIT, orchestrate, writeEscalation } from '@src/orchestrator.js';
+import { chooseBase, Escalation, EXIT, orchestrate, voteMovedFollowUps, writeEscalation } from '@src/orchestrator.js';
+import { readTally } from '@src/vote.js';
 import type { ExitCode } from '@src/orchestrator.js';
 import {
   codexConversations,
@@ -47,18 +48,22 @@ import {
   DEFAULT_ROLE_PROVIDERS,
   effortFor,
   modelFor,
+  readFinders,
+  readVerifiers,
   ROLE_NAMES,
   rolesFor,
   roleWarnings,
+  seatResolved,
   turnTimeoutMs,
 } from '@src/roles.js';
-import type { RolePatches } from '@src/roles.js';
+import type { RolePatches, RoleSetting } from '@src/roles.js';
 import { setOwn } from '@src/runtime.js';
 import { claudeBin, setSessionArgs } from '@src/claude.js';
 import { codexBin } from '@src/codex.js';
 import { resetUnrecognisedCodexItems } from '@src/progress.js';
 import { detectCliVersions } from '@src/cliversions.js';
 import { describeMcp, mcpRefusals } from '@src/mcp.js';
+import { chargedTurns, seatOf } from '@src/replay.js';
 import { run as runChild } from '@src/proc.js';
 // The accounting seam, from the leaf it lives in: orchestrator.js re-exports
 // applyCharge but not fmtTokens, and charge.js imports nothing that imports this.
@@ -72,6 +77,7 @@ import { resolveGates } from '@src/verify.js';
 import { createWorktree, sameRepositoryRefusal, storedWorktree, workDirOf } from '@src/worktree.js';
 import type { AgentPreflight } from '@src/preflight.js';
 import * as git from '@src/git.js';
+import { describeBytes, describeReviewMdAt, overWarning, readReviewMd, REVIEW_MD_WARN_BYTES } from '@src/review-md.js';
 import * as log from '@src/log.js';
 import type { EnvironmentFacts, Phase } from '@src/runtime.js';
 import type {
@@ -82,6 +88,7 @@ import type {
   Effort,
   Finding,
   LoadedConfig,
+  RunEvent,
   RunState,
   RunSummary,
 } from '@src/types.js';
@@ -134,9 +141,13 @@ Options
   --max-question-rounds <n>  Planner self-answer rounds before asking you (default: 3)
   --p1-tolerance <n>         P1s a phase may carry forward rather than fix (default: 1;
                              0 demands a spotless verdict. P0s are never carried)
-  --plan-timeout <min>       Per planning turn (default: 30)
-  --implement-timeout <min>  Per implement/fix turn (default: 90)
-  --codex-timeout <min>      Per Codex turn (default: 45)
+  --plan-timeout <min>       Per read-only Claude turn - planning, under the default roles
+                             (claude.planTimeoutMs; default: 30)
+  --implement-timeout <min>  Per implement/fix turn on Claude (claude.implementTimeoutMs;
+                             default: 90)
+  --codex-timeout <min>      Per read-only Codex turn (codex.timeoutMs; default: 45). A Codex
+                             implementer uses codex.implementTimeoutMs, and a role's own
+                             timeoutMs wins over all three flags
   --verify-timeout <min>     Per verification command run (default: 15)
   --budget <usd>             Work ceiling, API-equivalent, Claude only - Codex reports no
                              cost (default: 25; not a bill on a plan)
@@ -151,6 +162,9 @@ Options
   --progress-interval <sec>  Heartbeat cadence during a turn (default: 30)
   --no-progress              Do not emit the in-turn progress heartbeat
   --no-branch                Do not create an isolated branch
+  --branch <name>            The run's branch, instead of git.branchPrefix + the run id
+                             (run and plan only). Checked with git check-ref-format, and
+                             refused if a branch of that name already exists
   --no-codex-answers         Escalate every blocking question straight to you
   --blocking-questions-only  Only send Codex the questions marked blocking
   --no-codex-session         Run each Codex turn as a fresh one-shot (no memory)
@@ -199,6 +213,12 @@ interface ParsedArgs {
     progressInterval?: number;
     noProgress?: boolean;
     noBranch?: boolean;
+    /**
+     * The run's branch name, instead of `branchPrefix + id` (#356). Not a
+     * config setting and absent from `buildOverrides`: it names one run's
+     * branch, and a resume keeps the branch the run already took.
+     */
+    branch?: string;
     noCodexAnswers?: boolean;
     noCodexSession?: boolean;
     blockingQuestionsOnly?: boolean;
@@ -364,6 +384,7 @@ export function parseArgs(args: readonly string[]): ParsedArgs {
       case '--progress-interval': out.flags.progressInterval = nextNum(); break;
       case '--no-progress': out.flags.noProgress = true; break;
       case '--no-branch': out.flags.noBranch = true; break;
+      case '--branch': out.flags.branch = next(); break;
       case '--no-codex-answers': out.flags.noCodexAnswers = true; break;
       case '--no-codex-session': out.flags.noCodexSession = true; break;
       case '--blocking-questions-only': out.flags.blockingQuestionsOnly = true; break;
@@ -576,6 +597,70 @@ export function buildOverrides(flags: ParsedArgs['flags']): ConfigOverrides {
   return { claude, codex, loop, budget, git: gitCfg, questions, context, gates, verify, progress };
 }
 
+/**
+ * Why `vibe run --branch <name>` cannot start, or null (#356).
+ *
+ * **Every refusal is before anything is created**, so a bad name costs a
+ * sentence and leaves no run directory, no lock and no ref behind.
+ *
+ * - With branch isolation off there is no run branch for the name to be,
+ *   and running on whatever is checked out after somebody named a branch is the
+ *   silent outcome this refuses.
+ * - The name is git's to judge (`branchNameRefusal`).
+ * - **A branch that already exists is refused, by name** - and that includes
+ *   one checked out in some other worktree, since a worktree's branch is a ref
+ *   in the same repository. Adopting an existing branch was safe only because
+ *   run ids are unique and `branchPrefix + id` could only ever be this run's
+ *   own (#223); a name a person or the pilot chose has no such guarantee, and
+ *   committing onto somebody's branch is the loss. A resume never comes here:
+ *   it keeps adopting the branch it already took.
+ */
+async function branchFlagRefusal(
+  targetDir: string,
+  cfg: Config,
+  name: string,
+  noBranch: boolean,
+): Promise<{ code: ExitCode; reason: string } | null> {
+  if (!cfg.git.useBranch) {
+    return {
+      code: EXIT.ERROR,
+      reason: noBranch
+        ? '--branch and --no-branch cannot be used together: one names the run\'s branch and the ' +
+          'other says it has none. Drop one of them. Nothing has been created.'
+        : `--branch "${name}" names a run branch, but git.useBranch is off in this project's ` +
+          'config, so the run would have none. Turn git.useBranch on, or drop --branch. ' +
+          'Nothing has been created.',
+    };
+  }
+  const bad = await git.branchNameRefusal(targetDir, name);
+  if (bad !== null) return { code: EXIT.ERROR, reason: bad };
+  if (!(await git.isRepo(targetDir))) {
+    return {
+      code: EXIT.ERROR,
+      reason:
+        `--branch "${name}" names a branch, but ${targetDir} is not a git repository, so there ` +
+        'is nothing to put it in. Nothing has been created.',
+    };
+  }
+  if (await git.branchExists(targetDir, name)) {
+    return { code: EXIT.PREFLIGHT, reason: branchTakenReason(name) };
+  }
+  return null;
+}
+
+/**
+ * The one sentence for a `--branch` name that is already a branch (#356).
+ * `outcome` is what the refusal left behind, which differs between the two
+ * sites: `cmdRun` has created nothing, the preflight gate has a run directory.
+ */
+function branchTakenReason(name: string, outcome = 'Nothing has been created.'): string {
+  return (
+    `A branch named "${name}" already exists in this repository (perhaps checked out in another ` +
+    'worktree). vibe will not put a new run on a branch it did not create - its commits would ' +
+    `land on top of somebody else's. Choose another name, or delete that branch. ${outcome}`
+  );
+}
+
 async function cmdRun(
   args: readonly string[],
   planOnly: boolean,
@@ -609,6 +694,15 @@ async function cmdRun(
       return EXIT.ERROR;
     }
     extraContext = readFileSync(file, 'utf8');
+  }
+
+  // Before anything is allocated, so a refused name leaves nothing behind (#356).
+  if (flags.branch !== undefined) {
+    const refused = await branchFlagRefusal(targetDir, cfg, flags.branch, flags.noBranch === true);
+    if (refused !== null) {
+      log.fail(refused.reason, { id: 'run_failed', data: { code: refused.code, reason: refused.reason } });
+      return refused.code;
+    }
   }
 
   // Before anything is allocated, so a refused start leaves no run directory
@@ -697,6 +791,7 @@ async function startRun(
     config: cfg,
     extraContext,
     worktree: cfg.git.worktree,
+    requestedBranch: flags.branch,
   });
 
   log.attachTranscript(path.join(state.dir, 'transcript.log'));
@@ -730,6 +825,8 @@ async function startRun(
       resumed: false,
       // The agent CLIs this run starts under (#298), null when not detected.
       cliVersions,
+      // Who asked for this invoke, only when it said (#365).
+      ...originData(origin),
     },
   });
   log.info(`Repo:    ${targetDir}`);
@@ -852,6 +949,12 @@ async function cmdResume(
   if (flags.help) {
     console.log(USAGE);
     return EXIT.OK;
+  }
+  // Refused rather than ignored (#356): a resume keeps the branch the run took,
+  // and a name that silently did nothing would read as a rename that happened.
+  if (flags.branch !== undefined) {
+    log.fail('--branch names a NEW run\'s branch; a resume stays on the branch the run already has.');
+    return EXIT.ERROR;
   }
 
   const targetDir = path.resolve(flags.cwd ?? process.cwd());
@@ -1021,13 +1124,22 @@ async function resumeRun(
           resumed: true,
           from: resumedFrom(state),
           cliVersions,
+          ...originData(origin),
         },
       });
       return execute(state, cfg, true, flags.skipProbe === true, REAL_GATE, loop, handle, origin);
     }
 
     const answers = parseHumanAnswers(raw);
-    if (answers.length === 0) {
+    if (answers.length === 0 && resumesOnMovesAlone(moves.moves.length, raisePhase(resumePhase(state)))) {
+      // A plan stop answered by severity moves alone (#394). The stall's own
+      // question says "demote each ... and leave this answer empty", and on any
+      // plan stop a demotion that passes the gate approves the plan - so an
+      // empty answer beside a move is an answer, not a file left unfilled.
+      applyEdits();
+      log.info('No answers given - taking your severity changes and continuing.');
+      renameSync(answersFile, path.join(state.dir, `stalled-${state.planRound}.md`));
+    } else if (answers.length === 0) {
       log.fail(`No answers found in ${answersFile}`);
       log.info('Fill in the "**Your answer:**" blocks (replace the empty "> " line), then resume.');
       const pending = raised.findings.length + moves.moves.length;
@@ -1038,30 +1150,31 @@ async function resumeRun(
         );
       }
       return EXIT.NEEDS_HUMAN;
+    } else {
+      applyEdits();
+      log.ok(`Picked up ${answers.length} answer(s) from NEEDS-INPUT.md`);
+      // Merged, never overwritten (#169): the answerer's usable answers are
+      // already durable in `pendingAnswers` when a run stops after its turn, and
+      // a `question-round` stop hands every question back - answered or not. The
+      // person wins where both answered one question; the answerer's answer
+      // stands where the person left it blank.
+      state.pendingAnswers = mergeHumanAnswers(state.pendingAnswers, answers);
+      // On the same write that stores them, so there is no window where the run
+      // is holding answers it has no durable record of having been given (#65).
+      // `pendingAnswers` is consumed by the loop and cannot be that record - and
+      // only the human answers go here, because `humanAnswered` means a person
+      // answered and the merged list includes the answerer's.
+      recordHumanAnswers(state, answers);
+      saveState(state);
+      // Immediately, and before preflight: `ASSUMED.md` is authored at the end of
+      // a successful run, but this resume may exit at the preflight gate or stop
+      // for input again, and a file left claiming an answered question was a
+      // guess outlives every one of those paths.
+      reconcileQuestionRecords(state);
+      // Retire the file so a later escalation writes a fresh one and these
+      // answers are not silently replayed.
+      renameSync(answersFile, path.join(state.dir, `answered-${state.planRound}.md`));
     }
-    applyEdits();
-    log.ok(`Picked up ${answers.length} answer(s) from NEEDS-INPUT.md`);
-    // Merged, never overwritten (#169): the answerer's usable answers are
-    // already durable in `pendingAnswers` when a run stops after its turn, and
-    // a `question-round` stop hands every question back - answered or not. The
-    // person wins where both answered one question; the answerer's answer
-    // stands where the person left it blank.
-    state.pendingAnswers = mergeHumanAnswers(state.pendingAnswers, answers);
-    // On the same write that stores them, so there is no window where the run
-    // is holding answers it has no durable record of having been given (#65).
-    // `pendingAnswers` is consumed by the loop and cannot be that record - and
-    // only the human answers go here, because `humanAnswered` means a person
-    // answered and the merged list includes the answerer's.
-    recordHumanAnswers(state, answers);
-    saveState(state);
-    // Immediately, and before preflight: `ASSUMED.md` is authored at the end of
-    // a successful run, but this resume may exit at the preflight gate or stop
-    // for input again, and a file left claiming an answered question was a
-    // guess outlives every one of those paths.
-    reconcileQuestionRecords(state);
-    // Retire the file so a later escalation writes a fresh one and these
-    // answers are not silently replayed.
-    renameSync(answersFile, path.join(state.dir, `answered-${state.planRound}.md`));
   }
 
   // Both resume paths carry it, and both are `run_started` rather than a
@@ -1082,9 +1195,33 @@ async function resumeRun(
       resumed: true,
       from: resumedFrom(state),
       cliVersions,
+      ...originData(origin),
     },
   });
   return execute(state, cfg, true, flags.skipProbe === true, REAL_GATE, loop, handle, origin);
+}
+
+/**
+ * `run_started`'s `origin`, or nothing at all (#365).
+ *
+ * `gate_released`'s rule: the field is there when the invoke carried a readable
+ * origin and absent when it did not, never `null` and never a placeholder. A
+ * window started the run, a terminal did or the origin could not be read - the
+ * three are indistinguishable here (`readOrigin`), so naming any of them would
+ * be inventing it.
+ *
+ * **Said, not recorded a second time.** The durable fact is `run_origin`
+ * (#354), one row per invoke written by `execute`; this is the same label on
+ * the frame a window builds a run's identity from, so it can say *Started from
+ * <phone>* without joining narration to `state.events`. A second row would be
+ * two records of one fact that a later reader has to reconcile.
+ *
+ * A spread rather than a field so every `run_started` site stays one object
+ * literal with no braces inside it - `contract.test.ts` reads the sites as
+ * source.
+ */
+function originData(origin: string | null): { origin?: string } {
+  return origin === null ? {} : { origin };
 }
 
 /**
@@ -1203,6 +1340,12 @@ async function cmdFork(args: readonly string[]): Promise<ExitCode> {
     return EXIT.OK;
   }
 
+  // A fork's branch is `branchPrefix + its id`, made from its checkpoint; naming
+  // it is not part of #356, so the flag is refused rather than ignored.
+  if (flags.branch !== undefined) {
+    log.fail('--branch names a new run\'s branch and is not taken by vibe fork.');
+    return EXIT.ERROR;
+  }
   const targetDir = path.resolve(flags.cwd ?? process.cwd());
   const sourceId = positional[0];
   if (sourceId === undefined) {
@@ -1313,6 +1456,22 @@ function parseRequestedMoves(state: RunState, raw: string): RequestedMoves {
   const carry = raisePhase(resumePhase(state));
   const carried = carry === null ? [] : (takePendingFindings(state, carry) ?? []);
   return parseMoves(raw, carried);
+}
+
+/** How many times a run asked its planner to step back (#394). */
+export function stepBackCount(events: readonly RunEvent[]): number {
+  return events.filter((e) => e.type === 'plan_stalled' && e['action'] === 'step-back').length;
+}
+
+/**
+ * Whether an unanswered NEEDS-INPUT.md still resumes, on its moves alone (#394).
+ *
+ * Plan phase only, and only with at least one move: there a demotion that
+ * passes the gate approves the plan, which is the stall question's "accept"
+ * answer. Every other unanswered file is refused as it always was.
+ */
+export function resumesOnMovesAlone(moves: number, phase: ReturnType<typeof raisePhase>): boolean {
+  return moves > 0 && phase === 'plan';
 }
 
 /** Apply them, and say what moved. Nothing at all when nobody asked for one. */
@@ -1476,8 +1635,10 @@ export type RunLoop = (state: RunState, cfg: Config, resume: boolean) => Promise
  * Compared and printed through the table rather than off the raw value, because
  * a role's value may be an object (#46): `!==` would call every role changed and
  * template interpolation would print `[object Object]`.
+ *
+ * Exported so a test can read the lines without starting a run.
  */
-function reportRoles(cfg: Config): void {
+export function reportRoles(cfg: Config): void {
   const table = rolesFor(cfg);
   const changed = ROLE_NAMES.filter(
     (role) => JSON.stringify(cfg.roles[role]) !== JSON.stringify(DEFAULT_ROLE_PROVIDERS[role]),
@@ -1505,6 +1666,30 @@ function reportRoles(cfg: Config): void {
       );
     });
     log.info(`Roles:   ${named.join(' ')}`);
+  }
+  // The additional review finders (#388 Part B), in the same spelling as a
+  // changed role, and only when there are any: a run that seats none prints
+  // what it always has.
+  const finders = readFinders(cfg);
+  if (finders.length > 0) {
+    const seated = finders.map(
+      ({ setting }) =>
+        `${setting.provider}` +
+        `${setting.model === undefined ? '' : `@${setting.model}`}` +
+        `${setting.effort === undefined ? '' : `/${setting.effort}`}`,
+    );
+    log.info(`Finders: ${seated.join(' ')}`);
+  }
+  // The verifiers (#388 Part C), the same way: only when there are any.
+  const verifiers = readVerifiers(cfg);
+  if (verifiers.length > 0) {
+    const seated = verifiers.map(
+      ({ setting }) =>
+        `${setting.provider}` +
+        `${setting.model === undefined ? '' : `@${setting.model}`}` +
+        `${setting.effort === undefined ? '' : `/${setting.effort}`}`,
+    );
+    log.info(`Verifiers: ${seated.join(' ')}`);
   }
   for (const warning of roleWarnings(cfg)) log.warn(warning);
 }
@@ -1538,6 +1723,53 @@ function reportResolvedRoles(cfg: Config): void {
         `${turnTimeoutMs(role, cfg, table)}ms`,
     );
   }
+}
+
+/**
+ * The review seats `review` names (#388), under the role table - and nothing at
+ * all when it names none, so doctor under the defaults prints what it always
+ * has.
+ *
+ * Two blocks, because they cost differently. The finders (#388 Part B) each
+ * review every chunk after `roles.reviewer`, at one extra turn per chunk per
+ * finder. The verifiers (#388 Part C) each vote on every blocking finding that
+ * was not reproduced, at one extra turn per such finding per verifier, held to
+ * the quorum and `unconfirmedP0` printed with them. A seat's figures come
+ * through `seatResolved`, the rule a turn is spawned with.
+ *
+ * The majority is printed as the definition it is - more than half - and not
+ * as a recommendation.
+ */
+function reportReviewSeats(cfg: Config): void {
+  const { quorum, unconfirmedP0 } = cfg.review;
+  const finders = readFinders(cfg);
+  const verifiers = readVerifiers(cfg);
+  if (finders.length === 0 && verifiers.length === 0) return;
+  const seat = (setting: RoleSetting, focus?: string): string => {
+    const r = seatResolved(setting, cfg);
+    const shown = focus === undefined ? '' : `  focus: ${JSON.stringify(focus)}`;
+    return `${setting.provider.padEnd(6)}  ${r.model} / ${r.effort} / ${r.timeoutMs}ms${shown}`;
+  };
+  const print = (rows: readonly [string, string][]): void => {
+    const width = Math.max(...rows.map(([label]) => label.length));
+    for (const [label, text] of rows) log.info(`    ${label.padEnd(width)}  ${text}`);
+  };
+  if (finders.length > 0) {
+    log.info('  review finders (each reviews every chunk; one extra turn per chunk per finder):');
+    print(finders.map((f): [string, string] => [`finder ${f.k}`, seat(f.setting, f.focus)]));
+  }
+  if (verifiers.length === 0) return;
+  log.info(
+    '  review verifiers (each votes on every blocking finding not reproduced; one extra turn per such finding per verifier):',
+  );
+  const rows: [string, string][] = verifiers.map((v): [string, string] => [`verifier ${v.k}`, seat(v.setting)]);
+  const n = verifiers.length;
+  rows.push([
+    'quorum',
+    quorum === null ? `${Math.floor(n / 2) + 1} of ${n} (a majority)` : `${quorum} of ${n}`,
+  ]);
+  rows.push(['unconfirmed P0', unconfirmedP0]);
+  print(rows);
 }
 
 /**
@@ -1697,6 +1929,80 @@ export function recordRunOrigin(state: RunState, origin: string | null): void {
   recordAndSay(state, 'info', 'run_origin', `Asked for by ${origin}`, { origin });
 }
 
+/**
+ * The end-of-run sentence for a run that had a final fix round, or null when
+ * it had none and the plain summary applies.
+ *
+ * Never claim a spotless finish when a P1 was carried. The tolerance lets a run
+ * complete with findings outstanding; reporting that as "zero P1s" would
+ * contradict the OUTSTANDING.md written moments earlier, and a summary a user
+ * cannot trust is worse than no summary.
+ *
+ * Two witnesses say what the round carried: `outstanding` (the P1s) and, since
+ * #425, `finalFixNonBlocking` (the non-blocking findings). A round run for P2s
+ * alone leaves `outstanding` empty on purpose, so only both empty means the
+ * record is damaged. What it left is read from `unaddressed`, and that read
+ * fails closed: an absent record, or one `state.json` had repaired, is said to
+ * be unknown rather than read as "every one fixed".
+ */
+export function finalFixSummary(state: RunState, caveat: string | null): string | null {
+  const p1s = state.outstanding ?? [];
+  const nb = Array.isArray(state.finalFixNonBlocking) ? state.finalFixNonBlocking : [];
+  const verified = `${caveat === null ? 'Verification passed' : `But ${caveat}`}`;
+
+  let leftClause = '';
+  if (nb.length > 0) {
+    const repaired = state.events.some(
+      (e) => e.type === 'state_repaired' && e['field'] === 'unaddressed',
+    );
+    const record = state.unaddressed;
+    if (!Array.isArray(record) || repaired) {
+      leftClause =
+        'the record of which of them it left could not be read back - state.json was repaired ' +
+        'on load - so this run cannot say which of them it fixed';
+    } else {
+      const ids = new Set(nb);
+      const left = record.filter((u) => ids.has(u.finding.id));
+      leftClause =
+        left.length > 0
+          ? `${left.length} of them ${left.length === 1 ? 'is' : 'are'} in FOLLOW-UPS.md with the fixer's reason`
+          : 'the fixer marked every one of them fixed';
+    }
+  }
+
+  if (p1s.length > 0) {
+    return (
+      `Finished after a final fix round for ${p1s.length} carried P1(s): ` +
+      `${p1s.map((f) => f.id).join(', ')}. ` +
+      `${verified}, and that round was not ` +
+      're-reviewed - see OUTSTANDING.md.' +
+      (nb.length > 0 ? ` It also worked on ${nb.length} non-blocking finding(s); ${leftClause}.` : '')
+    );
+  }
+  if (state.finalFixDone === true && nb.length > 0) {
+    return (
+      `Finished after a final fix round for ${nb.length} non-blocking finding(s): ${nb.join(', ')}. ` +
+      `${verified}, and that round was not re-reviewed; ${leftClause}.`
+    );
+  }
+  if (state.finalFixDone === true && state.outstanding !== undefined) {
+    // The same shape of problem as the gate record, found while checking for
+    // its twins: `outstanding` is also repaired to an empty list on a state
+    // that could not be read, and an empty one here prints "zero P1s" over a
+    // run that carried some. `finalFixDone` is an independent witness - a
+    // healthy run sets it in the same breath as a NON-empty `outstanding` or
+    // `finalFixNonBlocking` (src/orchestrator.ts) - so all three disagreeing
+    // means the record is damaged, not that the review was spotless. Absent
+    // `outstanding` is left alone: that is a state written before the field
+    // existed.
+    return (
+      'Finished after a final fix round, but the record of what it carried is empty - ' +
+      'state.json was repaired on load. See OUTSTANDING.md for what was actually carried.'
+    );
+  }
+  return null;
+}
+
 export async function execute(
   state: RunState,
   cfg: Config,
@@ -1814,32 +2120,14 @@ export async function execute(
     // run complete with findings outstanding; reporting that as "zero P1s"
     // would contradict the OUTSTANDING.md written moments earlier, and a
     // summary a user cannot trust is worse than no summary.
-    const left = state.outstanding ?? [];
     const caveat = verificationCaveat(state);
     // The exit rule, not the list of named gates: a record that says nothing at
     // all names nothing, and "no unavailable gates" is the wrong answer to give
     // for it. See `verificationIncomplete`.
     const incomplete = verificationIncomplete(state);
-    if (left.length > 0) {
-      log.warn(
-        `Finished after a final fix round for ${left.length} carried P1(s): ` +
-          `${left.map((f) => f.id).join(', ')}. ` +
-          `${caveat === null ? 'Verification passed' : `But ${caveat}`}, and that round was not ` +
-          're-reviewed - see OUTSTANDING.md.',
-      );
-    } else if (state.finalFixDone === true && state.outstanding !== undefined) {
-      // The same shape of problem as the gate record, found while checking for
-      // its twins: `outstanding` is also repaired to an empty list on a state
-      // that could not be read, and an empty one here prints "zero P1s" over a
-      // run that carried some. `finalFixDone` is an independent witness - a
-      // healthy run sets it in the same breath as a NON-empty `outstanding`
-      // (src/orchestrator.ts) - so the two disagreeing means the record is
-      // damaged, not that the review was spotless. Absent `outstanding` is left
-      // alone: that is a state written before the field existed.
-      log.warn(
-        'Finished after a final fix round, but the record of what it carried is empty - ' +
-          'state.json was repaired on load. See OUTSTANDING.md for what was actually carried.',
-      );
+    const finalFix = finalFixSummary(state, caveat);
+    if (finalFix !== null) {
+      log.warn(finalFix);
     } else if (incomplete === null) {
       // **A plan-only run carries its P1s in `carried`, not in `outstanding`.**
       // The guard above is the implementation-side one: `outstanding` is written
@@ -2081,6 +2369,15 @@ export async function runPreflight(
   // recorded together by `prepareGit` - so a run stopped in preflight comes back
   // exactly as it was.
   const fresh = options.resume !== true && state.branch === null;
+  // The `--branch` collision, again here because this is the last point before
+  // the worktree site makes the ref (#356). `cmdRun` refused it before anything
+  // was created; this closes the gap between the two and covers any caller that
+  // reaches the gate with a requested name some other way.
+  if (fresh && cfg.git.useBranch && state.requestedBranch !== undefined) {
+    if (await git.branchExists(state.targetDir, state.requestedBranch)) {
+      return refuse(branchTakenReason(state.requestedBranch, 'Nothing has been spent.'));
+    }
+  }
   let base: string | null = null;
   const ref = cfg.git.baseRef;
   if (fresh && ref !== null) {
@@ -2091,7 +2388,13 @@ export async function runPreflight(
           'failure #249 removed. Unset git.baseRef, or drop --no-branch. Nothing has been spent.',
       );
     }
-    const resolved = await git.resolveBase(state.targetDir, ref, cfg.git.worktreeTimeoutMs);
+    // The fetching mode, always: this decides where the run starts, and a
+    // failed fetch refuses rather than falling back to a possibly stale local
+    // copy (#249). `fetch: false` is for display and must never be used here.
+    const resolved = await git.nextRunStart(state.targetDir, ref, {
+      fetch: true,
+      timeoutMs: cfg.git.worktreeTimeoutMs,
+    });
     // The fetch is not interruptible, so a stop pressed during it ends the run
     // the moment it returns rather than after the worktree and both probes.
     stopIfCancelled();
@@ -2490,6 +2793,42 @@ function reportTestChanges(state: RunState): void {
 }
 
 /**
+ * Blocking findings the review vote did not confirm (#436), each by name.
+ *
+ * A finding a reviewer called blocking and the vote did not uphold stopped
+ * blocking and went to FOLLOW-UPS.md; the `Votes:` line counts them, and this
+ * names them, for `reportTestChanges`' reason: it is what a person should see
+ * before merging, and the exit code does not move for it. The list is the one
+ * FOLLOW-UPS.md holds (`voteMovedFollowUps`), and each tally is read from the
+ * finding's recorded votes - one that cannot be read says so rather than
+ * printing a count. Silent when nothing was moved by vote, which is every run
+ * with no verifiers and every run whose votes all confirmed.
+ *
+ * Exported for the reason `reportDeferred` is.
+ */
+export function reportUnconfirmedByVote(state: RunState): void {
+  const moved = voteMovedFollowUps(state);
+  if (moved.length === 0) return;
+  log.warn(
+    `${moved.length} blocking finding(s) the review vote did not confirm - no longer blocking, ` +
+      'and listed as unconfirmed by vote in FOLLOW-UPS.md:',
+  );
+  for (const f of moved) {
+    const t = readTally(f.votes);
+    const from: unknown = f.downgraded?.from;
+    const was = typeof from === 'string' && from.length > 0 ? `, was ${from}` : '';
+    const said =
+      t === null
+        ? 'votes unreadable'
+        : `${t.n - t.real} of ${t.n} verifier(s) did not confirm ` +
+          `(${t.notReal} not real, ${t.cannotTell} could not tell; quorum ${t.quorum})`;
+    log.info(`  - \`${f.id}\` ${f.title} - ${said}${was}`);
+  }
+  const file = path.join(state.dir, 'FOLLOW-UPS.md');
+  log.info(existsSync(file) ? `  Detail: ${file}` : '  FOLLOW-UPS.md was not written.');
+}
+
+/**
  * What the last review round was actually shown.
  *
  * Here for the reason `reportGates` is here: a change too large for one turn is
@@ -2553,6 +2892,164 @@ export function reportDeferred(state: RunState): void {
   for (const q of remaining) log.info(`  - ${q.question}`);
   log.info(`  Detail: ${file}`);
 }
+
+/**
+ * The repository's REVIEW.md as this run's reviewers received it (#389), as one
+ * summary line - and none when the start commit had none, which is most
+ * repositories. Refused and unreadable are warnings: the owners wrote standards
+ * and the reviewer did not get them, so the summary must say so.
+ *
+ * Exported for the reason `reportDeferred` is.
+ */
+export function reportReviewMd(state: RunState): void {
+  const r = state.reviewMd;
+  if (r === undefined || r.outcome === 'absent') return;
+  const at = r.commit.slice(0, 7);
+  if (r.outcome === 'present') {
+    const bytes = r.bytes ?? 0;
+    const line = `Review:   REVIEW.md from ${at} (${describeBytes(bytes)})${overWarning(bytes)}`;
+    if (bytes > REVIEW_MD_WARN_BYTES) log.warn(line);
+    else log.info(line);
+    return;
+  }
+  log.warn(`Review:   REVIEW.md at ${at} was not given to the reviewer: ${r.reason ?? r.outcome}`);
+}
+
+/**
+ * `vibe doctor`'s REVIEW.md line (#389): what the commit the NEXT run would
+ * start from holds - `git.baseRef` if set, else HEAD, through the one resolver
+ * the run's preflight uses.
+ *
+ * **Doctor fetches**, because it is the preview a person runs on purpose and
+ * the answer should be the one the run would get. **A failed fetch is said, with
+ * its reason**, and only then may the local copy be described - labelled
+ * possibly stale, and never as the commit the next run will start from: the run
+ * itself would refuse, not fall back (#249). None of this counts against the
+ * exit code: REVIEW.md is optional, and a preview of it is not a broken
+ * environment.
+ */
+async function reportReviewMdPreview(targetDir: string, cfg: LoadedConfig): Promise<void> {
+  const ref = cfg.git.baseRef;
+  const timeoutMs = cfg.git.worktreeTimeoutMs;
+  const next = await git.nextRunStart(targetDir, ref, { fetch: true, timeoutMs });
+  if (next.ok) {
+    if (next.sha === null) {
+      log.info('REVIEW.md: no commit for a run to start from yet');
+      return;
+    }
+    const read = await readReviewMd(targetDir, next.sha);
+    const line = `REVIEW.md: ${describeReviewMdAt(ref ?? 'HEAD', next.sha, read)}`;
+    if (read.kind === 'absent') log.info(line);
+    else if (read.kind === 'present' && read.bytes <= REVIEW_MD_WARN_BYTES) log.ok(line);
+    else log.warn(line);
+    return;
+  }
+  log.warn(`REVIEW.md: could not resolve the commit the next run would start from: ${next.reason}`);
+  if (ref === null) return;
+  const local = await git.nextRunStart(targetDir, ref, { fetch: false, timeoutMs });
+  if (!local.ok || local.sha === null) return;
+  const read = await readReviewMd(targetDir, local.sha);
+  log.info(
+    '  local copy, possibly stale - not necessarily the commit the next run will start from: ' +
+      describeReviewMdAt(ref, local.sha, read),
+  );
+}
+
+/**
+ * What the additional review finders cost and how many reported (#388 Part B),
+ * as one summary line - and nothing at all on a run that seated none.
+ *
+ * Called from `summary`, the one function every way out of a run reaches, so a
+ * run that escalated or failed after a finder round still says what it spent.
+ *
+ * **Both halves are read, never estimated.** The cost is the charges: every
+ * finder-labelled `claude_turn`, `codex_turn` and `turn_failed`, through the
+ * same `chargedTurns` a replay reads, so a finder that failed after spending is
+ * counted with what `chargeFailure` recorded. The count is the last recorded
+ * `review_finders_merged` event, which only an attempt that finished its merge
+ * writes - not a tally of `review_finder_failed`, which a resumed round would
+ * leave behind from an attempt whose results were thrown away. A run with
+ * finder charges and no merge says the cost and claims no count.
+ *
+ * Exported for the reason `reportDeferred` is: `execute` cannot be reached from
+ * a test without spawning real agents.
+ */
+export function reportReviewFinders(state: RunState): void {
+  let turns = 0;
+  let failed = 0;
+  let tokens = 0;
+  for (const t of chargedTurns(state)) {
+    if (seatOf(t.label)?.finder === undefined) continue;
+    turns += 1;
+    if (t.failed) failed += 1;
+    const spent = t.data['tokens'];
+    if (typeof spent === 'number' && Number.isFinite(spent)) tokens += spent;
+  }
+  let merge: Record<string, unknown> | null = null;
+  for (const e of state.events) if (e.type === 'review_finders_merged') merge = e;
+  if (turns === 0 && merge === null) return;
+
+  const cost =
+    `additional finders took ${turns} turn(s)` +
+    (failed > 0 ? ` (${failed} failed)` : '') +
+    `, ${fmtTokens(tokens)} tokens across the run`;
+  const round = merge?.['round'];
+  const reported = merge?.['reported'];
+  const seats = merge?.['finders'];
+  if (merge === null || typeof round !== 'number' || typeof reported !== 'number' || typeof seats !== 'number') {
+    log.info(`Finders:  ${cost}; no review round completed its merge.`);
+    return;
+  }
+  log.info(`Finders:  review round ${round + 1}: ${reported} of ${seats} reported; ${cost}.`);
+}
+/**
+ * What the review vote cost and what it came to (#388 Part C), as one summary
+ * line - and nothing at all on a run that cast no vote.
+ *
+ * `reportReviewFinders`' rule, for the same reasons: the cost is the charges -
+ * every vote-labelled `claude_turn`, `codex_turn` and `turn_failed` through
+ * `chargedTurns` - and the outcome is the last recorded `review_votes_tallied`
+ * event, never a tally of failed turns, which a resumed round could have left
+ * from an attempt whose votes were thrown away.
+ */
+export function reportReviewVotes(state: RunState): void {
+  let turns = 0;
+  let failed = 0;
+  let tokens = 0;
+  for (const t of chargedTurns(state)) {
+    if (seatOf(t.label)?.verifier === undefined) continue;
+    turns += 1;
+    if (t.failed) failed += 1;
+    const spent = t.data['tokens'];
+    if (typeof spent === 'number' && Number.isFinite(spent)) tokens += spent;
+  }
+  let last: Record<string, unknown> | null = null;
+  for (const e of state.events) if (e.type === 'review_votes_tallied') last = e;
+  if (turns === 0 && last === null) return;
+
+  const cost =
+    `the vote took ${turns} turn(s)` +
+    (failed > 0 ? ` (${failed} failed)` : '') +
+    `, ${fmtTokens(tokens)} tokens across the run`;
+  const n = (key: string): number | null => {
+    const v = last?.[key];
+    return typeof v === 'number' && Number.isFinite(v) ? v : null;
+  };
+  const round = n('round');
+  const findings = n('findings');
+  const confirmed = n('confirmed');
+  const unconfirmed = n('unconfirmed');
+  const undecided = n('undecided');
+  if (round === null || findings === null || confirmed === null || unconfirmed === null || undecided === null) {
+    log.info(`Votes:    ${cost}; no review round completed its tally.`);
+    return;
+  }
+  log.info(
+    `Votes:    review round ${round + 1}: ${findings} finding(s) voted on - ${confirmed} confirmed, ` +
+      `${unconfirmed} unconfirmed, ${undecided} undecided; ${cost}.`,
+  );
+}
+
 
 /**
  * The Claude share, or null when the state cannot support one.
@@ -2624,6 +3121,19 @@ function summary(state: RunState, started: number, recovery?: RecoveryReport): v
     }
   }
   if (state.rateLimitWaits > 0) log.info(`Waits:    ${state.rateLimitWaits} rate-limit pause(s)`);
+  // Only when there were any (#416): a retried turn is the loop recovering, and
+  // the line is how a person learns it had to.
+  const cutOffRetries = state.events.filter((e) => e.type === 'turn_retried').length;
+  if (cutOffRetries > 0) {
+    log.info(`Retries:  ${cutOffRetries} turn(s) retried after Codex's answer was cut off at its output limit`);
+  }
+  // Only when there were any (#394). An event's data sits at its top level.
+  const stepBacks = stepBackCount(state.events);
+  if (stepBacks > 0) {
+    log.info(
+      `Step-backs: ${stepBacks} time(s) the planner was asked to step back after the plan stopped converging`,
+    );
+  }
   // Question rounds sit beside the other two rather than being folded into the
   // plan count, and they are the reason #139 exists: three revisions the critic
   // asked for is the loop working, and three the planner asked itself is a
@@ -2639,6 +3149,10 @@ function summary(state: RunState, started: number, recovery?: RecoveryReport): v
   log.info(
     `Rounds:   ${state.planRound} plan revision(s)${asked}, ${state.reviewRound} fix round(s)`,
   );
+  reportReviewMd(state);
+  reportReviewFinders(state);
+  reportReviewVotes(state);
+  reportUnconfirmedByVote(state);
   if (state.sessionRotations > 0) log.info(`Compacted: ${state.sessionRotations} time(s)`);
   // A record of what `forkedFrom` holds, never a computation over it: the totals
   // above include the inherited spend, and this is what says so. Nothing here
@@ -2878,11 +3392,12 @@ async function cmdDoctor(args: readonly string[]): Promise<ExitCode> {
     if (globalAt !== null && existsSync(globalAt)) log.info(`  also your settings for all projects: ${globalAt}`);
     log.info(`  claude ${shownModel(cfg.claude.model, 'claude')}/${cfg.claude.effort} - codex ${shownModel(cfg.codex.model, 'codex')}/${cfg.codex.effort}`);
     reportResolvedRoles(cfg);
+    reportReviewSeats(cfg);
     // Which MCP servers each role reaches and how each provider enforces it
     // (#138), in the words `src/mcp.ts` keeps for every surface that says it.
     log.info('  mcp:');
     const table = rolesFor(cfg);
-    for (const line of describeMcp(table)) log.info(`    ${line}`);
+    for (const line of describeMcp(table, readFinders(cfg), readVerifiers(cfg))) log.info(`    ${line}`);
     const mcpBlocked = await mcpRefusals(cfg, table, {
       cwd: targetDir,
       repoDir: targetDir,
@@ -2931,6 +3446,7 @@ async function cmdDoctor(args: readonly string[]): Promise<ExitCode> {
     // line per mode rather than per row - six lines of `auto` is six lines of
     // nothing happening.
     for (const line of describeGates(cfg.gates)) log.info(`  ${line}`);
+    await reportReviewMdPreview(targetDir, cfg);
   } catch (err) {
     log.fail(`config: ${err instanceof Error ? err.message : String(err)}`);
     bad++;

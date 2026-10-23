@@ -7,14 +7,14 @@ import { cn } from '@/lib/utils';
 import { Counts } from './Counts';
 import { Caret } from './Disclosure';
 import { clock, elapsed } from './format';
-import { censusByPhase, questionsByPhase, title, unplacedQuestions } from './rounds';
+import { censusByPhase, passLabel, phaseRound, questionsByPhase, shownRound, title, turnRound, unplacedQuestions } from './rounds';
 import type { BottomTab, Tab } from './where';
-import { findTurn, nowStatus, RAIL_TITLE, turnGroup, verifyRow, verifyRowText } from './rail';
+import { findTurn, nowStatus, RAIL_TITLE, runningGate, turnGroup, verifyRow, verifyRowText } from './rail';
 import type { RailState, VerifyRow } from './rail';
 import { RunningRow } from './RunningRow';
 import type { ArchiveView } from './model';
 import type { KeyboardEvent } from 'react';
-import { runningRow } from './model';
+import { runningRow, startedLine } from './model';
 import type { Census, CycleKind, PhaseGroup, Preflight, QuestionRound, ResumedFrom, Run, Turn } from './model';
 
 /**
@@ -132,7 +132,7 @@ function Version({
       <span className="text-primary">
         {turn.role} · {turn.kind}
       </span>
-      {turn.round !== null && <Badge>round {turn.round}</Badge>}
+      {turnRound(turn) !== null && <Badge>round {turnRound(turn)}</Badge>}
       {turn.endedAt !== null && (
         <span className={cn(FIGURE, 'ml-auto')}>{elapsed(turn.endedAt - turn.startedAt)}</span>
       )}
@@ -211,12 +211,15 @@ function Round({
       >
         <Caret open={open} />
         <span className="text-body-sm text-primary group-hover:text-emphasis">{title(phase.phase)}</span>
-        {/* The archive's round, which is the number that names the artifact
-            behind it. The heading in the terminal says "round 1"; the file is
-            `plan-critique-0.json`, and a row has to agree with the file — and
-            since the groups became peers it is also what pairs this row with
-            its other half one group up or down. */}
-        {phase.round !== null && <Badge className="font-mono normal-case tracking-normal">round {phase.round}</Badge>}
+        {/* The round as the terminal's heading counts it, from one: the chip
+            reads `round 1` over `Plan critique (round 1)`, whose file is
+            `plan-critique-0.json`. A person reads the chip and the heading and
+            never the file name, so the chip agrees with the heading (#428); the
+            links keep the raw round, which is what names the file. Since the
+            groups became peers it is also what pairs this row with its other
+            half one group up or down. The first implementation has no round of
+            its own, so no chip: a replay files it under review round 0. */}
+        {phaseRound(phase) !== null && <Badge className="font-mono normal-case tracking-normal">round {phaseRound(phase)}</Badge>}
       </button>
 
       {open && (
@@ -508,7 +511,10 @@ function Step({
  */
 function ResumedRow({ from }: { from: ResumedFrom }) {
   const rounds: string[] = [];
-  if (from.planRound !== null) rounds.push(`plan ${String(from.planRound)}`);
+  // The plan round counted from one, as the cap check counts it (`round:
+  // planRound + 1` against `maxPlanRounds`) and as the footer does (#428). The
+  // review figure is already a count of fix rounds done, so it is drawn as is.
+  if (from.planRound !== null) rounds.push(`plan ${String(shownRound(from.planRound))}`);
   if (from.questionRound !== null && from.questionRound > 0) {
     rounds.push(`question ${String(from.questionRound)}`);
   }
@@ -699,6 +705,7 @@ function Identity({ run }: { run: Run }) {
   const identity = run.identity;
   if (identity === null) return null;
   const branch = run.branch;
+  const started = startedLine(identity);
   return (
     <header className="flex flex-none flex-col gap-1 rounded-md border border-rule-card bg-card p-4">
       {/* Clamped, and the whole of it on the title.
@@ -729,6 +736,10 @@ function Identity({ run }: { run: Run }) {
           identity.repo
         )}
       </div>
+      {/* Only when a phone asked (#365). Not an absent line: a run started here
+          or from a terminal has nothing to attribute, and a dashed "nobody
+          said" under every run would be noise about the common case. */}
+      {started !== null && <div className="text-body-sm text-tertiary">{started}</div>}
     </header>
   );
 }
@@ -1026,7 +1037,9 @@ function RailStage({
         <div className="divide-y divide-dashed divide-rule-inner bg-active py-px pr-3.5 pb-2.75 pl-10">
           {cycle.phases.map((phase) => {
             const census = censusOf.get(phase.id);
-            const round = phase.round === null ? 'unnumbered pass' : `round ${phase.round}`;
+            // Numbered as the terminal's headings number it, and the first
+            // implementation by name rather than as a pass with no number (#428).
+            const round = passLabel(phase);
             const turnCount = phase.turns.length;
             return (
               <div
@@ -1089,7 +1102,14 @@ function RunRail({
   archive: ArchiveView;
 }) {
   const currentTurn = run.running ?? findTurn(run, run.gate?.turnId ?? null);
-  const currentKind = currentTurn === null ? null : turnGroup(run, currentTurn.id);
+  // A gate running with no turn open is the Code stage working: the gates are
+  // drawn under Code and run between its turns (#409). Without this a resume
+  // at `reviewing` drew Code complete and Code review not started while the
+  // core gate ran for minutes.
+  const gateRunning = runningGate(run);
+  const currentKind = currentTurn === null
+    ? gateRunning === null ? null : 'code'
+    : turnGroup(run, currentTurn.id);
   const [open, setOpen] = useState<ReadonlySet<CycleKind>>(() => new Set());
   const toggle = (kind: CycleKind) => {
     setOpen((current) => {
@@ -1103,9 +1123,12 @@ function RunRail({
   const status = nowStatus(run);
   const verify = verifyRow(run);
   const statusState = status.tone;
-  const statusTime = activity === null
-    ? run.preflight === null ? null : elapsed(Math.max(0, now - run.preflight.at))
-    : elapsed(activity.elapsedMs);
+  const started = startedLine(run.identity);
+  const statusTime = activity !== null
+    ? elapsed(activity.elapsedMs)
+    : gateRunning !== null
+      ? elapsed(Math.max(0, now - gateRunning.startedAt))
+      : run.preflight === null ? null : elapsed(Math.max(0, now - run.preflight.at));
 
   // `flex-none`: the rail is sized by its groups and the cockpit's wrapper is
   // what scrolls, so a summary placed after it shares the scroll rather than
@@ -1113,6 +1136,16 @@ function RunRail({
   // be allowed to shrink, applied to this one).
   return (
     <section className="flex min-w-0 flex-none flex-col gap-2.5 bg-column px-3 pb-3.5" aria-label="run status">
+      {/* Who asked for this run, when it was a phone (#365). The rail is what
+          the cockpit draws of a run's identity - the full column's header is
+          not on screen there - so the line goes above the `now` card, where it
+          stays for as long as the run is open: it is a fact about the run, not
+          a notice about a moment. */}
+      {started !== null && (
+        <p className="m-0 px-1 text-body-sm text-tertiary">
+          {started}
+        </p>
+      )}
       {/* The `now` card: what is happening, in one sentence, with a state bar
           down its left edge in the state's colour. */}
       <div
@@ -1132,7 +1165,7 @@ function RunRail({
         <h2 className="mt-1.5 mb-0 text-section font-semibold text-display">{status.title}</h2>
         <p className="mt-1 mb-0 text-body-sm text-secondary" title={status.detail}>{status.detail}</p>
         {statusTime !== null && (
-          <span className={cn(FIGURE, 'mt-2 inline-flex items-center gap-1')} title="Elapsed time for the current turn or preflight">
+          <span className={cn(FIGURE, 'mt-2 inline-flex items-center gap-1')} title="Elapsed time for the current turn, gate or preflight">
             <Clock size={13} aria-hidden="true" /> {statusTime}
           </span>
         )}

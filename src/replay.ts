@@ -1,3 +1,4 @@
+import type { Liveness } from '@src/lock.js';
 import type { Narration } from '@src/log.js';
 import type { RunState } from '@src/types.js';
 
@@ -27,6 +28,12 @@ import type { RunState } from '@src/types.js';
  * `turn_started` here is followed by the thing that closes it, the sequence
  * ends with the ending the run actually had, and `run.running` is null when the
  * fold finishes. Nothing pulses, because nothing is open.
+ *
+ * **Except where the record has no ending** (#396). A run whose status is still
+ * mid-loop has no exit, so the turn it was on stays open after the fold. That is
+ * true of a run some process is still running and false of one whose process
+ * has gone, and only the lock tells them apart - so `readRunReplay` asks it, and
+ * `OpenedReplay.lost` is the ending the window applies instead.
  *
  * ## Everything here is read, and the two things that are not are said
  *
@@ -70,6 +77,36 @@ export interface Replay {
    * us it succeeded.
    */
   exit: number | null;
+}
+
+/**
+ * A run somebody opened, with what its lock says (#396).
+ *
+ * **The steps cannot say whether a run is still going, and the lock can.** A
+ * run whose status is mid-loop - `planning`, `implementing`, `reviewing` - has
+ * no exit to apply, so the turn it was on stayed open in the window and pulsed
+ * for good. That is right while a process holds the run and false once nothing
+ * does: the machine shut down under a run held at `implemented`, and the
+ * relaunched window drew its implement turn running, with Pause and Stop that
+ * did nothing and no Resume. Waiting at a gate is deliberately not recorded, so
+ * nothing in the record could have said otherwise.
+ *
+ * Beside the replay rather than inside `replayRun`, which is pure over the
+ * record: only the reader of the run's directory can ask the lock.
+ */
+export interface OpenedReplay extends Replay {
+  /** `livenessOf`'s verdict on the run's lock, never one derived here. */
+  liveness: Liveness;
+  /**
+   * Why nothing is running this run, or null when the replay does not say so.
+   *
+   * Set only when the record has no exit **and** the lock rules out a live
+   * process (`interrupted`, `not-running`). An `unknown` lock is left alone,
+   * by `src/lock.ts`'s own rule: a lock vibe cannot read, or one held on
+   * another machine, cannot rule out a live process, and telling somebody the
+   * run's process has gone would be the claim that rule refuses to make.
+   */
+  lost: string | null;
 }
 
 /**
@@ -135,6 +172,10 @@ interface Seat {
    * `turn_started` carries, while its group is the code round that ran the gate.
    */
   turnRound?: number;
+  /** Which additional review finder took the turn (#388 Part B); absent for the first. */
+  finder?: number;
+  /** Which review verifier cast this vote (#388 Part C); `1` is `review.verifiers[0]`. */
+  verifier?: number;
 }
 
 /**
@@ -184,8 +225,34 @@ export function seatOf(label: string): Seat | null {
   // critique, so it cannot be a cycle of its own. Its round is the plan round it
   // happened under, which the checkpoint timeline supplies.
   if (answers !== null) return { role: 'answerer', kind: 'answer', phase: 'planning', round: null };
+  // `vote-2-3-v1` is verifier 1's vote on finding 3 of review round 2 (#388
+  // Part C): a turn of that review round, on the reviewer's job, told apart by
+  // `verifier`. The round is the first segment, as `numbered` reads it.
+  const vote = numbered('vote');
+  const verifier = /^vote-\d+-\d+-v(\d+)$/.exec(label)?.[1];
+  if (vote !== null && verifier !== undefined) {
+    return {
+      role: 'reviewer',
+      kind: 'vote',
+      phase: 'review',
+      round: vote,
+      verifier: Number.parseInt(verifier, 10),
+    };
+  }
   const review = numbered('review');
-  if (review !== null) return { role: 'reviewer', kind: 'review', phase: 'review', round: review };
+  if (review !== null) {
+    // `review-2-f1` and `review-2-f1-part3` are additional finders' turns in
+    // the same round (#388 Part B): the same seat, told apart by `finder`. The
+    // first finder - `roles.reviewer` - carries no `finder` key at all.
+    const finder = /^review-\d+-f(\d+)(?:-part\d+)?$/.exec(label)?.[1];
+    return {
+      role: 'reviewer',
+      kind: 'review',
+      phase: 'review',
+      round: review,
+      ...(finder === undefined ? {} : { finder: Number.parseInt(finder, 10) }),
+    };
+  }
   const fix = numbered('fix');
   if (fix !== null) {
     return { role: 'implementer', kind: 'review-fix', phase: 'implementing', round: fix };
@@ -215,7 +282,7 @@ function ms(iso: string | null | undefined): number | null {
 }
 
 /** One turn as the archive holds it. */
-interface ChargedTurn {
+export interface ChargedTurn {
   at: number;
   label: string;
   type: 'claude_turn' | 'codex_turn';
@@ -224,7 +291,7 @@ interface ChargedTurn {
   failed: boolean;
 }
 
-function chargedTurns(state: RunState): ChargedTurn[] {
+export function chargedTurns(state: RunState): ChargedTurn[] {
   const out: ChargedTurn[] = [];
   for (const event of state.events) {
     // **`turn_failed` counts too, and leaving it out was a hole** (#223). A turn
@@ -432,6 +499,15 @@ export function replayRun(state: RunState, sources: ReplaySources): Replay {
           role: seat.role,
           kind: seat.kind,
           round: seat.turnRound ?? round,
+          // An additional finder's frame says which one, as the live frame does
+          // (#388 Part B). The first finder's frame is unchanged.
+          ...(seat.finder === undefined
+            ? {}
+            : { finder: seat.finder, seat: `review.finders[${String(seat.finder - 1)}]` }),
+          // And a verifier's says which one, as its live frame does (#388 Part C).
+          ...(seat.verifier === undefined
+            ? {}
+            : { verifier: seat.verifier, seat: `review.verifiers[${String(seat.verifier - 1)}]` }),
           // Told, never inferred. A window that guessed which turns had a
           // measured start would guess wrong on the ones that matter.
           unmeasured: start === null,
@@ -463,7 +539,9 @@ export function replayRun(state: RunState, sources: ReplaySources): Replay {
         censusSaid.add(key);
         push(
           turn.at,
-          say('findings_reported', `${phase} round ${String(round)}`, {
+          // The sentence counts from one, as the live headings do; the key and
+          // the census match keep the archive's round (#428).
+          say('findings_reported', `${phase} round ${String(round + 1)}`, {
             phase,
             counts: census.counts,
           }),
@@ -498,6 +576,32 @@ export function replayRun(state: RunState, sources: ReplaySources): Replay {
       if (typeof data['gate'] !== 'string') continue;
       push(at, say('verify_started', `Verifying: ${data['gate']}`, { gate: data['gate'], round: data['round'] ?? null }));
     }
+    push(at, say(id, id, data));
+  }
+
+  // **What each finder round reported, and what failed** (#388 Part B). Both
+  // are durable events, carried whole at their own time: the merge frame is
+  // the only record of how many finders *reported* in the attempt that wrote
+  // the round's artifact, and the findings pane's denominator is read off it -
+  // never off the configured count. A replay without it would draw every
+  // finding's provenance with no denominator.
+  // The vote's tally (#388 Part C) rides the same loop, for the same reason:
+  // it is the one account of what a round's vote came to. So do a fix round's
+  // dispositions and the warning that they could not be read (#393): the
+  // findings pane says "not recorded" off the second.
+  const carried = new Set([
+    'review_finders_merged',
+    'review_finder_failed',
+    'review_votes_tallied',
+    'fix_dispositions',
+    'fix_dispositions_unreadable',
+  ]);
+  for (const event of state.events) {
+    const id = event.type;
+    if (!carried.has(id)) continue;
+    const at = ms(typeof event['at'] === 'string' ? event['at'] : null);
+    if (at === null) continue;
+    const { at: _at, type: _type, ...data } = event;
     push(at, say(id, id, data));
   }
 

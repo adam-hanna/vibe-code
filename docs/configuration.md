@@ -40,7 +40,7 @@ A project file is committed, and a repository you clone must not decide who pays
 
 ## `roles`
 
-`roles` decides which agent does each job. The default is Claude for `planner` and `implementer`, and Codex for `critic`, `answerer` and `reviewer`. Name only the roles you want to change.
+`roles` decides which agent does each job. Every role can be Claude or Codex, with its own model and effort; the default is Claude for `planner` and `implementer`, and Codex for `critic`, `answerer` and `reviewer`. Name only the roles you want to change. `--role <role>:<key>=<value>` changes one key of one role for a single run, and the desktop app's Settings edits this section for you.
 
 A role takes a provider name, or an object:
 
@@ -64,7 +64,65 @@ A role takes a provider name, or an object:
 
 A role's value is replaced whole when files are layered: a project that writes `"reviewer": {"provider": "codex", "effort": "max"}` drops any model the global file named for the reviewer. The `--role` flag is different: it patches one key.
 
-What a role does not choose is decided by its job. Writing roles get a writable sandbox; Codex's reading roles get `codex.sandbox`. Claude roles share one session. The Codex critic and answerer share one thread, the Codex reviewer keeps a separate thread, and a Codex implementer runs each turn fresh, because a resumed Codex turn cannot write. Some tables run with a warning rather than a refusal, for example a reviewer on the same provider as the implementer, which loses the independent second opinion.
+What a role does not choose is decided by its job. Writing roles get a writable sandbox; Codex's reading roles get `codex.sandbox`. Claude roles share one session. The Codex critic and answerer share one thread, the Codex reviewer keeps a separate thread, and a Codex implementer runs each turn fresh, because a resumed Codex turn cannot write. No assignment of providers to roles is refused: the one refusal left, a Codex writer on a carried Codex thread, cannot arise from a `roles` section. Some tables run with a warning, for example a critic, answerer or reviewer on the same provider as the implementer, which loses the independent second opinion, or a Codex implementer, which turns session rotation off.
+
+## `review`
+
+What it is for: more finders, which look at the change independently of each other, and verifiers, which vote on each blocking finding before it can block (#388). With both lists empty, which is the default, a review round is exactly what it was without this section. `vibe doctor` lists your finders and verifiers, and the line printed before the first turn names them.
+
+**What a finder does.** `roles.reviewer` reviews every part of the diff first, exactly as it does with no finders. Then each finder, in order, reviews every part too, with the same prompt the reviewer gets for that part: the same diff, plan, last implementer report, reproducer gates and judge files, apart from what it is told about earlier rounds (below). A finder never sees what another finder found. A finder that names `focus` gets one extra section at the end of its prompt, `## Focus for this review`, holding that text; no other finder's prompt changes.
+
+**The reviewer remembers earlier rounds; the other finders do not.** The reviewer keeps its conversation from round to round, so it remembers what it raised and how the fixer answered; the other finders start fresh every round, which makes them more independent of earlier rounds. From the second review round on, a reviewer that kept its conversation is told its previous findings are in context, to re-raise one that is still unresolved under the same id and to drop one that was addressed. A finder is told it does not have them, and to raise every defect it sees, including one that may have been raised before. Every seat is handed the most recent write turn's report, which after a fix round is the fixer's. Only the reviewer also has its own earlier findings and the earlier rounds' reports in its conversation. The fixer's per-finding dispositions (`fix-dispositions-<n>.json`) are shown to no reviewer.
+
+What changes this, and what does not:
+
+- **A Codex reviewer** keeps its own Codex thread, apart from the critic's, under `codex.persistSession` (on by default). With it off (`--no-codex-session`), the reviewer starts fresh every round as the finders do, and so does every other Codex role, the critic and the answerer included.
+- **A Claude reviewer** sits in the one Claude session the planner and the implementer use, so it carries that whole conversation, the plan and the implementation included. No setting makes it start fresh.
+- No setting makes the reviewer alone start fresh. Whether it should is an open question (#435), and no run has measured it yet.
+
+**Where it sits.** Every finder turn is a fresh, read-only conversation on its own provider: it never resumes a thread, never shares the implementer's Claude session, and a Codex finder runs under `codex.sandbox`, as the reviewer does. Its turns are labelled `review-<round>-f<k>`, or `review-<round>-f<k>-part<i>` when the diff is split, where `f1` is `review.finders[0]`. A finder's `mcpServers` are checked before the first turn, like a role's, and so are a verifier's.
+
+**How findings are merged.** Two findings from different finders are one defect when they cite the same code location (the same path and line) or when their titles say the same thing. Otherwise both are kept. A merged finding keeps the most blocking severity, and the title, detail and fix of the finder that gave it. Its citations are the union. Two findings from the same finder are never merged. If two unrelated findings share an id, the later one is renamed `<id>-f<k>`. When at least one finder is configured, every finding in `code-review-<n>.json` carries `foundBy`: which seats raised it, with each seat's provider, configured model (`default` when none was set) and the id it used.
+
+**What it costs.** One extra turn per diff part per finder, every review round, all of it inside `budget.maxTokens`. There is no separate ceiling. A finder whose turn fails, other than by a stop or a ceiling, is recorded as `review_finder_failed` and contributes nothing; the round goes on with the others, and the round says how many finders reported (*"2 of 3 reported"*). The run summary's `Finders:` line says what the finders cost in turns and tokens.
+
+**What gets a vote.** After the findings are merged and any reproducers have run, every P0 and P1 goes to every verifier, one at a time - except a finding whose own reproducer reproduced, which blocks without a vote, and anything a check already moved to P2. P2 and P3 are never voted on.
+
+**What a verifier sees.** The finding's title, detail, citations and suggested fix; the plan and its out-of-scope list; the parts of the diff its citations point at (all of it, if they point at none); and the repository, to read. It never sees which finder raised the finding or how many did, how any other verifier voted, or the finding's id or history. It answers `real`, `not-real` or `cannot-tell`, and is asked whether the defect exists - not how severe it is or whether it is worth fixing. A `not-real` has to cite something that resolves, as a finding does; one that does not is recorded as cast and counted as `cannot-tell`. Every verifier turn is a fresh, read-only conversation, labelled `vote-<round>-<n>-v<k>`, where `<n>` is the finding's place in the round's report and `v1` is `review.verifiers[0]`.
+
+**The three outcomes.** With `n` verifiers and a quorum of `q`:
+
+- **confirmed** when at least `q` counted `real`. The finding keeps its severity.
+- **unconfirmed** when more than `n - q` counted `not-real`, so the quorum could not have been reached even if every `cannot-tell` had been `real`. An unconfirmed P1 is moved to P2, with the tally as the reason (*"unconfirmed by vote: 1 real, 2 not-real, 0 cannot-tell of 3 (quorum 2)"*); it stops blocking and is listed in FOLLOW-UPS.md, and you can move it back as you can any downgrade. An unconfirmed P0 does what `review.unconfirmedP0` says.
+- **undecided** otherwise. The finding keeps its severity and keeps blocking.
+
+A verifier whose turn fails, other than by a stop or a ceiling, counts as `cannot-tell`, with the error recorded. So too few usable votes leave a finding blocking; they never let it through. Every finding that was voted on carries `votes` in `code-review-<n>.json`: the counts, the outcome, and each verifier's vote, how it was counted, and its reason.
+
+**`unconfirmedP0: "halt"`.** The round's `code-review-<n>.json` is written with the P0 unchanged, and the run stops for input (exit code 2). NEEDS-INPUT.md lists each such finding with every vote and its reason. Leave it alone and resume, and it keeps blocking: the resume goes to the fix round with it. To demote it, fill in its block under *Change a severity* and resume; that is recorded as your change. A resume never votes on that round again.
+
+**What the vote costs.** One turn per voted finding per verifier, every review round, inside `budget.maxTokens`. The run summary's `Votes:` line says what the vote cost in turns and tokens, and what the last round's vote came to.
+
+```json
+{
+  "review": {
+    "finders": [{ "provider": "claude", "model": "opus", "focus": "concurrency and error handling" }],
+    "verifiers": ["codex", { "provider": "claude", "effort": "high" }],
+    "quorum": null,
+    "unconfirmedP0": "block"
+  }
+}
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `review.finders` | `[]` | Finders **in addition to** `roles.reviewer`, which stays the first finder and keeps its own settings. The reviewer keeps its conversation from round to round; every finder here starts fresh each round (see [above](#review)). Each entry is written the way a role is: a provider name, or an object with `provider` (required), `model`, `effort`, `timeoutMs` and `mcpServers`. A finder may also take `focus`, a non-empty string saying what to look at hardest; it is appended to that finder's prompt only. |
+| `review.verifiers` | `[]` | The seats that vote on each blocking finding. Entries take exactly a role's keys. A `focus` on a verifier is refused as an unknown key. |
+| `review.quorum` | `null` | How many `real` votes confirm a finding. `null` means a majority of the verifiers, `floor(n/2)+1`. A whole number must be at least 1 and at most the number of verifiers, and it is refused when there are no verifiers. |
+| `review.unconfirmedP0` | `"block"` | What a P0 that the vote did not confirm does. `"block"` records the votes and it still blocks. `"halt"` stops the run and asks you, showing every vote. `"demote"` moves it to P2, as an unconfirmed P1 is moved. |
+
+Every finder and every verifier runs as a fresh, read-only turn. It never resumes a conversation and never shares the implementer's session. A refused entry is named by its index, counted from 0, in the same words a role's mistake gets, for example `review.finders[1].effort is "huge"; must be one of low, medium, high, xhigh, max`.
+
+`review` may be set in the settings for all projects and in a project's `vibe.config.json`. The project wins key by key, and a list is replaced whole: a project that names `finders` replaces the global file's finders and keeps its `quorum`.
 
 ## `gates`
 
@@ -99,8 +157,8 @@ The six boundaries, and their defaults:
 |---|---|---|
 | `claude.model` | `"default"` | `"default"` sends no `--model`, so Claude Code uses its own default for your account and a new model reaches your runs with no change to vibe. Name a model to pin one. |
 | `claude.effort` | `"medium"` | Reasoning effort: `low`, `medium`, `high`, `xhigh` or `max`. |
-| `claude.planTimeoutMs` | `1800000` (30 min) | Per planning turn, and for the session-handoff turn. |
-| `claude.implementTimeoutMs` | `5400000` (90 min) | Per implement or fix turn. |
+| `claude.planTimeoutMs` | `1800000` (30 min) | Per read-only Claude turn: planning by default, and a critique, answer or review when a table seats that role on Claude. Also the session-handoff turn. |
+| `claude.implementTimeoutMs` | `5400000` (90 min) | Per implement or fix turn, when the implementer is on Claude. |
 
 ## `codex`
 
@@ -109,7 +167,7 @@ The six boundaries, and their defaults:
 | `codex.model` | `"default"` | `"default"` sends no `-m`, so Codex uses its own default. |
 | `codex.effort` | `"xhigh"` | Reasoning effort. |
 | `codex.sandbox` | `"read-only"` | Sandbox for Codex's reading roles: `read-only`, `workspace-write` or `danger-full-access`. A writing role always gets a writable sandbox. |
-| `codex.timeoutMs` | `2700000` (45 min) | Per critique, answer or review turn. |
+| `codex.timeoutMs` | `2700000` (45 min) | Per read-only Codex turn: a critique, answer or review by default, and planning when a table seats the planner on Codex. |
 | `codex.implementTimeoutMs` | `5400000` (90 min) | Per writing turn, when a table seats the implementer on Codex. |
 | `codex.persistSession` | `true` | Continue each Codex conversation across the run, so a judge remembers what it already raised. `false` (`--no-codex-session`) makes every turn a fresh one-shot. |
 | `codex.contextWindow` | `null` | The Codex model's context window, in tokens. Codex never reports it to `codex exec`, so vibe does not guess. Unset, occupancy is shown in tokens with no percentage. |
@@ -122,10 +180,12 @@ The six boundaries, and their defaults:
 | `loop.maxPlanRounds` | `5` | Plan critique rounds before the run stops and asks. A round answering the planner's own questions does not count. |
 | `loop.maxReviewRounds` | `5` | Code review rounds. |
 | `loop.maxVerifyRounds` | `3` | Fix rounds for a failing verification gate. Counted separately from review. |
-| `loop.maxQuestionRounds` | `3` | Rounds of the planner's questions answered by Codex before they come to you. |
+| `loop.maxQuestionRounds` | `3` | Rounds of the planner's questions answered by the answerer before they come to you. |
 | `loop.p1Tolerance` | `1` | How many P1 findings a phase may carry forward instead of fixing. `0` demands a clean verdict. A P0 is never carried. |
 | `loop.oscillationThreshold` | `3` | Stop when the same set of blocking findings comes back this many rounds running. |
 | `loop.convergenceWindow` | `3` | How many recent rounds the convergence trend looks at, late in the round budget. |
+| `loop.stallAfter` | `3` | Plan critiques before the plan loop can be called stalled: the number of blocking findings is not falling and most of them are new. The first stall asks the planner to step back and reconsider its approach; the next one stops and asks you. Not a cap: reaching it never stops a run by itself. `0` turns it off. There is no command-line flag for it. |
+| `loop.fixNonBlocking` | `true` | What a passing round does with its non-blocking findings. A review that passes with a P2 to address gets the one final fix round, which is not reviewed again; the fixer fixes what belongs to the task, and what it leaves goes to `FOLLOW-UPS.md` with its reason. A pass whose only findings to address are P3s runs no fix round and records them there. An approved plan hands its non-blocking findings to the implementer. Deferred findings go to `FOLLOW-UPS.md` either way. `false` restores the earlier behaviour: a pass with no P1 to carry ends there, and a P2 or P3 is recorded only if it was deferred. |
 
 ## `budget`
 
@@ -142,17 +202,17 @@ The six boundaries, and their defaults:
 
 | Key | Default | Meaning |
 |---|---|---|
-| `questions.askCodex` | `true` | Send the planner's blocking questions to Codex (the answerer) first. `false` (`--no-codex-answers`) sends every one straight to you. |
-| `questions.answerNonBlocking` | `true` | Send non-blocking questions to Codex too. `false` (`--blocking-questions-only`) lets the planner proceed on its own answer, recorded as an assumption. |
-| `questions.escalateOnDefer` | `true` | A question Codex marks as product intent, priority or taste comes to you. |
-| `questions.escalateOnLowConfidence` | `true` | A question Codex answers with low confidence comes to you. |
+| `questions.askCodex` | `true` | Send the planner's blocking questions to the answerer (Codex, by default) first. The name is historical: it switches the answerer, whichever provider holds it. `false` (`--no-codex-answers`) sends every one straight to you. |
+| `questions.answerNonBlocking` | `true` | Send non-blocking questions to the answerer too. `false` (`--blocking-questions-only`) lets the planner proceed on its own answer, recorded as an assumption. |
+| `questions.escalateOnDefer` | `true` | A question the answerer marks as product intent, priority or taste comes to you. |
+| `questions.escalateOnLowConfidence` | `true` | A question the answerer answers with low confidence comes to you. |
 
 ## `git`
 
 | Key | Default | Meaning |
 |---|---|---|
 | `git.useBranch` | `true` | Work on a branch of the run's own. Implementation runs with permissions bypassed, so this keeps it off your branch. `--no-branch` turns it off. |
-| `git.branchPrefix` | `"vibe/"` | The branch is this prefix plus the run id. |
+| `git.branchPrefix` | `"vibe/"` | The branch is this prefix plus the run id, unless the run was started with `--branch <name>`. |
 | `git.commitEachRound` | `true` | Commit after every implement and fix round, so you get a history to bisect. |
 | `git.worktree` | `false` | Run in a git worktree of its own, at `.worktrees/<run-id>`. See [Worktrees](#worktrees). Project only. |
 | `git.worktreeCommand` | `null` | Your own command for making that worktree, instead of `git worktree add`. Project only. |
@@ -193,7 +253,7 @@ Two runs may not both work in the repository itself at once. Two runs that each 
 |---|---|---|
 | `context.enabled` | `true` | Rotate Claude's session when its context fills. `--no-compact` turns it off. |
 | `context.compactAboveRatio` | `0.5` | Rotate once the prompt passes this share of the model's context window. |
-| `context.compactDuringCodex` | `true` | Do the rotation while a Codex turn is running, so it costs no extra wall-clock. |
+| `context.compactDuringCodex` | `true` | Do the rotation while a turn in another conversation is running (a Codex turn, under the default table), so it costs no extra wall-clock. |
 
 See [Context compaction](./how-it-works#context-compaction).
 
@@ -257,13 +317,29 @@ A failure stops the sequence, so the fixer gets one problem at a time. An unavai
 { "prompts": { "simple solution": "Prefer the smallest change that is correct." } }
 ```
 
-The block names are `respond with JSON`, `review breadth`, `fix breadth`, `simple solution` and `a deferred finding`. A blank value is ignored, so you get the default back. An unknown name is refused, so a typo cannot silently do nothing. A changed block is recorded in the run's configuration, so a run that used a different instruction says so. The desktop app's settings screen shows each block's default text.
+The block names are `respond with JSON`, `review breadth`, `fix breadth`, `simple solution`, `a deferred finding` and `stall`. `stall` is the instruction the planner is given after the plan loop stops converging (see `loop.stallAfter`); the line before it, saying how many blocking findings each of the last critiques found and how many were new, is written by vibe and is kept whatever the block says. A blank value is ignored, so you get the default back. An unknown name is refused, so a typo cannot silently do nothing. A changed block is recorded in the run's configuration, so a run that used a different instruction says so. The desktop app's settings screen shows each block's default text.
+
+The desktop app's pilot has three blocks of its own in the same table: `pilot: who` (who it is and what it may propose), `pilot: intake` (how it takes a request apart before proposing a run) and `pilot: how to read` (how it reads the run block it is given). They follow the same rules: blank gives the built-in text back, an unknown name is refused, and a value that is not text is not used. No run's turns read them; the pilot reads them on its next message. What the pilot is told about the run, its tools, what runs without asking and the brief is built for every message and cannot be replaced. A team's branch-naming standard belongs in `pilot: intake`:
+
+```json
+{ "prompts": { "pilot: intake": "…the built-in text…\n\nBranches here are named feat/<issue>-<slug>." } }
+```
+
+An edited block replaces the built-in one whole, so it no longer picks up improvements a later release makes to it. Clearing it brings them back.
 
 ## `instructions`
 
 | Key | Default | Meaning |
 |---|---|---|
 | `instructions.text` | `""` | Your own standing instructions, put in front of every turn of every role, on both agents, and given to the desktop pilot. Set it once in the global file, or per project. |
+
+## `updates`
+
+| Key | Default | Meaning |
+|---|---|---|
+| `updates.check` | `true` | At the end of `vibe run`, `vibe plan` and `vibe doctor` in a terminal, say when npm has a newer vibe: `vibe X is available (you have Y): npm install -g @adam-hanna/vibe-code`. `false` turns it off. |
+
+The check is one request to `https://registry.npmjs.org/@adam-hanna/vibe-code/latest`, made at most once a day and cached in `update-check.json` next to the global config file. It sends no identifier, cookie or credential. It is bounded by a two-second timeout, runs only after the command has finished, and never changes an exit code. A check that fails or times out prints nothing. It is also off when `CI` is set, when stdout is not a terminal, when `VIBE_NO_UPDATE_CHECK=1` is set, and when `VIBE_GLOBAL_CONFIG` is empty, since there is then nowhere to record it. The desktop app never makes it.
 
 ## `toolchain`
 

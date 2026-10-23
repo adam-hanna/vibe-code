@@ -65,7 +65,9 @@ describe('the brief reaches the pilot', () => {
       // still in the first four slots and are still readable - and it is STILL
       // null, because the reader accounting for the whole argv is what keeps the
       // round trip above a real guard rather than a shape check on a prefix.
-      ['run', 'task', '-C', '/r', '--branch', 'feat/x'],
+      // (`--branch` was the example until #356 taught the builder it; `--context`
+      // is a real core flag `launchArgv` never emits.)
+      ['run', 'task', '-C', '/r', '--context', 'brief.md'],
       // A known flag with no value after it. Half a pair is not a pair.
       ['run', 'task', '-C', '/r', '--max-tokens'],
     ]) {

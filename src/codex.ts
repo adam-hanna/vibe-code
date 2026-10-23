@@ -11,7 +11,8 @@ import type { ChildEnding, RunFn } from '@src/proc.js';
 import { detail, warn } from '@src/log.js';
 import { createHeartbeat, parseCodexLine, watchCodexItems, withHeartbeat } from '@src/progress.js';
 import type { ProgressOptions } from '@src/progress.js';
-import type { Effort, Sandbox, TokenUsage, TurnActivity } from '@src/types.js';
+import type { Effort, Finding, Sandbox, TokenUsage, TurnActivity } from '@src/types.js';
+import { collapseBlankRuns, collapseEscapedBlankRuns, salvageFindings, trailingBlank } from '@src/cutoff.js';
 
 let cachedBin: string | null = null;
 
@@ -52,6 +53,22 @@ export interface CodexTurnOptions {
    * `--output-schema` only constrains what goes in it.
    */
   schema?: object | undefined;
+  /**
+   * What to do when `schema` was given and the final message does not parse
+   * (#393). Omitted means `'throw'`, which is what every turn did before this
+   * option existed and what a judge must keep doing: a verdict that cannot be
+   * read is not a verdict.
+   *
+   * `'raw'` is for a turn whose product is the working tree. By the time its
+   * last message is read the edits are made, so failing the turn would report
+   * work that happened as work that did not, and a retry would buy it twice.
+   * The result then carries `structured: null` with the text in `raw`, the
+   * turn's tokens as on any success, and the caller decides what an unreadable
+   * report means. Set explicitly by the dispatch from the role's access - never
+   * inferred here from `sandbox` - so a read-only seat cannot reach this path
+   * by accident.
+   */
+  unparseable?: 'throw' | 'raw' | undefined;
   schemaName: string;
   artifactDir: string;
   model: string;
@@ -83,7 +100,10 @@ export interface CodexTurnOptions {
 }
 
 export interface CodexTurnResult {
-  /** The parsed output, or null for a turn that was given no schema. */
+  /**
+   * The parsed output, or null for a turn that was given no schema - and for a
+   * `unparseable: 'raw'` turn whose output did not parse, with the text in `raw`.
+   */
   structured: unknown;
   raw: string;
   /** Thread id for this turn, to be passed back on the next call. */
@@ -124,6 +144,20 @@ interface CodexEvents {
    * would fail turns that completed.
    */
   failed: boolean;
+  /**
+   * The text of the last completed `agent_message`, or null when none arrived.
+   */
+  lastMessage: string | null;
+  /**
+   * Whether `lastMessage` was the last item the stream reported: no item of
+   * any other kind started, updated or completed after it. Only then can it be
+   * read as the turn's final message - the cut-off answer, on a turn cut off
+   * at its output limit (#416). A message followed by a command or a
+   * reasoning item was a progress note, and on a cut-off turn it means the
+   * final message never completed, so nothing in the stream is the answer and
+   * nothing may be counted as one. False when no message arrived.
+   */
+  lastMessageFinal: boolean;
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -166,7 +200,15 @@ function extractTokens(usage: Record<string, unknown>): TokenUsage {
  * and losing a token count is not worth losing the work for.
  */
 export function parseEvents(stdout: string): CodexEvents {
-  const out: CodexEvents = { threadId: null, tokens: ZERO_TOKENS, failure: null, failed: false };
+  const out: CodexEvents = {
+    threadId: null,
+    tokens: ZERO_TOKENS,
+    failure: null,
+    failed: false,
+    lastMessage: null,
+    lastMessageFinal: false,
+  };
+  let lastMessageId: unknown;
 
   for (const line of stdout.split(/\r?\n/)) {
     const trimmed = line.trim();
@@ -189,6 +231,26 @@ export function parseEvents(stdout: string): CodexEvents {
       const message = isRecord(err) ? err['message'] : event['message'];
       if (typeof message === 'string') out.failure = message;
       if (event['type'] === 'turn.failed') out.failed = true;
+    } else if (event['type'] === 'item.completed' && isRecord(event['item'])) {
+      // The last one wins, and only while nothing follows it (#416): see
+      // `lastMessageFinal`.
+      const item = event['item'];
+      if (item['type'] === 'agent_message' && typeof item['text'] === 'string') {
+        out.lastMessage = item['text'];
+        out.lastMessageFinal = true;
+        lastMessageId = item['id'];
+      } else if (item['id'] === undefined || item['id'] !== lastMessageId) {
+        out.lastMessageFinal = false;
+      }
+    } else if (
+      typeof event['type'] === 'string' &&
+      event['type'].startsWith('item.') &&
+      isRecord(event['item']) &&
+      (event['item']['id'] === undefined || event['item']['id'] !== lastMessageId)
+    ) {
+      // Another item began or moved after the message: a message still being
+      // written, or more work. Either way the message before it was not final.
+      out.lastMessageFinal = false;
     }
   }
   return out;
@@ -411,6 +473,138 @@ function directForkWorks(options: Set<string> | null, hasSchema: boolean): boole
 }
 
 /**
+ * A Codex turn cut off at its output limit before it wrote its answer (#416).
+ *
+ * Typed because it is the one failure the dispatch retries, and only on a
+ * read-only seat. It carries the cut-off answer and what was counted from it -
+ * never a verdict: `findings` are the ones written in full, kept for the
+ * retry's note and for diagnosis, and nothing reads them as a result.
+ */
+export class OutputCutOffError extends Error {
+  /**
+   * The turn's final message, uncollapsed; empty when none can be named (see
+   * `chars`).
+   */
+  readonly text: string;
+  /**
+   * The final message's length, and how much of it is trailing blank space.
+   * Null, not zero, when the stream carried no message that can be read as the
+   * answer: none arrived, or the last one was followed by other work, so the
+   * final message never completed. Nothing was counted then, and the error and
+   * the narration say so rather than quote a count (#416).
+   */
+  readonly chars: number | null;
+  readonly blankChars: number | null;
+  readonly findings: Finding[];
+  /**
+   * Whether the stream reported any usage for the attempt. Kept here because
+   * `chargeFailure` takes the attached spend before the dispatch can read it,
+   * and the narration must say so when Codex reported nothing.
+   */
+  readonly reported: boolean;
+  /**
+   * Where this attempt's record was written (`codex/<label>.cutoff.json`, or
+   * `.cutoff-2.json` and on for a later cut-off of the same label), or null
+   * when it could not be.
+   */
+  readonly keptAt: string | null;
+
+  constructor(
+    message: string,
+    detail: {
+      text: string;
+      findings: readonly Finding[];
+      reported: boolean;
+      chars?: number | null;
+      blankChars?: number | null;
+      keptAt?: string | null;
+    },
+  ) {
+    super(message);
+    this.name = 'OutputCutOffError';
+    this.text = detail.text;
+    this.chars = detail.chars === undefined ? detail.text.length : detail.chars;
+    this.blankChars = detail.blankChars === undefined ? trailingBlank(detail.text) : detail.blankChars;
+    this.findings = [...detail.findings];
+    this.reported = detail.reported;
+    this.keptAt = detail.keptAt ?? null;
+  }
+}
+
+/**
+ * The first unused record name for a cut-off of `schemaName`: `.cutoff.json`,
+ * then `.cutoff-2.json`, `.cutoff-3.json`. A retry that is cut off again, and a
+ * resumed run cut off on the same label, each keep their own record rather than
+ * overwrite the attempt before them.
+ */
+function cutOffRecordPath(artifactDir: string, schemaName: string): string {
+  for (let n = 1; ; n += 1) {
+    const candidate = path.join(artifactDir, `${schemaName}.cutoff${n === 1 ? '' : `-${n}`}.json`);
+    if (!existsSync(candidate)) return candidate;
+  }
+}
+
+/**
+ * Build the cut-off error, and keep the attempt beside `.superseded.json`.
+ *
+ * `answer` is the final message, or null when the stream named none (see
+ * `CodexEvents.lastMessageFinal`); then nothing is counted or salvaged.
+ *
+ * The record is best effort, as `supersede` is: failing to write a diagnosis
+ * must not replace the failure it describes.
+ */
+function cutOffError(
+  answer: string | null,
+  at: { ending: string; failure: string; stderr: string; reported: boolean; keepAt: string; earlier: boolean },
+): OutputCutOffError {
+  const text = answer ?? '';
+  const findings = answer === null ? [] : salvageFindings(answer);
+  const chars = answer === null ? null : answer.length;
+  const blankChars = answer === null ? null : trailingBlank(answer);
+  let keptAt: string | null = at.keepAt;
+  try {
+    writeFileSync(
+      at.keepAt,
+      JSON.stringify(
+        {
+          reason: 'max_output_tokens',
+          chars,
+          blankChars,
+          findings,
+          text: answer === null ? null : collapseBlankRuns(answer),
+        },
+        null,
+        2,
+      ),
+      'utf8',
+    );
+  } catch {
+    // See above.
+    keptAt = null;
+  }
+  const said = text.trimEnd();
+  const tail = said.length > 400 ? `…${said.slice(-400)}` : said;
+  const counted =
+    chars === null || blankChars === null
+      ? 'before its final message arrived'
+      : `after ${(chars - blankChars).toLocaleString('en-US')} characters of JSON, then ` +
+        `${blankChars.toLocaleString('en-US')} characters of blank space`;
+  const ended =
+    answer === null
+      ? at.earlier
+        ? 'Its last message was followed by more work, so it was not the answer, and nothing was counted from it.'
+        : 'It wrote no message.'
+      : said === ''
+        ? 'Its final message was blank.'
+        : `It ended: ${collapseBlankRuns(tail)}`;
+  const message =
+    `Codex's answer was cut off at its output limit ${counted} ` +
+    `(${at.ending}).\ncodex reported: ${at.failure}\n${ended}` +
+    `\nstderr:\n${at.stderr.slice(-2000)}`;
+  return new OutputCutOffError(message, { text, findings, reported: at.reported, chars, blankChars, keptAt });
+}
+
+/**
  * One Codex turn with a schema-constrained final message.
  *
  * `--output-schema` is what makes the surrounding loop terminable: the stop
@@ -437,6 +631,7 @@ export async function codexTurn(
 ): Promise<CodexTurnResult> {
   const { prompt, schema, schemaName, artifactDir, model, effort, sandbox, cwd, timeoutMs, sessionId, forkFrom } =
     options;
+  const unparseable = options.unparseable ?? 'throw';
 
   const schemaFile = path.join(artifactDir, `${schemaName}.schema.json`);
   const outFile = path.join(artifactDir, `${schemaName}.out.json`);
@@ -669,10 +864,30 @@ export async function codexTurn(
       // `turn.failed` states the actual cause (a bad model name, a refused
       // request); the raw streams are the fallback when it does not.
       const cause = events.failure === null ? '' : `\ncodex reported: ${events.failure}`;
+      // Cut off at its output limit (#416): the one failure the dispatch retries,
+      // so it is typed. Classified on Codex's own reason alone - a cut-off whose
+      // stream carried no message is still a cut-off, with nothing to salvage.
+      if (events.failure?.includes('max_output_tokens') === true) {
+        throw attachSpend(
+          cutOffError(events.lastMessageFinal ? events.lastMessage : null, {
+            ending: describeEnding({ code, signal }),
+            failure: events.failure,
+            stderr,
+            reported: events.tokens.total > 0,
+            keepAt: cutOffRecordPath(artifactDir, schemaName),
+            earlier: events.lastMessage !== null && !events.lastMessageFinal,
+          }),
+          spent,
+        );
+      }
       throw attachSpend(
         new Error(
           `codex wrote no structured output (${describeEnding({ code, signal })}).${cause}\n` +
-            `stderr:\n${stderr.slice(-2000)}\nstdout:\n${stdout.slice(-1000)}`,
+            // Collapsed before the tail is taken: a stream of blank space would
+            // otherwise make the tail nothing but blank space. The escaped form,
+            // because this is the JSONL stream, where a message's newlines are
+            // the two characters `\n` (#429); it is error text, never parsed.
+            `stderr:\n${stderr.slice(-2000)}\nstdout:\n${collapseEscapedBlankRuns(stdout).slice(-1000)}`,
         ),
         spent,
       );
@@ -699,15 +914,25 @@ export async function codexTurn(
     // a report in prose, and demanding JSON of it would fail a turn that did
     // exactly what it was told - the same distinction `structured: null` states.
     let structured: unknown = null;
+    let parsed = true;
     if (schema !== undefined) {
       try {
         structured = JSON.parse(raw) as unknown;
       } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        throw attachSpend(
-          new Error(`codex output was not valid JSON: ${message}\n${raw.slice(0, 1500)}`),
-          spent,
-        );
+        // A writing turn's edits are already in the tree (see `unparseable`):
+        // returned as text, with its tokens, for the caller to judge. The spend
+        // is the success path's - the same `events.tokens` - so an unreadable
+        // report costs the run exactly what a readable one does.
+        if (unparseable === 'raw') {
+          parsed = false;
+          structured = null;
+        } else {
+          const message = err instanceof Error ? err.message : String(err);
+          throw attachSpend(
+            new Error(`codex output was not valid JSON: ${message}\n${raw.slice(0, 1500)}`),
+            spent,
+          );
+        }
       }
     }
 
@@ -715,8 +940,12 @@ export async function codexTurn(
       // Logged, not thrown: see the exit-status note above, and the matching one
       // in claude.ts for why the signal is named rather than folded into the
       // exit code (#131).
+      // Worded for what was actually accepted: a `'raw'` turn whose output did
+      // not parse wrote output, but not schema-conformant output.
       warn(
-        `codex ${describeEnding({ code, signal })} but wrote schema-conformant output; accepting it.`,
+        parsed
+          ? `codex ${describeEnding({ code, signal })} but wrote schema-conformant output; accepting it.`
+          : `codex ${describeEnding({ code, signal })} and its output did not parse; returning it as text.`,
       );
     }
 

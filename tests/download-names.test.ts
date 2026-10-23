@@ -44,6 +44,14 @@ function linked(page: string): string[] {
 
 const sorted = (xs: readonly string[]): string[] => [...new Set(xs)].sort();
 
+/**
+ * Names still uploaded only so links made before them keep working, and which
+ * no page may link any more. `Vibe-macos-arm64.dmg` was the Mac download until
+ * the build went universal (#325); the README of every published npm version
+ * links it and cannot be edited, so the universal dmg goes up under it too.
+ */
+const LEGACY = ['Vibe-macos-arm64.dmg'];
+
 test('the workflow uploads one stable name per installer, each once', () => {
   const names = uploaded();
   assert.deepEqual(sorted(names), [
@@ -52,6 +60,7 @@ test('the workflow uploads one stable name per installer, each once', () => {
     'Vibe-linux-amd64.deb',
     'Vibe-linux-x86_64.AppImage',
     'Vibe-macos-arm64.dmg',
+    'Vibe-macos-universal.dmg',
     'Vibe-windows-x64-setup.exe',
     'Vibe-windows-x64.msi',
   ]);
@@ -59,10 +68,22 @@ test('the workflow uploads one stable name per installer, each once', () => {
 });
 
 for (const page of [['README.md'], ['docs', 'app.md']]) {
-  test(`${page.join('/')} links exactly the names the workflow uploads`, () => {
-    assert.deepEqual(sorted(linked(read(...page))), sorted(uploaded()));
+  test(`${page.join('/')} links exactly the names the workflow uploads, less the legacy ones`, () => {
+    assert.deepEqual(
+      sorted(linked(read(...page))),
+      sorted(uploaded().filter((n) => !LEGACY.includes(n))),
+    );
   });
 }
+
+test('a legacy name is uploaded as the same file as the name that replaced it', () => {
+  // Both names are the right side of one glob, so the same file goes up under
+  // each: an old link gets the universal build, never a missing file.
+  const universal = /^\s+(\S+)=Vibe-macos-universal\.dmg$/m.exec(workflow)?.[1];
+  const arm64 = /^\s+(\S+)=Vibe-macos-arm64\.dmg$/m.exec(workflow)?.[1];
+  assert.ok(universal, 'release.yml uploads no Vibe-macos-universal.dmg');
+  assert.equal(arm64, universal);
+});
 
 test('an installed app is told of updates at a name the workflow writes', () => {
   // #299's updater checks `releases/latest/download/latest.json`; the `updater`

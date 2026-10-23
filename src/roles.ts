@@ -281,6 +281,27 @@ function defaultSlot(role: Role, provider: AgentProvider): SlotName {
 const ROLE_OBJECT_KEYS: readonly string[] = ['provider', 'model', 'effort', 'timeoutMs', 'mcpServers'];
 
 /**
+ * The keys a `review.finders[i]` entry may carry (#388): a role's, plus `focus`.
+ * A verifier takes exactly a role's, so a `focus` on one is an unknown key.
+ */
+export const FINDER_KEYS: readonly string[] = [...ROLE_OBJECT_KEYS, 'focus'];
+
+/**
+ * The conversation an additional review seat talks through (#388): a fresh,
+ * read-only one per turn, on either provider.
+ *
+ * Never `main`: that is the implementer's own session, and a model judging the
+ * code it wrote is the self-preference failure more finders exist to avoid -
+ * which is what `defaultSlot` would hand a Claude seat. Never `review` or
+ * `judge` either, because those resume a thread and a seat is memoryless by
+ * design. Not `write`, which is the Codex writer's. `seatTable` seats every
+ * additional finder here (#388 Part B).
+ */
+export function seatSlot(provider: AgentProvider): SlotName {
+  return provider === 'claude' ? 'fresh-claude' : 'fresh-codex';
+}
+
+/**
  * `provider, model, effort and timeoutMs` - a list a person would read aloud.
  *
  * `join(' and ')` was fine while there were two keys and reads as
@@ -310,9 +331,9 @@ function shown(value: unknown): string {
 }
 
 /** What a role's configured value has to say to be one, worded for a user. */
-function expectedRoleValue(role: Role, value: unknown): Error {
+function expectedRoleValue(path: string, value: unknown): Error {
   return new Error(
-    `roles.${role} is ${JSON.stringify(value) ?? String(value)}; expected ` +
+    `${path} is ${JSON.stringify(value) ?? String(value)}; expected ` +
       `${PROVIDERS.map((p) => `"${p}"`).join(' or ')}, or an object naming a provider and ` +
       `optionally a model, an effort, a timeout and MCP servers`,
   );
@@ -332,37 +353,51 @@ function expectedRoleValue(role: Role, value: unknown): Error {
  * carrying a key this shape does not take is a user reaching for a setting, and
  * answering that with "no provider" sends them the wrong way.
  */
-export function roleSetting(role: Role, value: unknown): RoleSetting {
+export function roleSetting(
+  /**
+   * Where the value sits in a config, as its messages name it: `roles.reviewer`,
+   * or `review.finders[1]` for a seat configured like a role (#388). Every
+   * message is built from this, so a `roles.<role>` message reads byte for byte
+   * as it did when this took a `Role`, and a seat is refused in the same words.
+   */
+  path: string,
+  value: unknown,
+  /**
+   * The keys this entry may carry, and what the unknown-key message calls it.
+   * A finder also takes `focus` (#388). The key is only *permitted* here - it is
+   * neither checked nor returned, because it says nothing about the seat's agent.
+   */
+  entry: { keys?: readonly string[]; noun?: string } = {},
+): RoleSetting {
+  const keys = entry.keys ?? ROLE_OBJECT_KEYS;
+  const noun = entry.noun ?? 'a role object';
   if (typeof value === 'string') {
-    if (!PROVIDERS.includes(value as AgentProvider)) throw expectedRoleValue(role, value);
+    if (!PROVIDERS.includes(value as AgentProvider)) throw expectedRoleValue(path, value);
     return { provider: value as AgentProvider };
   }
-  if (!isRecord(value)) throw expectedRoleValue(role, value);
+  if (!isRecord(value)) throw expectedRoleValue(path, value);
 
   for (const key of Object.keys(value)) {
-    if (!ROLE_OBJECT_KEYS.includes(key)) {
-      throw new Error(
-        `roles.${role} has unknown key "${key}"; a role object takes ` +
-          `${listKeys(ROLE_OBJECT_KEYS)}`,
-      );
+    if (!keys.includes(key)) {
+      throw new Error(`${path} has unknown key "${key}"; ${noun} takes ${listKeys(keys)}`);
     }
   }
 
   const provider = value['provider'];
   if (provider === undefined) {
     throw new Error(
-      `roles.${role} is an object with no provider. provider is required so that adding an ` +
+      `${path} is an object with no provider. provider is required so that adding an ` +
         `effort cannot silently move a role back to the default agent.`,
     );
   }
   if (typeof provider !== 'string' || !PROVIDERS.includes(provider as AgentProvider)) {
-    throw expectedRoleValue(role, provider);
+    throw expectedRoleValue(path, provider);
   }
 
   const effort = value['effort'];
   if (effort !== undefined && (typeof effort !== 'string' || !EFFORTS.includes(effort as Effort))) {
     throw new Error(
-      `roles.${role}.effort is ${JSON.stringify(effort) ?? String(effort)}; must be one of ` +
+      `${path}.effort is ${JSON.stringify(effort) ?? String(effort)}; must be one of ` +
         `${EFFORTS.join(', ')}`,
     );
   }
@@ -375,7 +410,7 @@ export function roleSetting(role: Role, value: unknown): RoleSetting {
   const model = value['model'];
   if (model !== undefined && (typeof model !== 'string' || model.trim() === '')) {
     throw new Error(
-      `roles.${role}.model is ${JSON.stringify(model) ?? String(model)}; must be a non-empty ` +
+      `${path}.model is ${JSON.stringify(model) ?? String(model)}; must be a non-empty ` +
         `model name string, or absent for ${provider}.model`,
     );
   }
@@ -392,7 +427,7 @@ export function roleSetting(role: Role, value: unknown): RoleSetting {
     (typeof timeoutMs !== 'number' || !Number.isFinite(timeoutMs) || timeoutMs <= 0)
   ) {
     throw new Error(
-      `roles.${role}.timeoutMs is ${shown(timeoutMs)}; must be a positive number of ` +
+      `${path}.timeoutMs is ${shown(timeoutMs)}; must be a positive number of ` +
         `milliseconds, or absent for ${provider}'s own timeout`,
     );
   }
@@ -407,7 +442,7 @@ export function roleSetting(role: Role, value: unknown): RoleSetting {
       !mcpServers.every((name: unknown) => typeof name === 'string' && name.trim() !== ''))
   ) {
     throw new Error(
-      `roles.${role}.mcpServers is ${shown(mcpServers)}; must be an array of MCP server ` +
+      `${path}.mcpServers is ${shown(mcpServers)}; must be an array of MCP server ` +
         `names, or absent for none`,
     );
   }
@@ -504,28 +539,113 @@ export function tableFor(providers: RoleProviders): RoleTable {
   }
   const table = {} as RoleTable;
   for (const role of ROLE_NAMES) {
-    const setting = roleSetting(role, providers[role]);
-    table[role] = {
-      ...JOBS[role],
-      provider: setting.provider,
-      slot: defaultSlot(role, setting.provider),
-      // Spread rather than assigned: a role that named no effort must have no
-      // `effort` key at all, not one holding undefined. The absent key is what
-      // says "this role means its provider's", and `exactOptionalPropertyTypes`
-      // keeps the two distinguishable.
-      ...(setting.effort === undefined ? {} : { effort: setting.effort }),
-      // The same rule, for the same reason: an absent key is what says "this
-      // role means its provider's model".
-      ...(setting.model === undefined ? {} : { model: setting.model }),
-      // And again: an absent key is what says "this role means its provider's
-      // timeout", and `exactOptionalPropertyTypes` keeps the two apart.
-      ...(setting.timeoutMs === undefined ? {} : { timeoutMs: setting.timeoutMs }),
-      // And once more: an absent key is what says "this role named no MCP
-      // server", which means none (#138).
-      ...(setting.mcpServers === undefined ? {} : { mcpServers: setting.mcpServers }),
-    };
+    const setting = roleSetting(`roles.${role}`, providers[role]);
+    table[role] = specFor(role, setting, defaultSlot(role, setting.provider));
   }
   return table;
+}
+
+/**
+ * One seat's spec: a job, the agent holding it and the conversation it talks
+ * through. The only builder of a `RoleSpec`, so a table row and a review seat
+ * (`seatTable`) cannot come to disagree about what a setting means.
+ */
+function specFor(role: Role, setting: RoleSetting, slot: SlotName): RoleSpec {
+  return {
+    ...JOBS[role],
+    provider: setting.provider,
+    slot,
+    // Spread rather than assigned: a role that named no effort must have no
+    // `effort` key at all, not one holding undefined. The absent key is what
+    // says "this role means its provider's", and `exactOptionalPropertyTypes`
+    // keeps the two distinguishable.
+    ...(setting.effort === undefined ? {} : { effort: setting.effort }),
+    // The same rule, for the same reason: an absent key is what says "this
+    // role means its provider's model".
+    ...(setting.model === undefined ? {} : { model: setting.model }),
+    // And again: an absent key is what says "this role means its provider's
+    // timeout", and `exactOptionalPropertyTypes` keeps the two apart.
+    ...(setting.timeoutMs === undefined ? {} : { timeoutMs: setting.timeoutMs }),
+    // And once more: an absent key is what says "this role named no MCP
+    // server", which means none (#138).
+    ...(setting.mcpServers === undefined ? {} : { mcpServers: setting.mcpServers }),
+  };
+}
+
+/**
+ * The run's table with the reviewer's seat handed to an additional finder
+ * (#388 Part B).
+ *
+ * A finder is a reviewer whose seat has been swapped, not a second dispatch
+ * path: the reviewer's job (read-only, its schema, its tools) on the finder's
+ * own agent, model, effort, timeout and MCP grants, talking through a fresh
+ * conversation every turn (`seatSlot`). Everything that reads the reviewer's
+ * row - the timeout, the path style, memory, the holder's name, the charge and
+ * the heartbeat - then follows the seat with no code of its own. With no
+ * `mcpServers` the seat reaches none (#138), as any role that names none does.
+ */
+export function seatTable(roles: RoleTable, seat: RoleSetting, schema?: object): RoleTable {
+  const spec = specFor('reviewer', seat, seatSlot(seat.provider));
+  // A verifier (#388 Part C) answers a vote, not a review, and both providers
+  // take the response schema off the spec - so the seat carries the schema its
+  // job asks for. A finder passes none and keeps the reviewer's.
+  return { ...roles, reviewer: schema === undefined ? spec : { ...spec, schema } };
+}
+
+/** One `review.finders[i]` entry, read. `k` is 1-based: `f1` is `review.finders[0]`. */
+export interface FinderEntry {
+  k: number;
+  /** The setting's path, as a message or a `foundBy` record names it. */
+  path: string;
+  setting: RoleSetting;
+  focus?: string;
+}
+
+/**
+ * The additional finders this config names, in order (#388 Part B).
+ *
+ * Read through `roleSetting`, the reader config validation used, so a bare
+ * provider name and a seat object come back in one shape. `focus` was checked
+ * by `validateReview`; this only carries it. Absent `review` - a `state.config`
+ * stored before the section existed - is no finders, which is what that run was.
+ */
+export function readFinders(cfg: Config): FinderEntry[] {
+  const finders: unknown = (cfg.review as Config['review'] | undefined)?.finders;
+  if (!Array.isArray(finders)) return [];
+  return finders.map((entry: unknown, i) => {
+    const path = `review.finders[${i}]`;
+    const setting = roleSetting(path, entry, { keys: FINDER_KEYS });
+    const focus = isRecord(entry) && typeof entry['focus'] === 'string' ? entry['focus'] : undefined;
+    return { k: i + 1, path, setting, ...(focus === undefined ? {} : { focus }) };
+  });
+}
+
+/** One `review.verifiers[i]` entry, read. `k` is 1-based: `v1` is `review.verifiers[0]`. */
+export type VerifierEntry = Omit<FinderEntry, 'focus'>;
+
+/**
+ * The review verifiers this config names, in order (#388 Part C).
+ *
+ * `readFinders`' sibling, through the same `roleSetting` reader with a role's
+ * keys only - `validateReview` refuses a `focus` on a verifier. Absent
+ * `review` is no verifiers, which is what a run stored before it was.
+ */
+export function readVerifiers(cfg: Config): VerifierEntry[] {
+  const verifiers: unknown = (cfg.review as Config['review'] | undefined)?.verifiers;
+  if (!Array.isArray(verifiers)) return [];
+  return verifiers.map((entry: unknown, i) => {
+    const path = `review.verifiers[${i}]`;
+    return { k: i + 1, path, setting: roleSetting(path, entry) };
+  });
+}
+
+/**
+ * The providers any review seat - a finder or a verifier - takes a turn on,
+ * deduped, in `providersForRoles`' order. Empty for a config that seats none.
+ */
+export function seatProviders(cfg: Config): AgentProvider[] {
+  const held = new Set([...readFinders(cfg), ...readVerifiers(cfg)].map((e) => e.setting.provider));
+  return (['claude', 'codex'] as const).filter((provider) => held.has(provider));
 }
 
 /**
@@ -817,6 +937,25 @@ export function turnTimeoutMs(role: Role, cfg: Config, roles: RoleTable = rolesF
 }
 
 /**
+ * What an additional review seat (#388) resolves to: `modelFor`, `effortFor` and
+ * `turnTimeoutMs`'s rule, for a seat that is not in the role table. Its own
+ * value where it named one, its provider's otherwise, and the timeout a
+ * read-only turn on that provider gets. Read by `vibe doctor`; a run asks the
+ * same questions of `seatTable`'s row, which `finder-seat.test.ts` holds equal.
+ */
+export function seatResolved(
+  seat: RoleSetting,
+  cfg: Config,
+): { model: string; effort: Effort; timeoutMs: number } {
+  const p = seat.provider;
+  return {
+    model: seat.model ?? cfg[p].model,
+    effort: seat.effort ?? cfg[p].effort,
+    timeoutMs: seat.timeoutMs ?? (p === 'claude' ? cfg.claude.planTimeoutMs : cfg.codex.timeoutMs),
+  };
+}
+
+/**
  * The reasoning effort a turn in this role runs at.
  *
  * The role's own if it named one, and its provider's otherwise - which is what
@@ -861,9 +1000,14 @@ export function modelFor(role: Role, cfg: Config, roles: RoleTable = rolesFor(cf
  * edits the wrong line - and the two keys can now hold different strings, so the
  * provider key is no longer a safe thing to name by default.
  */
-export function modelSource(role: Role, roles: RoleTable = ROLES): string {
+export function modelSource(
+  role: Role,
+  roles: RoleTable = ROLES,
+  /** The seat's own path when a review seat took the turn (#388 Part C). */
+  seatPath?: string,
+): string {
   const spec = roles[role];
-  return spec.model === undefined ? `${spec.provider}.model` : `roles.${role}.model`;
+  return spec.model === undefined ? `${spec.provider}.model` : `${seatPath ?? `roles.${role}`}.model`;
 }
 
 /** What a log line calls each agent. */

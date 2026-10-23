@@ -35,7 +35,14 @@ import type { ArtifactEntry } from '../host';
  */
 
 /** Which pane an artifact belongs behind. `other` is drawn, never hidden. */
-export type ArtifactKind = 'plan' | 'critique' | 'review' | 'answers' | 'other';
+export type ArtifactKind =
+  | 'plan'
+  | 'critique'
+  | 'review'
+  | 'answers'
+  | 'dispositions'
+  | 'fix-report'
+  | 'other';
 
 export interface Classified {
   name: string;
@@ -62,6 +69,12 @@ export interface Classified {
 const PATTERNS: readonly { kind: ArtifactKind; re: RegExp }[] = [
   { kind: 'critique', re: /^plan-critique-(\d+)\.json$/ },
   { kind: 'review', re: /^code-review-(\d+)\.json$/ },
+  // A review fix round's dispositions (#393). Its round is the FIX round, so it
+  // answers `code-review-<round - 1>.json`; no tab lists it on its own.
+  { kind: 'dispositions', re: /^fix-dispositions-(\d+)\.json$/ },
+  // A review fix round's report: the evidence that the round ran, when it left
+  // no dispositions file - an unreadable answer, or a run from before #393.
+  { kind: 'fix-report', re: /^fix-report-(\d+)\.md$/ },
   { kind: 'answers', re: /^answers-(\d+)\.json$/ },
   { kind: 'plan', re: /^plan-(\d+)\.json$/ },
 ];
@@ -156,8 +169,146 @@ export interface FullFinding {
   suggestedFix: string | null;
   citations: readonly Citation[];
   raisedBy: string | null;
+  /**
+   * Which review finders raised it (#388 Part B), or null - which is every
+   * finding of a run that seated no additional finder, and must render as
+   * exactly what it did before.
+   */
+  foundBy: readonly FoundBy[] | null;
+  /**
+   * What the review verifiers voted (#388 Part C), or null - every finding that
+   * was not put to a vote, which must render as exactly what it did before.
+   */
+  votes: Votes | null;
   deferred: boolean;
   downgraded: { from: string; reason: string } | null;
+}
+
+/** One finder's share of a finding's provenance, as the report file has it. */
+export interface FoundBy {
+  seat: string;
+  provider: string;
+  model: string;
+  id: string;
+}
+
+/**
+ * The finders a report says raised a finding, dropping an entry this build
+ * cannot read rather than the list - the rule `readCitations` follows. Null when
+ * there is no list, or nothing in it survives: a caption naming no finder is
+ * not one to draw.
+ */
+function readFoundBy(v: unknown): FoundBy[] | null {
+  if (!Array.isArray(v)) return null;
+  const out: FoundBy[] = [];
+  for (const item of v as unknown[]) {
+    const row = record(item);
+    if (row === null) continue;
+    const seat = str(row['seat']);
+    const provider = str(row['provider']);
+    const model = str(row['model']);
+    const id = str(row['id']);
+    if (seat === null || provider === null || model === null || id === null) continue;
+    out.push({ seat, provider, model, id });
+  }
+  return out.length === 0 ? null : out;
+}
+
+/**
+ * The provenance sentence: *"found by 2 of 3 finders: codex/gpt-5.5, claude/default"*.
+ *
+ * `reported` is the number of finders that reported that round, off the
+ * round's `review_finders_merged` frame - never the configured count, which
+ * would count a seat that failed as one that looked and saw nothing. Without
+ * a frame (a replay of an older core) the sentence states the numerator only.
+ */
+export function foundByLine(foundBy: readonly FoundBy[], reported: number | null): string {
+  const who = foundBy.map((f) => `${f.provider}/${f.model}`).join(', ');
+  const n = String(foundBy.length);
+  return reported === null
+    ? `found by ${n} finder${foundBy.length === 1 ? '' : 's'}: ${who}`
+    : `found by ${n} of ${String(reported)} finders: ${who}`;
+}
+
+/** One verifier's ballot, as the report file has it. */
+export interface Ballot {
+  seat: string;
+  provider: string;
+  model: string;
+  /** As cast. */
+  vote: string;
+  /** As counted - a `not-real` that pointed at nothing is counted `cannot-tell`. */
+  counted: string;
+  reason: string;
+  countedReason: string | null;
+}
+
+/** The vote on one finding, as the report file has it. */
+export interface Votes {
+  quorum: number;
+  n: number;
+  real: number;
+  notReal: number;
+  cannotTell: number;
+  outcome: string;
+  ballots: readonly Ballot[];
+}
+
+/**
+ * A finding's vote, or null when there is none or its counts cannot be read - a
+ * tally this window would have to fill in is one it would be inventing. A
+ * ballot this build cannot read is dropped alone, as `readFoundBy` drops an
+ * entry.
+ */
+function readVotes(v: unknown): Votes | null {
+  const row = record(v);
+  if (row === null) return null;
+  const quorum = num(row['quorum']);
+  const n = num(row['n']);
+  const real = num(row['real']);
+  const notReal = num(row['notReal']);
+  const cannotTell = num(row['cannotTell']);
+  const outcome = str(row['outcome']);
+  if (quorum === null || n === null || real === null || notReal === null || cannotTell === null || outcome === null) {
+    return null;
+  }
+  const ballots: Ballot[] = [];
+  for (const item of Array.isArray(row['ballots']) ? (row['ballots'] as unknown[]) : []) {
+    const b = record(item);
+    if (b === null) continue;
+    const seat = str(b['seat']);
+    const provider = str(b['provider']);
+    const model = str(b['model']);
+    const vote = str(b['vote']);
+    const counted = str(b['counted']);
+    const reason = str(b['reason']);
+    if (seat === null || provider === null || model === null || vote === null || counted === null || reason === null) {
+      continue;
+    }
+    ballots.push({ seat, provider, model, vote, counted, reason, countedReason: str(b['countedReason']) });
+  }
+  return { quorum, n, real, notReal, cannotTell, outcome, ballots };
+}
+
+/**
+ * The vote's sentence: *"vote: 1 of 3 real, 2 not real (quorum 2), unconfirmed"*.
+ *
+ * Every number is the report's own, counted by the core as each ballot was
+ * counted. `cannot tell` is said only when there was one, so the common
+ * sentence stays the short one.
+ */
+export function votesLine(v: Votes): string {
+  const unsure = v.cannotTell > 0 ? `, ${String(v.cannotTell)} cannot tell` : '';
+  return (
+    `vote: ${String(v.real)} of ${String(v.n)} real, ${String(v.notReal)} not real${unsure} ` +
+    `(quorum ${String(v.quorum)}), ${v.outcome}`
+  );
+}
+
+/** One ballot's line: who, what it voted (and how that was counted), and why. */
+export function ballotLine(b: Ballot): string {
+  const counted = b.counted === b.vote ? '' : ` (counted as ${b.counted})`;
+  return `${b.seat}: ${b.vote}${counted} — ${b.reason}`;
 }
 
 function readCitations(v: unknown): Citation[] {
@@ -177,6 +328,116 @@ function readCitations(v: unknown): Citation[] {
     });
   }
   return out;
+}
+
+/** One finding's disposition, as `fix-dispositions-<n>.json` has it (#393). */
+export interface RecordedDisposition {
+  disposition: string;
+  reason: string;
+}
+
+/** A review fix round's dispositions file, at the density the findings pane needs. */
+export interface DispositionsFile {
+  round: number | null;
+  label: string | null;
+  /** A `final-fix-<n>` round, which by design nothing reviews again. */
+  final: boolean;
+  byId: ReadonlyMap<string, RecordedDisposition>;
+}
+
+/**
+ * The dispositions a fix round recorded, or null when the file is not JSON. An
+ * entry this build cannot read is dropped alone, as `readReport` drops a
+ * finding; the finding it was about then simply says nothing.
+ */
+export function readDispositions(text: string): DispositionsFile | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text) as unknown;
+  } catch {
+    return null;
+  }
+  const root = record(parsed);
+  if (root === null) return null;
+  const byId = new Map<string, RecordedDisposition>();
+  const list: unknown = root['dispositions'];
+  for (const item of Array.isArray(list) ? (list as unknown[]) : []) {
+    const row = record(item);
+    if (row === null) continue;
+    const id = str(row['id']);
+    const disposition = str(row['disposition']);
+    if (id === null || disposition === null || byId.has(id)) continue;
+    // `str` reads `''` as absent, and an empty reason is what a left-out finding has.
+    byId.set(id, { disposition, reason: typeof row['reason'] === 'string' ? row['reason'] : '' });
+  }
+  const label = str(root['label']);
+  return { round: num(root['round']), label, final: label?.startsWith('final-') ?? false, byId };
+}
+
+/** What the fixer did with one finding, as far as the run's files can say. */
+export type FixOutcome =
+  | { kind: 'recorded'; fixRound: number; final: boolean; entry: RecordedDisposition }
+  /** The round ran and its dispositions could not be read, so none were recorded. */
+  | { kind: 'not-recorded' }
+  | null;
+
+/**
+ * The outcome badges for a finding's provenance: *"fixer: rebutted - <reason>
+ * (fix round 2)"*, then *"same id raised again next round"* or *"not reviewed
+ * again"* when either is true. Nothing at all when there is nothing to say.
+ *
+ * The two later facts are their own badges, never folded into the
+ * disposition, and neither is ever "regressed" or "not fixed": a finding the
+ * next review did not raise is not confirmed fixed, so that says nothing.
+ */
+export function outcomeLine(
+  outcome: FixOutcome,
+  next: 'raised-again' | 'not-reviewed-again' | null,
+): string[] {
+  const out: string[] = [];
+  if (outcome?.kind === 'not-recorded') out.push('dispositions not recorded for this round');
+  else if (outcome?.kind === 'recorded') {
+    const what = outcome.entry.disposition.replace(/-/g, ' ');
+    const why = outcome.entry.reason === '' ? '' : ` - ${outcome.entry.reason}`;
+    const round = `${outcome.final ? 'final fix round' : 'fix round'} ${String(outcome.fixRound)}`;
+    out.push(`fixer: ${what}${why} (${round})`);
+  }
+  if (next === 'raised-again') out.push('same id raised again next round');
+  else if (next === 'not-reviewed-again') out.push('not reviewed again');
+  return out;
+}
+
+/** What the files beside one review round say about the fix round that answered it. */
+export interface AnsweringRound {
+  /** The round of the listed `fix-dispositions-<n>.json`, or null when none is listed. */
+  listed: number | null;
+  /** That file, read; null while it is loading or when it cannot be read. */
+  file: DispositionsFile | null;
+  /** The fix round ran and recorded none: an unreadable answer, or a run from before #393. */
+  unrecorded: boolean;
+  /** The ids the next review raised, or null when there is no next review to read. */
+  raised: ReadonlySet<string> | null;
+}
+
+/**
+ * The outcome badges for one finding of a review round: a read-time join,
+ * never written back onto the finding.
+ *
+ * "Not recorded" only when no dispositions file is listed at all - a listed
+ * file that is still loading, or cannot be read, says nothing rather than
+ * claiming the round recorded nothing.
+ */
+export function outcomeFor(id: string, a: AnsweringRound): string[] {
+  const entry = a.file?.byId.get(id);
+  const outcome: FixOutcome =
+    entry !== undefined && a.listed !== null
+      ? { kind: 'recorded', fixRound: a.listed, final: a.file?.final ?? false, entry }
+      : a.unrecorded && a.listed === null
+        ? { kind: 'not-recorded' }
+        : null;
+  if (outcome === null) return [];
+  const after = a.file?.final === true ? 'not-reviewed-again' : a.raised?.has(id) === true ? 'raised-again' : null;
+  return outcomeLine(outcome, after);
 }
 
 /**
@@ -224,6 +485,8 @@ export function readReport(text: string): Report | null {
         suggestedFix: str(row['suggested_fix']),
         citations: readCitations(row['evidence']),
         raisedBy: str(row['raisedBy']),
+        foundBy: readFoundBy(row['foundBy']),
+        votes: readVotes(row['votes']),
         // `=== true`, so a report that does not carry the field is not read as
         // having said no. It means the same thing here, and the coercion is the
         // one that cannot become wrong later.

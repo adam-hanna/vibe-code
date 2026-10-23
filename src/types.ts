@@ -1,5 +1,5 @@
-import type { RoleProviders } from '@src/roles.js';
-import type { EnvironmentFacts, ToolchainContract } from '@src/runtime.js';
+import type { RoleProviders, RoleSetting } from '@src/roles.js';
+import type { AgentProvider, EnvironmentFacts, ToolchainContract } from '@src/runtime.js';
 import type { Liveness } from '@src/lock.js';
 import type { SlotName } from '@src/slots.js';
 
@@ -240,6 +240,48 @@ export interface LoopConfig {
    * normal and is left alone.
    */
   convergenceWindow: number;
+  /**
+   * Plan critiques before `planStall` may call the loop stalled (#394): the
+   * blocking count is not falling and most of it is new. The first stall asks
+   * the planner to step back, the next asks a person. Zero turns detection off.
+   *
+   * Not a cap: reaching it never stops a run by itself.
+   */
+  stallAfter: number;
+  /**
+   * Whether a passing round's non-blocking findings are still worked on (#425).
+   *
+   * Run `20261022-224848` passed its review with the verdict REVISE and two P2s
+   * in the task's own files, said "Review clean", and ran no fix: the gate
+   * passed because P2s do not block, and nothing else read them. On, a passing
+   * review with a P2 to address buys the one final fix round the carried-P1
+   * path already has (never re-reviewed), what that round leaves goes to
+   * FOLLOW-UPS.md, and an approved plan hands its non-blocking findings to the
+   * implementer. The fixer still judges each one under #228's scope rule.
+   * `false` restores the behaviour before #425 exactly.
+   */
+  fixNonBlocking: boolean;
+}
+
+/**
+ * One stall the plan loop recorded (#394), in `RunState.planStalls`.
+ *
+ * `position` is the record position in `p1Rounds` the stall was judged at, not
+ * `planRound`. `counts` and `fresh` are what `planStall` measured, kept so a
+ * revision built after a resume can still state them: re-running the rule there
+ * would find this very stall inside its own window and return null.
+ */
+export interface PlanStallEntry {
+  position: number;
+  action: 'step-back' | 'escalated';
+  counts: number[];
+  fresh: number[];
+  /**
+   * A step-back whose block a findings revision has carried. Set on the write
+   * that persists that revision's plan, so a stop before it re-sends the block
+   * and a stop after it does not.
+   */
+  sent?: boolean;
 }
 
 export interface BudgetConfig {
@@ -364,6 +406,18 @@ export interface RunStart {
   sha: string;
   /** The `git.baseRef` it was resolved from, or null for the repository's HEAD. */
   ref: string | null;
+}
+
+/** See `RunState.reviewMd` (#389). `blob` and `bytes` only when present. */
+export interface ReviewMdRecord {
+  /** The full commit id `REVIEW.md` was read from. */
+  commit: string;
+  outcome: 'present' | 'absent' | 'refused' | 'unreadable';
+  blob?: string;
+  /** git's own size for the blob, never a count of decoded characters. */
+  bytes?: number;
+  /** Why a refused or unreadable file was not given to the reviewer. */
+  reason?: string;
 }
 
 /**
@@ -779,6 +833,54 @@ export interface Config {
    * none is byte-identical to one that predates the key.
    */
   instructions: { text: string };
+  /**
+   * More review seats than the one reviewer, and a vote before a finding blocks
+   * (#388).
+   *
+   * **Accepted and validated, and not yet read by a run.** This is the
+   * groundwork release (#388 Part A): the section, its refusals, the settings
+   * lists and `vibe doctor`'s listing, with the loop untouched - so a run that
+   * names seats here behaves exactly as one that names none. Part B seats the
+   * finders and Part C the verifiers.
+   *
+   * Settable in the global file as well as a project's, like `roles`: it is a
+   * review policy and a list of model seats, not a fact about how one
+   * repository builds, so it is not in `PROJECT_ONLY`.
+   */
+  review: ReviewConfig;
+  /**
+   * Whether a terminal `vibe run`, `vibe plan` or `vibe doctor` ends by saying
+   * that npm has a newer vibe (#323). The only setting that reaches the
+   * network; `src/updatecheck.ts` says what is sent. Read only by the terminal
+   * entry, never by the loop and never by the host.
+   */
+  updates: UpdatesConfig;
+}
+
+/** The `updates` section (#323). See `Config.updates`. */
+export interface UpdatesConfig {
+  check: boolean;
+}
+
+/** What a P0 that the vote did not confirm does (#388). The owner's three, 2026-10-20. */
+export type UnconfirmedP0 = 'block' | 'halt' | 'demote';
+
+/**
+ * An additional finder: a role's settings, plus what to look at hardest (#388,
+ * ⚑1). `focus` reaches no prompt yet; from Part B it is appended to that
+ * finder's prompt, and absent means exactly the shared one.
+ */
+export type FinderSeat = RoleSetting & { focus?: string | undefined };
+
+/** The `review` section (#388). See `Config.review`. */
+export interface ReviewConfig {
+  /** Finders beyond `roles.reviewer`, which stays the first. A provider name or a seat object. */
+  finders: (AgentProvider | FinderSeat)[];
+  /** The seats that vote on each blocking finding. Exactly a role's keys. */
+  verifiers: (AgentProvider | RoleSetting)[];
+  /** How many `real` votes confirm a finding; null is a majority, floor(n/2)+1. */
+  quorum: number | null;
+  unconfirmedP0: UnconfirmedP0;
 }
 
 /** Block name to replacement text. Open-ended keys, checked against the real list. */
@@ -1063,6 +1165,113 @@ export interface ReproducerOutcome {
   archived: string | null;
 }
 
+/** One finder's share of a finding's provenance. See `Finding.foundBy`. */
+export interface FoundBy {
+  seat: string;
+  provider: AgentProvider;
+  model: string;
+  id: string;
+}
+
+/** What one verifier said about one finding (#388 Part C). */
+export type VoteValue = 'real' | 'not-real' | 'cannot-tell';
+
+/** One verifier's ballot on one finding. See `Finding.votes`. */
+export interface Ballot {
+  /** The config path, `review.verifiers[0]`. */
+  seat: string;
+  provider: AgentProvider;
+  /** The configured model, or `"default"` - as `foundBy` has it. */
+  model: string;
+  /** The vote as cast. A turn that failed cast nothing, and reads `cannot-tell`. */
+  vote: VoteValue;
+  /** The vote as it was counted: a `not-real` whose evidence resolved to nothing is `cannot-tell`. */
+  counted: VoteValue;
+  /** The verifier's own reason, or `the turn failed: <first line>`. */
+  reason: string;
+  /** The citations it gave, canonicalised where they resolved. */
+  evidence: Evidence[];
+  /** Why it was counted otherwise than cast. Present only when `counted !== vote`. */
+  countedReason?: string;
+}
+
+/** The vote on one finding, and what it came to. See `Finding.votes`. */
+export interface Votes {
+  quorum: number;
+  n: number;
+  real: number;
+  notReal: number;
+  cannotTell: number;
+  outcome: 'confirmed' | 'unconfirmed' | 'undecided';
+  ballots: Ballot[];
+}
+
+/** What the fixer said it did with one review finding (#393). */
+export type Disposition = 'fixed' | 'rebutted' | 'deferred' | 'not-addressed';
+
+/**
+ * One non-blocking finding a passing review left unfixed, and why (#425).
+ *
+ * `unreadable` is a final round whose dispositions could not be read - never
+ * `not-addressed`, which would claim the fixer ignored it. `not-attempted` is a
+ * pass whose findings to address were P3s only, which buys no turn.
+ */
+export interface UnaddressedFinding {
+  finding: Finding;
+  outcome: 'not-addressed' | 'deferred' | 'rebutted' | 'unreadable' | 'not-attempted';
+  /** The fixer's reason; `''` when it gave none or was never asked. */
+  reason: string;
+}
+
+/** One seat a finding is credited to, in the shape `FoundBy` writes it. */
+export interface DispositionSeat {
+  seat: string;
+  provider: string;
+  model: string;
+}
+
+/** One finding's disposition, with the provenance it was handed to the fixer with (#393). */
+export interface FindingDisposition {
+  id: string;
+  /** The severity the fixer was shown. */
+  severity: Severity;
+  /** Null when the finding carried no author. */
+  raisedBy: FindingAuthor | null;
+  disposition: Disposition;
+  /** The fixer's reason; `''` for a finding it left out, which says nothing. */
+  reason: string;
+  /** Every seat credited with the finding, or null when none can be established. */
+  seats: DispositionSeat[] | null;
+  /** The `at: 'review'` reproducer verdict, or null when there was none. */
+  reproducer: ReproducerVerdict | null;
+}
+
+/**
+ * One review fix round's dispositions: `fix-dispositions-<round>.json` and the
+ * `fix_dispositions` event carry this shape (#393).
+ */
+export interface FixDispositions {
+  /** The fix round, the number in its label and its report's name. */
+  round: number;
+  /** `fix-<round>` or `final-fix-<round>`. */
+  label: string;
+  /** The review round it answers: `code-review-<answers>.json`. */
+  answers: number;
+  /** One per finding the fixer was shown, in the order it was shown them. */
+  dispositions: FindingDisposition[];
+  /** Ids the fixer answered that were not in its prompt, dropped. */
+  dropped: string[];
+  /** Ids the fixer answered more than once; the first answer was kept. */
+  duplicates: string[];
+}
+
+/** Who took a review round's own turn. See `RunState.reviewSeat`. */
+export interface ReviewSeat {
+  round: number;
+  provider: string;
+  model: string;
+}
+
 export interface Finding {
   id: string;
   severity: Severity;
@@ -1082,6 +1291,35 @@ export interface Finding {
    * over a bad label would delete a claim to protect a caption.
    */
   raisedBy?: FindingAuthor;
+  /**
+   * Which review finders raised this defect, in finder order (#388 Part B).
+   *
+   * **Absent unless at least one additional finder was configured** - and then
+   * present on every finding of the round, including one only `roles.reviewer`
+   * raised. A default run's artifacts carry no such key, byte for byte. Written
+   * only by `mergeAcrossFinders`.
+   *
+   * `seat` is the config path (`roles.reviewer`, `review.finders[0]`); `model`
+   * is the configured string or `"default"` - never the model a default was
+   * guessed to resolve to; `id` is the id that finder itself used, which a
+   * re-key on collision may have changed above and which that finder's own
+   * `finding_downgraded` events still name. Rides through `readFinding`
+   * unvalidated, as `raisedBy` and `evidence` do: a malformed caption must not
+   * delete a claim.
+   */
+  foundBy?: FoundBy[];
+  /**
+   * What the review verifiers voted, and what the tally came to (#388 Part C).
+   *
+   * **Absent unless the finding was put to a vote** - a P0 or P1 that was not
+   * reproduced, on a run that seats verifiers - so a default run's artifacts
+   * carry no such key, byte for byte. Written only by `applyVotes`. An
+   * `unconfirmed` P1 (or a P0 under `unconfirmedP0: "demote"`) is moved to P2
+   * through `toP2`, so `downgraded` names the tally beside this record.
+   * Rides through `readFinding` unvalidated, as `foundBy` does: a malformed
+   * caption must not delete a claim. The oscillation census never reads it.
+   */
+  votes?: Votes;
   /**
    * Where this finding says to look. At least one entry, per the schema.
    *
@@ -1685,6 +1923,19 @@ export interface RunState {
   baseSha: string | null;
   branch: string | null;
   /**
+   * The branch name `vibe run --branch` asked for (#356), in the FIRST state
+   * write. Absent on every run that did not pass the flag, which is what keeps
+   * `runBranch` at `branchPrefix + id` for all of them.
+   *
+   * A request rather than a record, and that is why it is not `branch`:
+   * `branch` stays null until `prepareGit` has actually put the run on it, and
+   * three sites read that null as "a fresh run that has not taken its branch
+   * yet" - the base resolution, the worktree's ref, and `prepareGit`'s create
+   * path. `runBranch` reads this one second, so the name the setup script is
+   * told, the branch made and `run_branch` agree.
+   */
+  requestedBranch?: string;
+  /**
    * The checkpoint this state came from (#78).
    *
    * Written into every `checkpoint-<n>.json`, and present on a live
@@ -1735,6 +1986,17 @@ export interface RunState {
    */
   start?: RunStart;
   /**
+   * What the run found as the repository's `REVIEW.md` (#389), and the commit
+   * it was read from - `start.sha`, else `baseSha`; never the working tree.
+   *
+   * Written once, at the first review, in the same save as its `review_md`
+   * event. A resume re-reads `commit` and requires `blob` to match; a mismatch
+   * rewrites the outcome to `unreadable`, with a reason naming both. Absent on
+   * every run from before #389, and on a run whose first review had no commit
+   * to read from. A fork drops it: it describes the parent's start.
+   */
+  reviewMd?: ReviewMdRecord;
+  /**
    * The `claude` and `codex` versions this run last ran under (#298), written
    * when it starts and again on every resume. A resume that finds a different
    * version records `cli_versions_changed` naming both, so a run that changed
@@ -1745,6 +2007,22 @@ export interface RunState {
   cliVersions?: CliVersions;
   /** One entry per code-review round, driving the convergence assessment. */
   p1Rounds: RoundRecord[];
+  /**
+   * The plan loop's stalls (#394), oldest first. Positions point into
+   * `p1Rounds`, so this is reset with it when implementation starts. Absent on
+   * every run that never stalled, and on every run from before this existed.
+   */
+  planStalls?: PlanStallEntry[];
+  /**
+   * An answers revision ran while plan findings were still pending (#394).
+   *
+   * The durable half of "an answer wins over an accept": the answers revision
+   * clears `pendingAnswers` on its plan write and leaves the findings pending,
+   * so without this a process that died after that write would come back
+   * looking answer-free and approve a plan no critic has read. Cleared by the
+   * findings revision that follows it.
+   */
+  planRevisedByAnswer?: boolean;
   /** The same, for verification-fix rounds, which converge independently. */
   verifyRounds: RoundRecord[];
   /** Verification-fix rounds spent so far. */
@@ -1776,6 +2054,31 @@ export interface RunState {
    * touched no judge file, or no part has completed - never an empty record.
    */
   testChanges?: TestChanges | undefined;
+  /**
+   * Who took the most recent review round's own turn (#393): `roles.reviewer`'s
+   * provider and model as they were when that round's artifact was written.
+   *
+   * Stamped once per recorded round, because the seat that reviewed is the one
+   * a fix round's dispositions are credited to, and `resume_config` can change
+   * `roles.reviewer` between the review and the fix. `round` is the raw round
+   * of `code-review-<round>.json`; a fix that answers any other round credits
+   * nobody rather than whoever holds the seat now. Absent on every run recorded
+   * before it existed, and a damaged value is dropped, never guessed.
+   */
+  reviewSeat?: ReviewSeat | undefined;
+  /**
+   * The review fix round whose turn has started and whose findings are not yet
+   * consumed (#393): set with the round's increment, before the turn, and
+   * cleared with the pending findings.
+   *
+   * What lets a resume tell "this round's turn died" from "the next round is
+   * due". Without it a resume numbered a new round on top of the one that died,
+   * so `fix-1`'s retry ran as `fix-2` answering a review it did not answer, and
+   * a final fix came back as an ordinary fix that never re-ran its reproducers.
+   * `final` says which of the two rounds it was. Absent on every run between
+   * rounds, and on every run recorded before it existed.
+   */
+  fixInFlight?: { round: number; final: boolean } | undefined;
   /**
    * The **basename** of the most recent write turn's report artifact.
    *
@@ -2090,6 +2393,34 @@ export interface RunState {
    * re-reviewed and so nothing has confirmed they are gone.
    */
   outstanding?: Finding[];
+  /**
+   * The approving plan critique's non-blocking findings that are not
+   * deferrable (#425), stated to the implementer in a section of their own.
+   *
+   * Assigned on the same save as `declined`, and removed rather than left
+   * standing when an approving round has none. Absent on every run from before
+   * #425 and on every run with `loop.fixNonBlocking` off.
+   */
+  planNonBlocking?: Finding[];
+  /**
+   * The ids of the non-blocking findings the final fix round carried (#425),
+   * set with `finalFixDone` before its turn.
+   *
+   * The second witness beside `outstanding`: a round run for P2s alone leaves
+   * `outstanding` empty on purpose, and the resumed round, the completion line
+   * and the CLI summary all run after `pendingFindings` is cleared - possibly
+   * in another process - so without this an empty `outstanding` could not be
+   * told from a repaired one. Absent when the round carried only P1s.
+   */
+  finalFixNonBlocking?: string[];
+  /**
+   * What a passing review left of its non-blocking findings (#425): what the
+   * final fix round did not fix, or the P3s a pass ran no round for. Rendered
+   * into FOLLOW-UPS.md as "Left by the final fix round". Only P2s and P3s that
+   * are not deferrable - the file's header claims everything in it was
+   * non-blocking, and deferrable findings are already listed there.
+   */
+  unaddressed?: UnaddressedFinding[];
   /**
    * Findings the critic or the reviewer marked `defer`: real work that belongs
    * in separate effort, collected across every plan-critique and code-review

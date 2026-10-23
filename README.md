@@ -2,7 +2,9 @@
 
 **vibe runs the plan → critique → implement → review loop between Claude Code and Codex, so you don't have to pass messages between them yourself.**
 
-Claude plans and Codex critiques, until the plan has no blocking findings. Then Claude implements, vibe runs your tests, and Codex reviews the diff, until that is clean too. vibe stops only when it actually needs you.
+A planner writes a plan and a critic attacks it, until the plan has no blocking findings. Then an implementer writes the code, vibe runs your tests, and a reviewer reviews the diff, until that is clean too. vibe stops only when it actually needs you.
+
+By default Claude plans and implements, and Codex critiques, reviews and answers the planner's questions. Each of those roles can be seated on either Claude or Codex, with its own model and effort: see [`roles`](https://adam-hanna.github.io/vibe-code/configuration.html#roles). The review can also seat more **finders**, which review the diff independently of the reviewer and of each other, and **verifiers**, which vote on each blocking finding before it can block: see [`review`](https://adam-hanna.github.io/vibe-code/configuration.html#review).
 
 **Documentation:** https://adam-hanna.github.io/vibe-code/
 
@@ -17,7 +19,7 @@ PLAN ──> CRITIQUE ──blocking?──> REVISE ─┐
   │      VERIFY ──fails?──> FIX ─┐        your test suite, run by vibe
   │         │ passes          └──┘
   │         v
-  │      REVIEW ──blocking?──> FIX ─┐
+  │      REVIEW ──blocking?──> FIX ─┐        the reviewer, any finders, and a vote
   │         │ clear              └──┘
   └─────────v  DONE
 ```
@@ -57,7 +59,7 @@ A long brief works better than a one-liner. Write it to a file, state the decisi
 
 **When a run stops for you,** it exits with code 2 and writes `NEEDS-INPUT.md`. Answer under each question's **Your answer:** heading, then `vibe resume <run-id>`.
 
-**It works on its own branch.** Implementation runs with permissions bypassed, so vibe creates `vibe/<run-id>` and commits after every round. To throw a run away, delete the branch. `--no-branch` turns this off.
+**It works on its own branch.** Implementation runs with permissions bypassed, so vibe creates `vibe/<run-id>` and commits after every round. To throw a run away, delete the branch. `--branch <name>` names it instead (the desktop app's pilot proposes one), and `--no-branch` turns this off.
 
 ## The desktop app
 
@@ -71,9 +73,9 @@ The app also pauses at the checkpoints you choose, lets you stop a turn in fligh
 
 The app tells you when a newer version exists. The check is one plain HTTPS request for a public file on GitHub, sends no identifiers, and can be turned off in Settings. **Update & restart** installs the new version in place on Windows (the `.msi` shows a UAC prompt), macOS and the AppImage. A `.deb` install updates by download from the releases page. Pre-releases are never offered. See [Updates](https://adam-hanna.github.io/vibe-code/app.html#updates).
 
-Download the latest version: Windows x64 [installer](https://github.com/adam-hanna/vibe-code/releases/latest/download/Vibe-windows-x64-setup.exe) or [`.msi`](https://github.com/adam-hanna/vibe-code/releases/latest/download/Vibe-windows-x64.msi), Apple Silicon [`.dmg`](https://github.com/adam-hanna/vibe-code/releases/latest/download/Vibe-macos-arm64.dmg), Linux [`.AppImage`](https://github.com/adam-hanna/vibe-code/releases/latest/download/Vibe-linux-x86_64.AppImage) or [`.deb`](https://github.com/adam-hanna/vibe-code/releases/latest/download/Vibe-linux-amd64.deb). Older versions are on the [releases page](https://github.com/adam-hanna/vibe-code/releases). The builds are **unsigned**. On macOS, if it says the app is damaged or from an unidentified developer, run `xattr -cr /Applications/Vibe.app`. On Windows, SmartScreen warns first: click **More info**, then **Run anyway**. Intel Macs build from source.
+Download the latest version: Windows x64 [installer](https://github.com/adam-hanna/vibe-code/releases/latest/download/Vibe-windows-x64-setup.exe) or [`.msi`](https://github.com/adam-hanna/vibe-code/releases/latest/download/Vibe-windows-x64.msi), macOS [`.dmg`](https://github.com/adam-hanna/vibe-code/releases/latest/download/Vibe-macos-universal.dmg) (Apple Silicon and Intel), Linux [`.AppImage`](https://github.com/adam-hanna/vibe-code/releases/latest/download/Vibe-linux-x86_64.AppImage) or [`.deb`](https://github.com/adam-hanna/vibe-code/releases/latest/download/Vibe-linux-amd64.deb). Older versions are on the [releases page](https://github.com/adam-hanna/vibe-code/releases). The builds are **unsigned**. On macOS, if it says the app is damaged or from an unidentified developer, run `xattr -cr /Applications/Vibe.app`. On Windows, SmartScreen warns first: click **More info**, then **Run anyway**.
 
-To check that a download came from this repository, run `gh attestation verify Vibe-macos-arm64.dmg --repo adam-hanna/vibe-code`. Without `gh`, compare it with the release's `SHA256SUMS` (`sha256sum -c SHA256SUMS --ignore-missing`), which only shows the file matches the release page. More in [Verifying a download](https://adam-hanna.github.io/vibe-code/app.html#verifying-a-download).
+To check that a download came from this repository, run `gh attestation verify Vibe-macos-universal.dmg --repo adam-hanna/vibe-code`. Without `gh`, compare it with the release's `SHA256SUMS` (`sha256sum -c SHA256SUMS --ignore-missing`), which only shows the file matches the release page. More in [Verifying a download](https://adam-hanna.github.io/vibe-code/app.html#verifying-a-download).
 
 To build it yourself (Rust and the [Tauri prerequisites](https://tauri.app/start/prerequisites/) are needed):
 
@@ -93,7 +95,8 @@ Put a `vibe.config.json` in the repository. Flags override it. `vibe.config.exam
 |---|---|
 | `verify.command` | The test command vibe runs after implementing. It is detected from `package.json` if not set. |
 | `verify.testPaths` | Which changed files count as tests when a review checks whether the run edited its own judge. Replaces the built-in list (`**/*.test.*`, `**/tests/**`, `**/test_*.py` and similar). `vibe.config.json` always counts. |
-| `roles` | Which agent, model and effort plans, implements, critiques and reviews. |
+| `roles` | Which agent (Claude or Codex), model and effort holds each job: planner, critic, answerer, implementer and reviewer. |
+| `review.finders`, `review.verifiers` | More seats that review the diff, and seats that vote on each blocking finding before it blocks. Both empty by default, which is one reviewer and no vote. The reviewer keeps its conversation from round to round; the other finders start fresh every round. |
 | `budget.maxTokens` | A ceiling for the whole run, across both agents. |
 | `loop.maxPlanRounds`, `loop.maxReviewRounds` | How many rounds before vibe stops and asks. |
 | `gates` | Where the loop pauses for you: `auto`, `step` (the app only) or `stop`. |
@@ -105,7 +108,7 @@ Settings for every project go in `~/.config/vibe/config.json` (`%APPDATA%\vibe\c
 
 ## What a run leaves behind
 
-Everything goes in `.vibe/runs/<run-id>/` in the repository: `PLAN.md`, every plan revision and critique, every code review, `state.json`, and a `transcript.log`. `FOLLOW-UPS.md` is the one to read afterwards: it lists what the critic said belongs in another change.
+Everything goes in `.vibe/runs/<run-id>/` in the repository: `PLAN.md`, every plan revision and critique, every code review, what the fixer said it did with each review finding, `state.json`, and a `transcript.log`. `FOLLOW-UPS.md` is the one to read afterwards: it lists what the critic or the reviewer said belongs in another change, and any finding the verifiers' vote moved to P2.
 
 When a round changes a test file or `vibe.config.json`, the reviewer is shown each one and must say whether the change was justified. Each file's status, the lines added and removed, and the verdict are recorded under `testChanges` in `state.json` and in that round's `code-review-<n>.json`. A file the reviewer left out is recorded as `unjudged`. None of this stops a run, but the end-of-run summary names any file that was not judged justified.
 
@@ -126,7 +129,8 @@ When a round changes a test file or `vibe.config.json`, the reviewer is shown ea
 
 - **Codex cost isn't reported.** Codex runs on a subscription and no output mode returns a price, so vibe reports tokens and never a guessed dollar figure. `budget.maxTokens` covers both agents.
 - **Tested with claude 2.1.303 and codex 0.163.0.** vibe uses whatever versions you have installed. `vibe doctor` and every run's preflight compare them with the tested ones. A different version is a warning that names the command to move to the tested one, and the run continues. vibe refuses to start only when the installed CLI's `--help` no longer declares a flag vibe passes; `--skip-probe` skips that check.
-- **Agreement isn't proof.** A clean run means two different models agreed and your tests passed. Both can still be wrong in the same way.
+- **It checks npm for a newer vibe, once a day.** At the end of `vibe run`, `vibe plan` and `vibe doctor` in a terminal, vibe asks `https://registry.npmjs.org/@adam-hanna/vibe-code/latest` for the newest version and prints one line if yours is older. The request carries nothing about you: no identifier, no cookie, no credential. It is the only network request vibe itself makes. Turn it off with `"updates": { "check": false }` in a config file or `VIBE_NO_UPDATE_CHECK=1`. It is already off under `CI`, when stdout is not a terminal, and in the desktop app.
+- **Agreement isn't proof.** A clean run means the critic and the reviewer found nothing blocking and your tests passed. Under the default roles that is two different models agreeing, and both can still be wrong in the same way. Finders and verifiers add seats, which is more agreement, not proof. A P1 the vote did not confirm stops blocking, so check `FOLLOW-UPS.md` for those.
 - **The full documentation is at [adam-hanna.github.io/vibe-code](https://adam-hanna.github.io/vibe-code/)**: every config key, every command, and how the loop works.
 
 ## Contributing

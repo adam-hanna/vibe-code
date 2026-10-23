@@ -13,16 +13,28 @@ import { STEPS, THEMES, type Theme } from './appearance';
 import { pickDirectory } from './pick';
 import { projectName } from './projects';
 import { capOf } from './hosts';
-import { showsConfig } from '../changed';
+import { configWriteFor } from '../changed';
 import { settingsRead } from './settingsdoor';
+import { reviewMdLine } from './reviewmd';
 import { DRAFTS_KEY, draftsFor, readDrafts, removeDraft, saveDraft } from './drafts';
 import type { Draft } from './drafts';
 import type { KeyStatus } from '../pilot/keys';
 import type { ConfigFrame, PromptsFrame } from '../host';
+import { inForce, pilotPromptBlocks } from '../pilot/brief';
 import { memory, useMemoryRevision } from '../memory';
 import { CLI_DEFAULT, loadCliModels, optionsFor, useModels, whyNot } from './models';
 import { backToCommand, convert, gatesPatch, pastedEscapes, readGates, ready, toRow } from './gateform';
 import type { Gate, GateRow } from './gateform';
+import {
+  blankRow as blankSeatRow,
+  quorumPatch,
+  readSeats,
+  ready as seatReady,
+  seatsPatch,
+  toRow as toSeatRow,
+  UNCONFIRMED_P0_CHOICES,
+} from './seatform';
+import type { Seat, SeatKind, SeatRow } from './seatform';
 import type { Listing } from './models';
 import { RemoteAccess } from '../remote/RemoteAccess';
 import { SURFACE } from '../surface';
@@ -369,9 +381,11 @@ const MODE_NOTE: Readonly<Record<string, string>> = {
 /**
  * The loop's caps, in the order a run reaches them.
  *
- * Every key here is a `loop.*` the config validator already knows and a
- * `--max-*` `parseArgs` already takes, so this is a form over settings that
- * existed rather than new configuration. The notes say what **reaching** one
+ * Every key here is a `loop.*` the config validator already knows, and every
+ * one but `stallAfter` is a `--max-*` `parseArgs` already takes, so this is a
+ * form over settings that existed rather than new configuration. `stallAfter`
+ * (#394) has no flag, and it is not a cap: reaching it asks the planner to step
+ * back and never stops a run by itself. The notes say what **reaching** one
  * costs, because that is the decision somebody is making when they raise it.
  */
 const LIMITS: readonly { key: string; note: string }[] = [
@@ -382,6 +396,10 @@ const LIMITS: readonly { key: string; note: string }[] = [
   {
     key: 'maxPlanRounds',
     note: 'how many times the plan may be sent back by the critique. A question round no longer spends one of these',
+  },
+  {
+    key: 'stallAfter',
+    note: 'not a cap: after this many critiques, if each keeps finding new blocking problems, the planner is asked to step back, and on the next stall you are asked. 0 turns it off. No command-line flag',
   },
   { key: 'maxReviewRounds', note: 'how many fix-and-re-review cycles the code gets' },
   { key: 'maxVerifyRounds', note: 'how many times a failing verification gate may be fixed' },
@@ -419,6 +437,34 @@ const Refusals = createContext(0);
  * "silence" in minutes left nothing on screen matching that name. The rows that
  * already lead with the key (the caps, the budget) do not need it.
  */
+/**
+ * What the repository's REVIEW.md is at the commit the next run would start
+ * from (#389). Read-only, on purpose: the file is edited in the repository and
+ * committed, which is what stops a run from weakening its own review. The host
+ * never fetches for it, and the sentence says when that matters.
+ */
+function ReviewMdNote({ dir, baseRef }: { dir: string; baseRef: string | null }) {
+  const [line, setLine] = useState<string | null>(null);
+  useEffect(() => {
+    let live = true;
+    setLine(null);
+    host
+      .reviewMd(dir)
+      .then((frame) => live && setLine(reviewMdLine(frame)))
+      .catch((err: unknown) => {
+        if (live) setLine(`REVIEW.md could not be checked: ${err instanceof Error ? err.message : String(err)}`);
+      });
+    return () => {
+      live = false;
+    };
+    // `baseRef` is not sent - the host reads it from the config - but a saved or
+    // externally changed `git.baseRef` moves the commit this note describes, so
+    // it is what makes the note ask again rather than show the old base.
+  }, [dir, baseRef]);
+  if (line === null) return null;
+  return <p className={S.note}>{line}</p>;
+}
+
 function Key({ name }: { name: string }) {
   return <code className={S.key}>{name}</code>;
 }
@@ -750,6 +796,220 @@ function ModelField({
 }
 
 /**
+ * One list of review seats - the finders or the verifiers (#388).
+ *
+ * `GateList`'s shape: `seatform.ts` holds the decisions and this draws them;
+ * the whole list goes out on every save; a row is saved on leaving it, and a
+ * select saves at once because choosing is the whole of that edit. A new row is
+ * not sent until it names an agent.
+ */
+function SeatList({
+  kind,
+  seats,
+  efforts,
+  providers,
+  models,
+  inherited,
+  busy,
+  onSave,
+}: {
+  kind: SeatKind;
+  seats: Seat[];
+  efforts: readonly string[];
+  providers: readonly string[];
+  models: Readonly<Record<string, Listing>>;
+  /** What a blank model means for an agent: its own `model` setting, as configured. */
+  inherited: (provider: string) => string | undefined;
+  busy: boolean;
+  onSave: (patch: Record<string, unknown>) => void;
+}) {
+  const refusals = useContext(Refusals);
+  const savedJson = JSON.stringify(seats);
+  const [rows, setRowsState] = useState<SeatRow[]>(() => seats.map(toSeatRow));
+  // The rows as last set, for the row's blur: the model field inside a row saves
+  // on its own blur first, and the row's handler would otherwise commit the list
+  // from before that edit and put the old model back.
+  const latest = useRef(rows);
+  const setRows = (next: SeatRow[]): void => {
+    latest.current = next;
+    setRowsState(next);
+  };
+  // Re-seeded from what is in force whenever that changes or a save is refused,
+  // keeping only the rows nobody has saved yet - `GateList`'s rule.
+  useEffect(() => {
+    setRows([...seats.map(toSeatRow), ...latest.current.filter((r) => !seatReady(r))]);
+    // `savedJson` stands in for `seats`, whose identity changes every render.
+  }, [savedJson, refusals]);
+
+  const noun = kind === 'finders' ? 'finder' : 'verifier';
+  const commit = (next: readonly SeatRow[]): void => {
+    const patch = seatsPatch(kind, next);
+    const sent = (patch['review'] as Record<string, unknown>)[kind];
+    // Leaving a row without changing it is not an edit.
+    if (JSON.stringify(sent) === JSON.stringify(seats)) return;
+    onSave(patch);
+  };
+  const edit = (key: string, change: Partial<SeatRow>): SeatRow[] => {
+    const next = latest.current.map((r) => (r.key === key ? { ...r, ...change } : r));
+    setRows(next);
+    return next;
+  };
+  const remove = (key: string): void => {
+    const gone = latest.current.find((r) => r.key === key);
+    const next = latest.current.filter((r) => r.key !== key);
+    setRows(next);
+    if (gone !== undefined && gone.saved !== null) commit(next);
+  };
+
+  return (
+    <div className={S.block}>
+      {rows.length > 0 && (
+        <table className={S.matrix}>
+          <thead>
+            <tr>
+              <th>{noun}</th>
+              <th>agent</th>
+              <th>effort</th>
+              <th>model</th>
+              <th>minutes</th>
+              {kind === 'finders' && <th>focus</th>}
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row, i) => (
+              <tr
+                key={row.key}
+                // Leaving the row is the save, wherever in it focus was.
+                onBlur={(e) => {
+                  if (e.currentTarget.contains(e.relatedTarget as Node | null)) return;
+                  commit(latest.current);
+                }}
+              >
+                <td>
+                  <code>{`${noun} ${String(i + 1)}`}</code>
+                </td>
+                <td>
+                  <select
+                    aria-label={`${noun} ${String(i + 1)} agent`}
+                    value={row.provider}
+                    disabled={busy}
+                    // A model named for one agent is not the other's, so it goes
+                    // with the agent - the role table's rule.
+                    onChange={(e) => commit(edit(row.key, { provider: e.target.value, model: '' }))}
+                  >
+                    <option value="">— choose an agent —</option>
+                    {providers.map((p) => (
+                      <option key={p} value={p}>
+                        {p}
+                      </option>
+                    ))}
+                  </select>
+                  {!seatReady(row) && <div className={S.hint}>saved once it names an agent</div>}
+                </td>
+                <td data-label="effort">
+                  <select
+                    aria-label={`${noun} ${String(i + 1)} effort`}
+                    value={row.effort}
+                    disabled={busy}
+                    onChange={(e) => commit(edit(row.key, { effort: e.target.value }))}
+                  >
+                    <option value="">— agent default —</option>
+                    {efforts.map((e) => (
+                      <option key={e} value={e}>
+                        {e}
+                      </option>
+                    ))}
+                  </select>
+                </td>
+                <td data-label="model">
+                  <ModelField
+                    id={`${kind}-${row.key}-model`}
+                    value={row.model === '' ? undefined : row.model}
+                    agent={row.provider === '' ? 'agent' : row.provider}
+                    listing={models[row.provider] ?? null}
+                    inherited={inherited(row.provider)}
+                    disabled={busy || row.provider === ''}
+                    onSave={(model) => commit(edit(row.key, { model }))}
+                  />
+                </td>
+                <td data-label="minutes">
+                  <input
+                    aria-label={`${noun} ${String(i + 1)} minutes`}
+                    className={S.num}
+                    value={row.minutes}
+                    placeholder="agent's"
+                    inputMode="numeric"
+                    disabled={busy}
+                    onChange={(e) => edit(row.key, { minutes: e.target.value })}
+                  />
+                </td>
+                {kind === 'finders' && (
+                  <td data-label="focus" className="w-full">
+                    <input
+                      aria-label={`${noun} ${String(i + 1)} focus`}
+                      className={S.text}
+                      value={row.focus}
+                      placeholder="— the shared prompt —"
+                      disabled={busy}
+                      onChange={(e) => edit(row.key, { focus: e.target.value })}
+                    />
+                  </td>
+                )}
+                <td>
+                  <Button variant="quiet" size="sm" disabled={busy} onClick={() => remove(row.key)}>
+                    remove
+                  </Button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      <div className={S.row}>
+        <Button variant="quiet" size="sm" disabled={busy} onClick={() => setRows([...latest.current, blankSeatRow()])}>
+          {`add a ${noun}`}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+/** The quorum: blank is a majority (`null`), which the number fields cannot say. */
+function QuorumField({
+  value,
+  disabled,
+  onSave,
+}: {
+  value: number | null;
+  disabled: boolean;
+  onSave: (patch: Record<string, unknown>) => void;
+}) {
+  const inForce = value === null ? '' : String(value);
+  const { typed, setTyped, focus, left } = useTyped(inForce);
+  return (
+    <input
+      id="review-quorum"
+      className={S.num}
+      value={typed}
+      placeholder="majority"
+      inputMode="numeric"
+      disabled={disabled}
+      {...focus}
+      onChange={(e) => setTyped(e.target.value)}
+      onBlur={() => {
+        left();
+        if (typed.trim() !== inForce) onSave(quorumPatch(typed));
+      }}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') e.currentTarget.blur();
+        if (e.key === 'Escape') setTyped(inForce);
+      }}
+    />
+  );
+}
+
+/**
  * One block: what it renders as, and the three ways to change it.
  *
  * **Saving and adopting are separate buttons, and that is the design.** A draft
@@ -770,7 +1030,7 @@ function PromptBlock({
   onSaveDraft,
   onRemoveDraft,
 }: {
-  block: PromptsFrame['blocks'][number];
+  block: PromptsFrame['blocks'][number] & { problem?: string | null };
   drafts: readonly Draft[];
   busy: boolean;
   /** Empty adopts the default, because that is what clearing the key means. */
@@ -802,6 +1062,13 @@ function PromptBlock({
           <Badge>the default</Badge>
         )}
       </div>
+      {/* Said rather than swallowed (#420): a stored value that could not be
+          used is somebody believing they changed what an agent is told. */}
+      {block.problem !== undefined && block.problem !== null && (
+        <p className={S.note}>
+          <Badge variant="alarm">not used</Badge> {block.problem}
+        </p>
+      )}
 
       <textarea
         className={S.promptbox}
@@ -1213,6 +1480,18 @@ export function Settings({
   useEffect(() => loadCliModels(), []);
   const [failure, setFailure] = useState<string | null>(null);
   const [saved, setSaved] = useState<string | null>(null);
+  /**
+   * The phone that last saved the file on screen, or null (#365).
+   *
+   * **Kept until something supersedes it, never on a timer.** A save from a
+   * phone is made because nobody is at the desktop, so a note that faded after
+   * a few seconds would be gone before anyone came back to read it. It goes
+   * when the next save to this file lands - this window's, which says its own
+   * line, or another client's, which names that phone or nobody - and when the
+   * screen is left or pointed at another file, the lifetime `saved` has.
+   */
+  const [savedFrom, setSavedFrom] = useState<string | null>(null);
+  useEffect(() => setSavedFrom(null), [scope, dir]);
   const [busy, setBusy] = useState(false);
   const [refusals, setRefusals] = useState(0);
   /** Whether the prompts section is open, which is what makes its read lazy. */
@@ -1279,7 +1558,13 @@ export function Settings({
     let live = true;
     void host
       .onChanged((c) => {
-        if (c.what === 'config' && showsConfig(c.key, scope, dir)) load();
+        const wrote = configWriteFor(c, scope, dir);
+        if (wrote === null) return;
+        // This window's own "saved to" line described the file before this
+        // write, so it goes; the new line says who wrote it, when a phone did.
+        setSaved(null);
+        setSavedFrom(wrote.phone);
+        load();
       })
       .then((stop) => {
         if (live) off = stop;
@@ -1298,6 +1583,7 @@ export function Settings({
       if (door.kind === 'none') return;
       setBusy(true);
       setSaved(null);
+      setSavedFrom(null);
       void host
         .config(door.dir, patch, to)
         .then((next) => {
@@ -1407,14 +1693,22 @@ export function Settings({
     claude?: { model?: string };
     codex?: { model?: string };
     instructions?: { text?: string };
+    prompts?: unknown;
+    review?: { finders?: unknown; verifiers?: unknown; quorum?: unknown; unconfirmedP0?: unknown };
   };
   const gates = effective.gates ?? {};
   const loop = effective.loop ?? {};
+  // The one boolean in `loop` (#425), read on its own so the caps keep their number type.
+  const fixNonBlocking: unknown = (loop as Record<string, unknown>)['fixNonBlocking'];
   const progress = effective.progress ?? {};
   const budget = effective.budget ?? {};
   const git = effective.git ?? {};
   const verify = effective.verify ?? {};
   const roles = effective.roles ?? {};
+  const review = effective.review ?? {};
+  // What a seat's blank model means: its agent's own setting, as the role rows read it.
+  const inheritedModel = (provider: string): string | undefined =>
+    provider === 'claude' || provider === 'codex' ? effective[provider]?.model : undefined;
   // Not on `Config` - no run reads it - so it is read off the global file (#246).
   const cap = capOf(frame.globalRaw);
   // Which rows the FILE claims, as opposed to which are in force, is `source`
@@ -1437,6 +1731,39 @@ export function Settings({
     if (scope === 'project' && inFile(frame.globalRaw, section, key)) return null;
     return <Badge>{unset}</Badge>;
   };
+
+  /** One prompt block, core or pilot: both are adopted, cleared and saved alike (#420). */
+  const drawPromptBlock = (block: PromptsFrame['blocks'][number] & { problem?: string | null }): ReactNode => (
+    <PromptBlock
+      key={block.name}
+      block={block}
+      drafts={drafts}
+      busy={busy}
+      // Empty clears the key, which is what "use the default" means: a
+      // cleared key follows the product forward when the default is
+      // improved, where a copy of today's text pins this project to it.
+      onAdopt={(name, text) => {
+        save({ prompts: { [name]: text } });
+        // The section re-reads the defaults; what is in force arrives with the
+        // config read the save itself causes.
+        prompts.reload();
+      }}
+      onSaveDraft={(draft) =>
+        setDrafts((cur) => {
+          const next = saveDraft(cur, draft);
+          keep(DRAFTS_KEY, next);
+          return next;
+        })
+      }
+      onRemoveDraft={(name, which) =>
+        setDrafts((cur) => {
+          const next = removeDraft(cur, name, which);
+          keep(DRAFTS_KEY, next);
+          return next;
+        })
+      }
+    />
+  );
 
   return (
     <Refusals.Provider value={refusals}>
@@ -1512,6 +1839,10 @@ export function Settings({
       {saved !== null && failure === null && (
         <p className={S.note}>saved to {saved}, and reread from it.</p>
       )}
+      {/* A phone's save, said where this window's own is said (#365): the same
+          place, the same weight, because it is the same fact with a different
+          author. */}
+      {savedFrom !== null && <p className={S.note}>saved from {savedFrom}, and reread from the file.</p>}
 
       {/* **Each kind of setting in the one view it belongs to** (#223). This
           machine's — how the window is drawn, how each vendor is reached, what
@@ -1794,7 +2125,9 @@ export function Settings({
         <p className={S.note}>
           A cap is where the loop gives up and hands back, not where it is aiming. Reaching one
           stops the run <em>resumably</em> and writes what it was stuck on — nothing is lost, and
-          a resume with a raised cap picks up from the same checkpoint.
+          a resume with a raised cap picks up from the same checkpoint. <code>stallAfter</code> is
+          the exception: it is a threshold, not a cap, and reaching it never stops a run by
+          itself.
         </p>
         <table className={S.matrix}>
           <tbody>
@@ -1849,8 +2182,27 @@ export function Settings({
         <div className={S.fact}>
           <span className={S.factname}>P2 and P3</span>
           <span>
-            Never block anything. They are recorded on the round and carried into{' '}
-            <code>FOLLOW-UPS.md</code>, which is what that file is for.
+            Never block anything. With this on, a review that passes with a P2 to address still
+            gets <strong>one final fix round</strong>, which is not reviewed again: the fixer fixes
+            what belongs to the task, and what it leaves goes to <code>FOLLOW-UPS.md</code> with its
+            reason. P3s alone run no round and are recorded there. An approved plan hands its P2s
+            and P3s to the implementer. Off, they are recorded only when deferred.
+            {/* A two-option select rather than a checkbox, for the reason the
+                `git.worktree` one gives: this screen has no checkbox, and an
+                unstyled one takes the platform's light control on a dark
+                window. Not in LIMITS: that list is numeric, with `--max-*` flags. */}
+            <span className={S.inline}>
+              <select
+                id="loop-fixNonBlocking"
+                value={fixNonBlocking === false ? 'off' : 'on'}
+                disabled={busy}
+                onChange={(e) => save({ loop: { fixNonBlocking: e.target.value === 'on' } })}
+              >
+                <option value="on">on — fix what belongs to the task, record the rest</option>
+                <option value="off">off — record them only</option>
+              </select>
+              {source('loop', 'fixNonBlocking')}
+            </span>
           </span>
         </div>
         <h4 className={S.h4}>when a turn has gone quiet</h4>
@@ -2519,6 +2871,81 @@ export function Settings({
         </table>
       </section>
 
+      {/* ---- more review seats, and a vote (#388) ------------------------ */}
+      <section className={S.block}>
+        <h3 className={S.h}>who else reviews, and who votes</h3>
+        {/* Finders run since #388 Part B and the vote since Part C. What each
+            costs is said here, in turns; nothing here says how accurate either is,
+            because nothing has measured it. */}
+        <p className={S.note}>
+          Finders are reviewers in addition to the one above, each reviewing every part of the
+          change after it without seeing the others&apos; findings: one extra turn per part per
+          finder, every review round. Verifiers vote on each blocking finding that its own test did
+          not reproduce, each seeing only the claim, never who raised it or how the others voted:
+          one extra turn per such finding per verifier. A P1 the vote does not confirm is moved to
+          P2; a vote that cannot tell keeps it blocking.
+        </p>
+        <h4 className={S.h4}>finders</h4>
+        <SeatList
+          kind="finders"
+          seats={readSeats(review.finders)}
+          efforts={frame.efforts}
+          providers={frame.providers}
+          models={models}
+          inherited={inheritedModel}
+          busy={busy}
+          onSave={save}
+        />
+        <h4 className={S.h4}>verifiers</h4>
+        <SeatList
+          kind="verifiers"
+          seats={readSeats(review.verifiers)}
+          efforts={frame.efforts}
+          providers={frame.providers}
+          models={models}
+          inherited={inheritedModel}
+          busy={busy}
+          onSave={save}
+        />
+        <div className={S.row}>
+          <label className={S.label} htmlFor="review-quorum">
+            quorum {source('review', 'quorum')}
+          </label>
+          <QuorumField
+            value={typeof review.quorum === 'number' ? review.quorum : null}
+            disabled={busy}
+            onSave={save}
+          />
+          <span className={S.hint}>
+            how many verifiers must say a finding is real. Blank means a majority of the verifiers —
+            more than half of them.
+          </span>
+        </div>
+        <div className={S.block}>
+          <span className={S.label}>
+            a P0 the vote does not confirm {source('review', 'unconfirmedP0')}
+          </span>
+          {UNCONFIRMED_P0_CHOICES.map((choice) => (
+            <label key={choice.value} className={cn(S.radio, 'max-w-none')}>
+              <input
+                type="radio"
+                name="review-unconfirmed-p0"
+                checked={review.unconfirmedP0 === choice.value}
+                disabled={busy}
+                onChange={() => save({ review: { unconfirmedP0: choice.value } })}
+              />
+              <span>
+                <code>{choice.value}</code> — {choice.meaning}
+              </span>
+            </label>
+          ))}
+        </div>
+        {/* The repository's own standards (#389), which every seat above gets. */}
+        {scope === 'project' && (
+          <ReviewMdNote dir={dir} baseRef={typeof git['baseRef'] === 'string' ? git['baseRef'] : null} />
+        )}
+      </section>
+
       {/* ---- what every turn is told ------------------------------------- */}
       <section className={S.block}>
         <h3 className={S.h}>what each turn is told</h3>
@@ -2565,7 +2992,7 @@ export function Settings({
           title="Prompts"
           meta={
             prompts.blocks.length > 0 ? (
-              <Badge>{prompts.blocks.length} blocks</Badge>
+              <Badge>{prompts.blocks.length + pilotPromptBlocks(null).length} blocks</Badge>
             ) : undefined
           }
         >
@@ -2577,37 +3004,35 @@ export function Settings({
           {prompts.failure === null && prompts.loading && prompts.blocks.length === 0 && (
             <p className={S.note}>asking the host what every turn is told…</p>
           )}
-          {prompts.blocks.map((block) => (
-            <PromptBlock
-              key={block.name}
-              block={block}
-              drafts={drafts}
-              busy={busy}
-              // Empty clears the key, which is what "use the default" means: a
-              // cleared key follows the product forward when the default is
-              // improved, where a copy of today's text pins this project to it.
-              onAdopt={(name, text) => {
-                save({ prompts: { [name]: text } });
-                // The section re-reads, because the blocks it is drawing are
-                // what the core will now render — and only the core knows that.
-                prompts.reload();
-              }}
-              onSaveDraft={(draft) =>
-                setDrafts((cur) => {
-                  const next = saveDraft(cur, draft);
-                  keep(DRAFTS_KEY, next);
-                  return next;
-                })
-              }
-              onRemoveDraft={(name, which) =>
-                setDrafts((cur) => {
-                  const next = removeDraft(cur, name, which);
-                  keep(DRAFTS_KEY, next);
-                  return next;
-                })
-              }
-            />
-          ))}
+          {/* What is in force is read off the settings this screen holds, not
+              off the host's answer (#420): the core reports its run-time latch,
+              and the service host that answers here never runs a loop, so its
+              latch is always empty and every block read as the default - the
+              box even re-seeded to the default after *use this*. The host still
+              owns the default text, which is what `fallback` is. */}
+          {prompts.blocks
+            .map((b) => ({ ...b, ...inForce(b.name, b.fallback, effective.prompts) }))
+            .map(drawPromptBlock)}
+          {/* **The pilot's own, under a heading of its own** (#420), so a person
+              can tell which agent reads which. Built into the app rather than
+              the core, because the pilot's prompt is built in this webview: the
+              texts come from `brief.ts`, the in-force state from the same
+              `prompts` table, and adopting writes the same kind of key. */}
+          <h4 className={S.h}>pilot</h4>
+          <p className={S.note}>
+            What the pilot in this window is told about itself and its job. The rest of its
+            prompt — the brief, the run as this window holds it, which tools it has and what
+            runs without asking — is assembled for every message and cannot be edited. A
+            project&apos;s branch-naming standard, or any rule about how a brief is written,
+            belongs in <code>pilot: intake</code>.
+          </p>
+          <p className={S.note}>
+            Stored the same way, as <code>prompts.&quot;pilot: intake&quot;</code> and so on in the
+            file this screen edits, and read by the next message the pilot is sent. An edited block
+            no longer follows the app&apos;s improvements to it; <em>use the default</em> clears it
+            and it does again.
+          </p>
+          {pilotPromptBlocks(effective.prompts).map(drawPromptBlock)}
         </Section>
       </section>
 

@@ -67,8 +67,14 @@ describe('an opened run is drawn by the column that drew it live', () => {
     // A `result` closes whatever turn was open and sets `completed`, which is
     // what makes the footer draw this run's ending — and it is why nothing is
     // left running when the fold finishes.
-    expect(replayHook).toMatch(/type: 'result', id: 0, exit: got\.exit/);
-    expect(replayHook).toMatch(/got\.exit !== null/);
+    // Case 2 (#396): the application moved from the hook into `openedEnding`,
+    // so a lost run's ending has a pure function to be tested through. The
+    // claim is unchanged - the exit is applied as a `result` frame, and only
+    // when there is one - and `the ending of an opened run` below runs it.
+    const ending = model.slice(model.indexOf('export function openedEnding'));
+    expect(ending).toMatch(/type: 'result', id: 0, exit: ending\.exit/);
+    expect(ending).toMatch(/ending\.exit !== null/);
+    expect(replayHook).toMatch(/openedEnding\(foldReplay\(got\.steps\), got, last\)/);
   });
 
   test('the live host’s pid is withheld from a run this process is not running', () => {

@@ -1,4 +1,5 @@
 import { dirKey } from './cockpit/projects';
+import { phoneOf } from './remote/origin';
 
 /**
  * What a cache does when another client wrote (#354), as pure functions.
@@ -90,4 +91,24 @@ export function reread(
 export function showsConfig(key: string, scope: 'project' | 'global', dir: string): boolean {
   if (scope === 'global') return key === 'global';
   return key !== 'global' && dirKey(key) === dirKey(dir);
+}
+
+/**
+ * Who saved the file this settings screen shows, when another client did
+ * (#365): null when the `changed` is not about this screen at all, otherwise the
+ * phone's name - or null inside, for a write no phone made.
+ *
+ * Only a phone is named, by `decidedFrom`'s rule and through `phoneOf`, the
+ * app's one spelling of `phone:`. A write with no origin is another client the
+ * desktop cannot name, and it still answers `{ phone: null }` rather than being
+ * ignored: it clears an earlier phone's note, because the file on screen is no
+ * longer the one that phone wrote.
+ */
+export function configWriteFor(
+  c: { what: string; key: string; origin?: string },
+  scope: 'project' | 'global',
+  dir: string,
+): { phone: string | null } | null {
+  if (c.what !== 'config' || !showsConfig(c.key, scope, dir)) return null;
+  return { phone: phoneOf(c.origin) };
 }

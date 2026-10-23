@@ -55,7 +55,7 @@ import type { Config, ForkedConversation, ForkPendingEntry, RunState } from '@sr
  * half of one convention and half of the other.
  */
 
-export type SlotName = 'main' | 'judge' | 'review' | 'write';
+export type SlotName = 'main' | 'judge' | 'review' | 'write' | 'fresh-claude' | 'fresh-codex';
 
 /**
  * Who mints the id.
@@ -347,7 +347,73 @@ export const SLOTS: Record<SlotName, SlotSpec> = {
     // no thread to attribute it to.
     occupancy: null,
   },
+  /**
+   * A fresh, read-only Codex seat: an additional finder or a verifier (#388).
+   *
+   * `write`'s shape for the reading side. It never carries a thread, so the
+   * settled rule - a persisted Codex thread never holds a writing role - cannot
+   * be broken through it, and a seat never inherits another turn's judgement.
+   * Kept apart from `write` so a log, a fork record or a test that names the
+   * slot says which job it was. Where every additional review finder's Codex
+   * turn runs (#388 Part B).
+   */
+  'fresh-codex': {
+    provider: 'codex',
+    origin: 'provider',
+    id: () => null,
+    started: () => false,
+    markStarted: () => {},
+    registered: () => false,
+    markRegistered: () => {},
+    persists: () => false,
+    reset: null,
+    occupancy: null,
+  },
+  /**
+   * A fresh, read-only Claude seat (#388), and the reason this slot exists:
+   * Claude had exactly one conversation, `main`, which is the implementer's own
+   * session, and a seat judging code from inside it is the self-preference
+   * failure more finders are meant to avoid.
+   *
+   * Client-origin, because `claude` is spawned under an id - but it stores none
+   * and has no `reset`, so `ensureSlotId` mints a new id for every turn and
+   * nothing about the run's state changes. Where every additional review
+   * finder's Claude turn runs (#388 Part B).
+   */
+  'fresh-claude': {
+    provider: 'claude',
+    origin: 'client',
+    id: () => null,
+    started: () => false,
+    markStarted: () => {},
+    registered: () => false,
+    markRegistered: () => {},
+    persists: () => false,
+    reset: null,
+    occupancy: null,
+  },
 };
+
+/**
+ * The slots that hold no conversation of any run, before or after a turn: one
+ * id per turn, never stored. Left out of a fork's census, because a parent has
+ * nothing there to fork and every fork's record would otherwise list two losses
+ * that are not losses.
+ */
+const PER_TURN_SLOTS: ReadonlySet<SlotName> = new Set<SlotName>(['fresh-claude', 'fresh-codex']);
+
+/**
+ * Whether this slot holds no conversation of the run: one id per turn, nothing
+ * stored (#388 Part B).
+ *
+ * The one question dispatch asks before acting on a run's conversation on a
+ * turn's behalf. A finder on a fresh slot must not decide that `main` needs
+ * rotating, and must not overwrite the record of how full `main` is - those
+ * belong to the implementer's session, which this turn never spoke to.
+ */
+export function perTurnSlot(slot: SlotName): boolean {
+  return PER_TURN_SLOTS.has(slot);
+}
 
 export function slotId(state: RunState, slot: SlotName): string | null {
   return SLOTS[slot].id(state);
@@ -453,6 +519,9 @@ export function ensureSlotId(state: RunState, slot: SlotName): string {
   }
   const existing = spec.id(state);
   if (existing !== null) return existing;
+  // A client-origin slot that stores nothing is a new conversation on every
+  // turn (`fresh-claude`, #388): an id of its own, and the state left alone.
+  if (spec.reset === null) return randomUUID();
   // Through `reset`, so "what a fresh conversation on this slot looks like" is
   // stated once - minting here as well would be the second half-convention.
   spec.reset?.(state);
@@ -644,6 +713,7 @@ export function forkedSlotFields(parent: RunState, cfg: Config): ForkedSlotField
   const pending: Partial<Record<SlotName, ForkPendingEntry>> = {};
 
   for (const slot of Object.keys(SLOTS) as SlotName[]) {
+    if (perTurnSlot(slot)) continue;
     const spec = SLOTS[slot];
     const parentId = spec.id(parent);
     if (!spec.persists(cfg)) {

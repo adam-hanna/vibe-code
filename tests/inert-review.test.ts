@@ -193,7 +193,10 @@ test('grounding wins the race: a P1 that cited nothing AND ran nothing is downgr
 
   await orchestrate(
     state,
-    config(),
+    // Off: what is pinned here is the guards' order, and that a twice-failed P1
+    // blocks nothing. Since #425 a P2 a passing review leaves would buy the final
+    // round, which is `non-blocking-findings.test.ts`'s business, not this one's.
+    config({ fixNonBlocking: false }),
     true,
     agents(
       {

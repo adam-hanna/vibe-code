@@ -101,6 +101,7 @@ const INBOUND_REACH: Readonly<Record<string, string>> = {
   artifact: 'read',
   replay: 'read',
   prompts: 'read',
+  review_md: 'read',
   fs: 'read',
   chats: 'read',
   memory: 'read',

@@ -94,6 +94,28 @@ Two rules the cockpit inherits from the design and must not quietly drop:
   compared. So the rule is now *a pulse means a turn is running*: `hostedMarks.working` is a
   run with `running` set and no gate held, and its row pulses, so several rows can. A gate,
   a held turn and an idle host all draw `LivenessDot still`.
+- **Where the run is, said on every surface that draws it** (#409). A resume at `reviewing`
+  re-runs the gates before the review, and for a core gate's minutes the window called the run
+  idle: *Ready for the next turn · The run is between turns*, Code complete, Code review not
+  started. A gate is not a turn, and the now card and the run path asked only about turns,
+  although `reduce` already had the gate open at `running`. `runningGate` (`cockpit/rail.ts`) is
+  the one answer: a gate at `running` in the latest pass, while no turn is open, no decision is
+  held, and the run has not ended or lost its host. The now card says *Verifying · Running the
+  core gate* with a clock from the gate's start, and the run path draws **Code** live, because
+  the gates run between Code's turns and are drawn under it.
+  - **The tab bar marks the tab for what is running**, from `liveTab`, which reads the same open
+    turn the rail does through `STAGE_TAB` (the map the round cards' links use too), so the bar
+    and the rail cannot disagree. A running gate marks **Verify**, the pane that draws it. A held
+    decision marks nothing. The mark is the rail's live dot, pulsing under #307's rule, and it is
+    an icon before the label, never `· n`: in this bar a `· n` is a count of what is behind the tab.
+  - **Each stage's tab draws the round in flight** (`InFlight` in `Cockpit.tsx`, `inFlight` in
+    `rounds.ts`). The four artifact panes are built from what rounds wrote, so a round still
+    running was on none of them. It is the pilot log's `RoundCard`, from the same `rounds()`, for
+    the card holding `run.running`. That is the turn the rail reads, so a pane cannot call a round
+    live that the rail calls finished. It sits **below the pane's scroll**, not in it: a reader who
+    opened round 0 is not moved, and every empty pane shows it, which is when it matters most. The
+    wrapper is always drawn, so a round starting or ending never remounts the pane under it. The
+    Verify pane already drew a running gate, and keeps doing so.
 - **A row waiting on a person says so, and why** (#307). `cockpit/attention.ts` holds the
   rule: a held gate (`gate`); the archive's `needs-input`, `stalled` and `error`
   (`needs you`, `stopped`, `failed`), only for a run not running, since a running run's
@@ -243,7 +265,8 @@ they are waiting on. Four things in it are worth carrying:
   lines below did the navigating. The same applies one level down: a finding row in the
   findings pane was a `<button>` that set an `open` id nothing rendered, so the cursor promised
   a disclosure that did not exist. What is behind that fold is the **provenance** — author,
-  citations, severity history, reproducer outcomes — and what stays out is the severity, the
+  citations, severity history, reproducer outcomes, and since #388 and #393 which seats found it,
+  the vote and what the fixer did with it — and what stays out is the severity, the
   title and the id, which are what make a list of findings scannable.
 
 - **No issue number reaches the screen, and `copy.test.ts` is the gate.** Seven components
@@ -265,6 +288,14 @@ they are waiting on. Four things in it are worth carrying:
   resume — attaches to nothing. `rounds()` is the single answer, and the loop column takes its
   census through it rather than matching one itself, so the column and the pilot's log cannot
   disagree about one round.
+- **The command palette matches by substring, and passes `cmdk` its filter to do it** (#397).
+  `shell/paletteFilter.ts` is the match: case-insensitive, whitespace folded, every hit scoring
+  1 so the rows keep the order `Palette` gave them. Leaving the `filter` prop off is not a
+  neutral default: `cmdk` then runs `command-score`, a fuzzy scorer roughly cubic in the
+  value's length, and a run's value is its id and its whole brief (6,825 to 20,386 characters
+  in this repository's archive). That froze the window for every letter typed: 360 ms for `a`,
+  11.0 s for `al` and 15.0 s for `all` over 20 runs, measured in Node. The query never leaves
+  `cmdk`'s own state, so typing does not re-render `Cockpit`; the cost was all in the filter.
 - **There is one sidebar, and the rail is its collapsed state.** A 54px rail headed `RUNS`
   beside a panel headed `Runs`, both drawing the same archive — reported in one line, *"there
   are two Runs bars on the left now"*, and it was not a rendering accident: two surfaces had
@@ -445,10 +476,41 @@ they are waiting on. Four things in it are worth carrying:
     severity moved afterwards (#142) is deliberately **not** applied: the round's
     report is the record of what the judge produced, and rewriting it here would
     make the column disagree with the artifact the pane beside it shows.
+    **The counts are all a replayed census carries**: the artifact holds the
+    report and not the gate's decision, so there is no `tolerance`, `pass` or
+    `reason`. The fold keeps those **null**, and the round card and the Review
+    pane then draw no tolerance badge and no gate sentence (`gateSentence`). It
+    read them as `0` and `false` once, and an opened run's clean review said
+    *tolerance P1≤0 · The gate blocked this round.* (#437).
 
   `exit` travels beside the steps rather than among them, because a `result` is
   not narration — it is the frame that answers a request — and a status this
   build does not recognise reports **null** rather than a guessed zero.
+
+  **A record with no ending is the exception, and the lock is what answers it** (#396). A
+  run whose status is still mid-loop (`planning`, `implementing`, `reviewing`) has no
+  exit, so nothing closed the turn it was on. A machine shut down under a run held at
+  `implemented`, which is not recorded, since `gate_waiting` never is. After the
+  relaunch the opened run drew its implement turn running, with "code" blinking, Pause
+  and Stop that did nothing, and no Resume. The archive listing already asked the lock
+  and called the run interrupted. The run's own view did not ask, so the two
+  disagreed.
+
+  So `readRunReplay` asks `livenessOf`, and the replay carries `liveness` and `lost`.
+  `lost` is the core's sentence: the status the record stops at, then
+  `describeLiveness`. It is set only when there is no exit **and** the lock rules out
+  a live process (`interrupted` or `not-running`). An `unknown` lock is left alone,
+  for `src/lock.ts`'s reason: a lock that cannot be read, or one held on another
+  machine, cannot rule out a live process. `openedEnding` in `model.ts` applies
+  whichever ending there is. An exit is applied as a `result`. A `lost` sentence is
+  applied through the same `hostLost` a live run's dead host goes through, so the
+  turn ends and the footer says the process has gone.
+
+  **The lost footer opens the runs list rather than resuming.** Reopening the run means
+  taking back a lock a dead process left behind, and `1b` is the one place that may
+  overrule a lock. So the footer's button goes there, in the run's own repository.
+  It does not add a second place able to force. Before this, the footer's sentence
+  named a screen that only the palette could open.
 - **A conversation belongs to the run it is about, and *about* includes the run
   it proposed.** Adoption was allowed only out of the project bucket —
   `chatKey(dir, null)` — which is right about where a pre-run conversation lives
@@ -531,7 +593,8 @@ they are waiting on. Four things in it are worth carrying:
   deleted a capability. The owner then asked for exactly that — *"There should
   only be one start button and it should follow the 'talk it through' path"* —
   so the capability **moved** instead: `start_run` now takes `gates`,
-  `max_tokens` and `p1_tolerance`, built by the same `launchArgv`, and `1b`'s one
+  `max_tokens` and `p1_tolerance` (and, since #356, `branch`, which the pilot
+  fills with a name it proposes and the card shows as `--branch`), built by the same `launchArgv`, and `1b`'s one
   button is `start`. `briefFor` puts the composer's settings into the message
   under the brief, where the person can see them, and the pilot passes them on
   the call.
@@ -768,6 +831,40 @@ they are waiting on. Four things in it are worth carrying:
   `fix-N` under `implementing`, so the live column and the archived run disagreed about one
   run. `announceFixRound` opens `implementing` with the review round; `verify-fix` does not,
   because a failed gate's repair belongs in the code group that ran the gate.
+- **The first implementation is not a round, and the rail calls it `implementation`** (#428).
+  Its heading carries no round, and the rail's expanded Code stage drew that as *"unnumbered
+  pass"* while the implement turn's chip said `round 0` (the turn carries `reviewRound`, 0, so
+  the reducer can tell one pass through Code from the next). Fix rounds count from 1 and come
+  after it. `passLabel` (`rounds.ts`) names each row: **`implementation`**, **`fix round N`**
+  (the number `Implementing (fix round N)` prints), and **`round N` counted from one** for plan,
+  critique and review, as `Plan critique (round N)` and `Code review (round N)` count. It drew
+  the raw archive round before, so the first critique read `round 0` beside a heading saying
+  round 1. A row whose frame carried no round reads as its phase's name (`planning`,
+  `critique`, `review`). `isFirstImplementation` asks the group's turns first, an `implement`
+  turn or a fix kind, because a replay files the first implementation under review round 0
+  and the round alone cannot tell it apart. The core is not asked for `round: 0`, which would be
+  a number nothing counted. The same answer takes `round 0` off the implement turn's chip
+  (`turnRound`), the replayed group's chip and the Code pane's title (`code · implementation`).
+- **Every round a person reads counts from one; every file, link and key counts from zero**
+  (#428, the owner's decision on #433). The chips used to show the archive's round, on the
+  reasoning that a row has to agree with the file, so the first critique read `round 0` under a
+  heading saying `Plan critique (round 1)`. A person reads the chip and the heading and never
+  the file name, so the display agrees with the heading. `shownRound` in `rounds.ts` is the one
+  `+ 1`, and `phaseRound` and `turnRound` apply it to plan, critique and review groups and to
+  `plan`, `revise`, `critique`, `review` and `vote` turns. Fix and verify-fix rounds are already
+  counted from one by the core (each is incremented before its turn) and are drawn as they
+  arrive. The loop column's round heads, turn rows, the live card, the Output strip, the pilot's
+  round cards and the Plans, Critique, Review and Code pane titles all ask it, and
+  `pass-label.test.ts` fails on a site that draws a raw round. Links, pane ids and `reveal` keep
+  the raw round, so a `round 1` chip still opens `plan-critique-0.json`. The footer's `plan N of
+  M` counts from one too, because the cap is checked against `planRound + 1`; its review and
+  verify figures are counts of fix rounds done and are drawn as they arrive. The core's
+  revision lines (`Plan round N`, `revising the plan (round N)`) and the replay's census line
+  now count from one as well.
+  The pilot's wake sentence names the counter of the gate it is held at (`wakeRound`): the plan
+  round from one at a plan gate, the fix that just ran at `review-round` and `verify-round`,
+  and nothing at a boundary with no round. It took `reviewRound ?? planRound`, and
+  `reviewRound` is never null, so every plan gate was described by the review count.
 - **A resume is pointed at the repository, and `dir` is not it.** `run_started`
   carries both and they are not interchangeable: `identity.dir` is the run's
   **own** directory — `<repo>/.vibe/runs/<id>` — and `identity.repo` is the
@@ -1022,6 +1119,23 @@ they are waiting on. Four things in it are worth carrying:
   not a fact about any run. Saving and adopting are separate controls for exactly that reason,
   and *use the default* **clears the key** rather than copying today's text into it — a cleared
   key follows the product forward when the default is improved.
+- **The pilot's blocks are in the same section, and in-force is read off the config** (#420).
+  `pilot: who`, `pilot: intake` and `pilot: how to read` are drawn under a *pilot* heading below
+  the core's blocks, by the same `PromptBlock`, so adopt, *use the default*, the saved-version
+  library and the "where it is stored" wording are one implementation, not two. Their defaults
+  come from `app/src/pilot/brief.ts` rather than from the host, because the pilot's prompt is
+  built in the webview and the core holds only their names; [pilot.md](pilot.md) has why each
+  block is or is not editable.
+
+  **What is in force is now taken from the config this screen read, for the core's blocks as
+  well**, and that fixes a defect rather than restyling one. The `prompts` frame reports
+  `promptBlocks()`, whose `text` and `overridden` are the core's run-time latch - and the host
+  that answers Settings is the service host, which never runs a loop (processes.md), so its latch
+  is always empty. Every block therefore read as *the default*, and after *use this* the reload
+  re-seeded the box with the default text, as though the adopt had been refused. `inForce` in
+  `brief.ts` resolves a block against `effective.prompts` with the host's `fallback`, the same
+  rule `block()` applies (blank is the default) plus the fail-closed half: a value that is not
+  text is not used, and the block says so with a *not used* badge.
 - **Standing instructions are the person's text, not a prompt block** (#273). Asked for as *"a
   way to give vibe instructions it can remember across runs. Kind of like a global agents.md."*
   `instructions.text` is its own config key, empty by default, settable in the global file or a
@@ -1148,6 +1262,29 @@ they are waiting on. Four things in it are worth carrying:
   project shown), and each draws only what may be set there — the test command and the worktree
   for a project, `auth`, `cli`, `pilot` and the type scale for all — with a line saying where the
   rest live. The ⚙ sits on the right with `＋ −`, because the arrow on the left is the disclosure.
+- **A run a phone started, and a setting a phone saved, say so; nothing else gains a line**
+  (#365). The other half of #344's gate attribution, and the same rule: only a `phone:` origin
+  is named, read through `phoneOf` in `remote/origin.ts`, the app's one spelling of the prefix
+  (`phone-attribution.test.ts` fails on a second one). The window's own invokes and saves carry
+  no origin, and the pilot, the gate matrix and a terminal are not a person on another device,
+  so calling any of them *from this desktop* would be inventing it (the phone's *from this
+  desktop* is #347's).
+  - **A run start** is folded off `run_started`'s `origin` into `identity.startedFrom`, absent
+    rather than null as on the wire. It reads *Started from <name>*, or *Resumed from <name>*
+    when the frame is a resume, because the frame is per invoke and a phone that resumed a run
+    did not start it. It is drawn at the top of the rail, above the *Now* card, since the rail
+    is what the cockpit draws of a run and the full column's identity header (which draws it
+    too) is not on screen there. It stays for as long as the run is shown: it is a fact about
+    the run, not a notice about a moment. A later `run_started` with no origin rebuilds the
+    identity without it.
+  - **A settings save** that arrives as `changed` for the file on screen (`configWriteFor`)
+    reads *saved from <name>, and reread from the file*, under the heading where this window's
+    own *saved to* line is drawn: the same fact with a different author, so the same place and
+    weight. **It stays until something supersedes it, and never on a timer**: a save from a
+    phone is made because nobody is at the desktop, so a note that faded would be gone before
+    anybody came back to read it. It goes when the next save to that file lands (this window's,
+    or another client's, which names that phone or nobody) and when the screen is left or
+    pointed at another file, the lifetime the *saved to* line already has.
 
   Three things keep it honest. **The CLI reads it too**, through the one `loadConfig`, so a
   terminal and a window cannot disagree about what a run is configured to do; a resume layers it

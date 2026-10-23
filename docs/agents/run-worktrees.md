@@ -45,6 +45,17 @@ Five things are load-bearing:
   and the two would disagree the first time somebody set `git.branchPrefix` or passed
   `--no-branch`. This decides *where*; that decides *which branch*, inside it.
 
+  **The name can come from `--branch`, and then an existing branch is refused** (#356). The
+  pilot proposes a name on its `start_run` card; `cmdRun` checks it with `git check-ref-format
+  --branch`, records it as `state.requestedBranch` in the first state write, and `runBranch`
+  reads it after `state.branch` and before `branchPrefix + id` - so `VIBE_BRANCH`, the branch
+  `prepareGit` makes and `run_branch` are still one answer. It is a separate field because
+  `state.branch` stays null until the run is on its branch, and three sites read that null as
+  *fresh*. Adopting an existing branch was safe only because a run id is unique; a chosen name is
+  not, so on a fresh run a name that is already a branch - including one checked out in another
+  worktree - is refused by name, in `cmdRun` before anything is allocated and again in the
+  preflight gate before the worktree's ref is made. A resume still adopts its own branch.
+
   **The script is told the branch, and it is still one answer** (#223). It was given
   `VIBE_WORKTREE`, `VIBE_REPO` and `VIBE_RUN_ID` and deliberately no branch, and that left a
   project's own script unable to do the obvious thing — *"we need to be able to have a

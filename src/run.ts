@@ -14,14 +14,14 @@
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import * as log from '@src/log.js';
-import { livenessOf } from '@src/lock.js';
+import { describeLiveness, livenessOf } from '@src/lock.js';
 import { fillAnswers, unanswered } from '@src/answers.js';
 import type { FilledAnswer } from '@src/answers.js';
 import { replayRun } from '@src/replay.js';
 import type {
   CheckpointView,
+  OpenedReplay,
   QuestionRoundSize,
-  Replay,
   RoundCensus,
 } from '@src/replay.js';
 import type { ActivityObservation } from '@src/progress.js';
@@ -46,6 +46,7 @@ import type {
   GateOutcome,
   InFlightTurn,
   PendingFindings,
+  PlanStallEntry,
   RoundClaim,
   RoundRecord,
   RunCheckpointMeta,
@@ -213,6 +214,12 @@ export interface RunInit {
    * what a resume goes through - so one site covers both.
    */
   worktree?: boolean | undefined;
+  /**
+   * The branch `--branch` named (#356), in the first write for the reason
+   * `worktree` is: a run stopped in preflight and resumed must come back asking
+   * for the same name its worktree's ref was made under.
+   */
+  requestedBranch?: string | undefined;
 }
 
 export function createRun(
@@ -246,6 +253,7 @@ export function createRun(
     rateLimitWaits: 0,
     baseSha: null,
     branch: null,
+    ...(init.requestedBranch === undefined ? {} : { requestedBranch: init.requestedBranch }),
     p1Rounds: [],
     verifyRounds: [],
     verifyRound: 0,
@@ -1777,14 +1785,30 @@ export function answerQuestions(
  * cannot be read is simply absent from the reconstruction rather than fatal to
  * it: a run whose critique artifact was deleted still has its turns.
  */
-export function readRunReplay(targetDir: string, runId: string): Replay {
+export function readRunReplay(targetDir: string, runId: string): OpenedReplay {
   const state = loadRun(targetDir, runId);
   const dir = path.join(targetDir, RUNS_DIR, runId);
-  return replayRun(state, {
+  const replay = replayRun(state, {
     checkpoints: readCheckpointViews(dir),
     censuses: readRoundCensuses(dir),
     questions: readQuestionSizes(dir),
   });
+  // The lock, for the one question the record cannot answer (#396): whether a
+  // run with no ending is still being run. `livenessOf` never throws and never
+  // writes, which is what lets it sit on a read - `listRuns` relies on the same.
+  const verdict = livenessOf(dir, state);
+  const gone = verdict.liveness === 'interrupted' || verdict.liveness === 'not-running';
+  return {
+    ...replay,
+    liveness: verdict.liveness,
+    // The lock's own sentence, so the window says what `vibe list` would rather
+    // than a verdict of its own. The status is quoted because it is where the
+    // record stops, and it is the only reason there is no exit to show.
+    lost:
+      replay.exit === null && gone
+        ? `Its record stops at "${state.status}" with no ending, and the lock check says: ${describeLiveness(verdict)}`
+        : null,
+  };
 }
 
 /** One artifact, parsed, or null for every way that can fail. */
@@ -2530,6 +2554,138 @@ export function assessConvergence(
   }
 
   return null;
+}
+
+export interface PlanStallArgs {
+  /** `loop.stallAfter`. Anything but a positive whole number turns detection off. */
+  stallAfter: number;
+  /** Record position of the last stall since a person last steered, or null for none. */
+  lastStall: number | null;
+  /** Ids a person raised. Left out of both the blocking count and the new count. */
+  human: ReadonlySet<string>;
+}
+
+export interface PlanStall {
+  /** Blocking ids at record positions r-2, r-1 and r: the window the rule judged. */
+  counts: number[];
+  /** How many of each were not blocking at any earlier position. */
+  fresh: number[];
+}
+
+/**
+ * Whether the plan loop has stopped converging at its latest round: the count
+ * of blocking findings is not falling and most of them are new (#394).
+ *
+ * `assessConvergence` already stops a long flat run, and in the two archived
+ * runs this was measured from it did - and the person raised the limit and
+ * resumed, six more times in one of them, because "raise the limit" changes
+ * nothing about what the planner does. Its `windowTurnedOver` excuse lets a
+ * flat round through precisely when the ids all changed, which is the shape of
+ * those runs. This asks a different question: is the critic finding *new*
+ * problems faster than old ones are going away? The caller's answer is to ask
+ * the planner to step back, and on a second stall to ask a person.
+ *
+ * Stalled at `r = history.length - 1` when all of these hold:
+ *  1. `stallAfter > 0` and `r >= stallAfter`;
+ *  2. not falling: `count[r] >= count[r-2]` and `count[r] > 0`;
+ *  3. mostly new: `fresh[r-1] + fresh[r]` is strictly more than half of
+ *     `count[r-1] + count[r]`;
+ *  4. a fresh window: `r >= lastStall + 2`, so a step-back gets one full round
+ *     to work before it can be judged.
+ *
+ * **Record positions, not `planRound`.** `guardPlanBudget` throws before
+ * `guardProgress` records a round, and after a resume the consume branch
+ * revises without recording one, so `p1Rounds` can hold fewer entries than
+ * there are `plan-critique-<n>.json` files. The rule is therefore judged on the
+ * last record of the history it is given, and takes no round number. The
+ * archive cannot confirm how often the two differ - each run's `p1Rounds` was
+ * reset when implementation started - so the replay builds one record per
+ * critique file, the case where they agree.
+ *
+ * **Every count comes from `ids`**, de-duplicated and minus `human`, and never
+ * from `record.count`, which includes ids this rule leaves out. A record
+ * written before `ids` existed makes "new" unmeasurable for every later round,
+ * so any such record returns null: fail closed.
+ *
+ * **Human ids are an argument** because a `RoundRecord` has no `raisedBy`. The
+ * caller builds the set from `authorOf(f) === 'human'`; in the plan loop it is
+ * empty today (`raise.ts`, decision 4), and the exclusion states the rule where
+ * it applies rather than relying on that. There is no deferral filter:
+ * `parseFindings` forces `defer` false for P0 and P1, and `blockers()`, which
+ * feeds the record, is P0 or P1.
+ *
+ * "New" is id identity, not claim identity. A critic that reused labels like
+ * `F1` across rounds would undercount it and so never stall - the safe
+ * direction. The archived critics write descriptive slugs.
+ *
+ * Measured by `scripts/replay-plan-stall.mjs` over the run archive: #246-b
+ * first stalls at position 4 and, if the step-back changes nothing, again at 7;
+ * #346 at 4 and 6; no other run stalls at all, and `stallAfter` 2, 3 and 4 give
+ * the same result.
+ *
+ * Pure and exported. `guardProgress` calls it for the plan loop only, before
+ * `assessConvergence`; `stallAction` below decides what a stall does.
+ */
+export function planStall(history: readonly RoundRecord[], args: PlanStallArgs): PlanStall | null {
+  const { stallAfter, lastStall, human } = args;
+  const r = history.length - 1;
+  if (!Number.isInteger(stallAfter) || stallAfter <= 0) return null;
+  // `r >= 2` as well: a `stallAfter` of 1 would otherwise reach for r-2 < 0.
+  if (r < stallAfter || r < 2) return null;
+  if (lastStall !== null && r < lastStall + 2) return null;
+
+  const counts: number[] = [];
+  const fresh: number[] = [];
+  const seen = new Set<string>();
+  for (const record of history) {
+    if (record.ids === undefined) return null;
+    const blocking = [...new Set(record.ids)].filter((id) => !human.has(id));
+    counts.push(blocking.length);
+    fresh.push(blocking.filter((id) => !seen.has(id)).length);
+    for (const id of blocking) seen.add(id);
+  }
+
+  const at = (xs: readonly number[], k: number): number => xs[k] ?? 0;
+  const now = at(counts, r);
+  const notFalling = now > 0 && now >= at(counts, r - 2);
+  // Strictly more than half, kept in integers.
+  const mostlyNew = 2 * (at(fresh, r - 1) + at(fresh, r)) > at(counts, r - 1) + now;
+  if (!notFalling || !mostlyNew) return null;
+  return { counts: counts.slice(r - 2), fresh: fresh.slice(r - 2) };
+}
+
+/**
+ * What the plan loop's stall history allows, as one decision (#394).
+ *
+ * - **`lastStall`** is the position of the latest entry *of any kind*. An
+ *   escalation counts, so whatever a person steered with gets one full round to
+ *   work before it is judged, the same as a step-back.
+ * - **`action`** escalates only when a step-back already sits after the latest
+ *   escalation. So the first stall steps back, the second asks a person, and the
+ *   first stall after a person has steered is a step-back again.
+ */
+export function stallAction(stalls: readonly PlanStallEntry[]): {
+  lastStall: number | null;
+  action: PlanStallEntry['action'];
+} {
+  const last = stalls[stalls.length - 1];
+  let escalated = -1;
+  stalls.forEach((s, i) => {
+    if (s.action === 'escalated') escalated = i;
+  });
+  const steppedBack = stalls.some((s, i) => i > escalated && s.action === 'step-back');
+  return { lastStall: last?.position ?? null, action: steppedBack ? 'escalated' : 'step-back' };
+}
+
+/**
+ * The step-back the next findings revision must carry, or null.
+ *
+ * Read from state rather than handed down in a local, because a resume
+ * re-enters at the consume branch with nothing in hand but `state.json`.
+ */
+export function pendingStepBack(stalls: readonly PlanStallEntry[]): PlanStallEntry | null {
+  const last = stalls[stalls.length - 1];
+  return last !== undefined && last.action === 'step-back' && last.sent !== true ? last : null;
 }
 
 /**

@@ -8,15 +8,21 @@ import {
   RateLimitError,
 } from '@src/claude.js';
 import { Cancelled, cancelRequested, sleepUnlessCancelled } from '@src/cancel.js';
-import { codexTurn } from '@src/codex.js';
+import { codexTurn, OutputCutOffError } from '@src/codex.js';
+import { cutOffNote } from '@src/cutoff.js';
 import type { CodexTurnOptions, CodexTurnResult } from '@src/codex.js';
 import { preserveGateArtifacts, sweepGateArtifacts } from '@src/artifacts.js';
 import {
   applyReproducerOutcomes,
+  applyVotes,
   downgradeInert,
   groundFindings,
+  groundVoteEvidence,
   refusePlaceholderPlan,
 } from '@src/evidence.js';
+import { FIX_SCHEMA, VOTE_SCHEMA } from '@src/schemas.js';
+import { dispositionSummary, settleDispositions } from '@src/dispositions.js';
+import { countBallot, describeVotes, failedBallot, tally } from '@src/vote.js';
 import { describeOutcome, observe } from '@src/reproducer.js';
 import { gateMode } from '@src/gates.js';
 import { moveSection, raisePhase, raiseSection } from '@src/raise.js';
@@ -37,11 +43,16 @@ import {
   modelFor,
   modelSource,
   roleEnabled,
+  readFinders,
+  readVerifiers,
   rolesFor,
+  seatTable,
   slotForRole,
   turnTimeoutMs,
 } from '@src/roles.js';
-import type { Access, Role, RoleSpec, RoleTable } from '@src/roles.js';
+import type { Access, FinderEntry, Role, RoleSpec, RoleTable, VerifierEntry } from '@src/roles.js';
+import { mergeAcrossFinders } from '@src/finder-merge.js';
+import type { FinderReport } from '@src/finder-merge.js';
 import { claudeMcpDefinitions, resolveClaudeGrants } from '@src/mcp.js';
 import {
   clearSlotFork,
@@ -49,6 +60,7 @@ import {
   markSlotStarted,
   noteSlotForkAttempt,
   noteSlotRegistered,
+  perTurnSlot,
   recordSlotOccupancy,
   recoverDeadSlot,
   slotContinuity,
@@ -70,7 +82,9 @@ import {
   listRuns,
   measuredRatio,
   p1Signature,
+  pendingStepBack,
   persistenceNotice,
+  planStall,
   readArtifact,
   recordAndSay,
   recordEvent,
@@ -81,6 +95,7 @@ import {
   stageEvent,
   resumePhase,
   saveState,
+  stallAction,
   takePendingFindings,
   tryRecordEvent,
   verificationCaveat,
@@ -94,19 +109,31 @@ import {
   reconcileQuestionRecords,
   recordSuppressed,
 } from '@src/questions.js';
-import { hasFindingShape, isReportBasename } from '@src/stored.js';
+import {
+  hasFindingShape,
+  isDeferrable,
+  isReportBasename,
+  isToAddress,
+  isUnaddressed,
+  movedByVote,
+} from '@src/stored.js';
 import {
   authorOf,
   blockers as blockingFindings,
   gate,
   parseAnswers,
   parseFindings,
+  parseFixOutput,
   parseTestVerdicts,
   parsePlan,
+  parseVote,
   readEvidence,
   reproducerOutcomesOf,
   reproductionAt,
+  SEVERITY_RANK,
+  severityChangesOf,
 } from '@src/validate.js';
+import type { FixOutput } from '@src/validate.js';
 import {
   attachVerdicts,
   judgeChanges,
@@ -147,23 +174,27 @@ import {
 import type { VerifyResult } from '@src/verify.js';
 import type {
   Answer,
+  Ballot,
   CheckpointCommitNote,
   ClaudeTurnResult,
   Config,
   Finding,
   FindingsReport,
   FileChange,
+  FixDispositions,
   TestChanges,
+  UnaddressedFinding,
   GateOutcome,
   OpenQuestion,
   ReproducerOutcome,
   RoundRecord,
   Plan,
+  PlanStallEntry,
   RunStart,
   RunState,
   RunSummary,
-  Severity,
   TurnActivity,
+  Votes,
 } from '@src/types.js';
 
 // The accounting vocabulary lives in @src/charge.js, a leaf: the session
@@ -189,6 +220,7 @@ export type { ExitCode, TurnCharge, TurnSpend } from '@src/charge.js';
 // One name for both in the file that records the first would be the confusion
 // the pair exists to remove (#131).
 import { describeEnding as describeChildEnding, endingOf, isAbnormal } from '@src/proc.js';
+import { reviewStandardsFor } from '@src/review-md.js';
 import { workDirOf } from '@src/worktree.js';
 import { formatWork, withWorkProgress, workData } from '@src/work.js';
 
@@ -282,6 +314,87 @@ function recordReport(state: RunState, name: string, text: string): void {
   artifact(state, name, text);
   state.lastReport = name;
   saveState(state);
+}
+
+/**
+ * A review fix turn's output, read once (#393): the report to record, and the
+ * dispositions when they could be read.
+ *
+ * `readStructured` throws for a Claude turn whose text is not JSON, and for a
+ * Codex writer turn #407 returned as `structured: null`; `parseFixOutput`
+ * throws for JSON that is not `FIX_SCHEMA`'s shape. Every one of those is the
+ * same outcome and none of them fails the turn - the fixer's edits are already
+ * in the tree - so the text becomes the report exactly as it always did, and
+ * the round records no dispositions at all.
+ */
+type FixRead = { report: string; parsed: FixOutput } | { report: string; parsed: null; error: string };
+
+function readFixOutput(outcome: TurnOutcome): FixRead {
+  try {
+    const parsed = parseFixOutput(readStructured(outcome));
+    return { report: parsed.report, parsed };
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    return { report: outcome.text, parsed: null, error: message.split(/\r?\n/)[0] ?? '' };
+  }
+}
+
+/**
+ * The round's dispositions on disk and in the event log, or the warning that
+ * there are none (#393).
+ *
+ * Called by both review fix sites after the report and *before*
+ * `clearPendingFindings`, so a round is never consumed without its record. A
+ * process that dies in between resumes the same round under the same label
+ * (`fixInFlight`) and records it again. That retry is the round's record of
+ * record: the artifact is rewritten, an unreadable retry removes the earlier
+ * attempt's artifact, and the scorecard and the window read the last event per
+ * round.
+ *
+ * Unreadable is never `not-addressed`. That would turn "this run could not read
+ * the answer" into "the fixer ignored every finding", which is a number nobody
+ * observed. It records its own event so the scorecard can count it.
+ *
+ * Returns what it recorded, or null for an unreadable round, so the final round
+ * can say what it left of the non-blocking findings it carried (#425).
+ */
+function recordDispositions(
+  state: RunState,
+  read: FixRead,
+  findings: readonly Finding[],
+  label: string,
+): FixDispositions | null {
+  const round = state.reviewRound;
+  const answers = round - 1;
+  if (read.parsed === null) {
+    recordAndSay(
+      state,
+      'warn',
+      'fix_dispositions_unreadable',
+      `${label}: the fixer's dispositions could not be read, so none are recorded for this round - ` +
+        'its report is kept as written',
+      { round, label, answers, reason: 'error' in read ? read.error : '' },
+    );
+    // A retried round whose earlier attempt was readable must not keep that
+    // attempt's file beside this attempt's warning.
+    removeArtifact(state, `fix-dispositions-${round}.json`);
+    return null;
+  }
+  const settled = settleDispositions(findings, read.parsed.dispositions, {
+    round,
+    label,
+    answers,
+    reviewSeat: state.reviewSeat,
+  });
+  artifact(state, `fix-dispositions-${round}.json`, settled);
+  recordAndSay(
+    state,
+    settled.dropped.length + settled.duplicates.length > 0 ? 'warn' : 'info',
+    'fix_dispositions',
+    dispositionSummary(settled),
+    { ...settled },
+  );
+  return settled;
 }
 
 /**
@@ -725,6 +838,11 @@ async function runPhases(
           // critic never saw is not an approved criterion.
           state.acceptanceCriteria,
           plan.out_of_scope,
+          // Re-filtered for the reason `declined` is, and gated on the effective
+          // config rather than on what was stored (#425): a resume layers the
+          // project file over the run's settings, so a run approved with the
+          // setting on and resumed with it off must get the old prompt.
+          toAddress(cfg, state.planNonBlocking ?? []),
           // An approved plan can predate the answers to its advisory questions
           // (#277); the implementer is told them, and that they win.
         ) + P.advisoryAnswers(state.advisoryAnswers, 'implementer'),
@@ -749,6 +867,10 @@ async function runPhases(
     // on and a stalled loop reads as a healthy one.
     state.p1Rounds = [];
     state.verifyRounds = [];
+    // With `p1Rounds`, because its positions point into it (#394); and the
+    // answer marker with them, because it only ever describes the plan loop.
+    delete state.planStalls;
+    delete state.planRevisedByAnswer;
     // Below the resets, and deliberately: a snapshot taken above them carries
     // the PLANNING critique history into a state whose phase is already
     // `reviewing`, so a fork resuming there would feed planning rounds to the
@@ -869,6 +991,100 @@ function sayFindings(
   );
 }
 
+/**
+ * Approve the plan of record, on the gate's decision over `findings`.
+ *
+ * The one approval path (#394): the critique that passes the gate and the
+ * resume on which a person demoted enough findings to pass it both come here,
+ * so an accepted plan carries, declines and freezes its bar exactly as a passed
+ * one does. Moved out of `planPhase` unchanged; `extra` is spread last into the
+ * `plan_approved` data and the gate pass passes none. #425's hand-off of the
+ * non-blocking findings to the implementer lives here for the same reason, so
+ * an acceptance hands them on exactly as a pass does.
+ */
+function approvePlan(
+  state: RunState,
+  cfg: Config,
+  plan: Plan,
+  findings: readonly Finding[],
+  decision: ReturnType<typeof gate>,
+  extra: Record<string, unknown> = {},
+): void {
+  // Carried, not forgiven. The implementation is told about these so the
+  // phase that can actually settle them does.
+  if (decision.tolerated.length > 0) state.carried = decision.tolerated;
+  // The rest of what the critic raised that is still work (#425): every P2
+  // and P3 that is not deferrable, handed to the implementer rather than to
+  // a further revision - the owner's decision, so the plan loop's round count
+  // does not move. No turn is bought here, so P3s ride along with P2s.
+  //
+  // On a person's acceptance (#394) this includes the P1s they demoted: each
+  // is now a P2 with a `by: 'human'` move and no guard's `downgraded`, so it is
+  // treated as any approved P2 is. Accepting a plan says the finding need not
+  // block it, not that it is no longer work.
+  const nonBlocking = toAddress(cfg, findings);
+  // The sentence, chosen before it is said, because since #223 saying it and
+  // recording it are one call and the call sits below the two assignments
+  // its data reads. The two branches and their wording are unchanged, and so
+  // is the order they reach a terminal in: this line, then the `~` list.
+  // With findings to hand on, each says how many go to the implementer.
+  const approved =
+    decision.tolerated.length > 0
+      ? `Plan accepted with ${decision.tolerated.length} P1(s) carried into implementation - ` +
+        decision.tolerated.map((f) => f.id).join(', ') +
+        (nonBlocking.length > 0
+          ? `; ${nonBlocking.length} non-blocking finding(s) go to the implementer`
+          : '')
+      : `Plan approved - ${findings.length} non-blocking finding(s)` +
+        (nonBlocking.length > 0 ? `; ${nonBlocking.length} go to the implementer` : '');
+  // The one round whose findings reach nobody otherwise: a revising round
+  // hands its deferrals to the planner through `pendingFindings`, and this
+  // one is about to clear them. Recorded, not acted on - `defer` decides
+  // what a later prompt is told, never whether a turn happens. Assigned
+  // unconditionally so an approving round that declined nothing cannot
+  // leave an earlier round's value standing, and written on the same state
+  // save that clears the pending findings below.
+  state.declined = findings.filter(isDeferrable);
+  // For the same reason and on the same save (#425): an approving round with
+  // nothing to hand on removes the field rather than leaving an earlier
+  // round's standing - and removes rather than empties it, so a run with
+  // `loop.fixNonBlocking` off writes the state.json it always did.
+  if (nonBlocking.length > 0) state.planNonBlocking = nonBlocking;
+  else delete state.planNonBlocking;
+  // The bar, frozen at the instant it was approved. A copy, not a view:
+  // replacing `state.plan` is not the only way its criteria can move - the
+  // array and each criterion are mutable, and anything later holding the
+  // same objects would edit an approved bar in place. Every field of a
+  // criterion is a primitive, so a spread per entry is a full clone.
+  //
+  // `undefined` is preserved rather than collapsed to `[]`: a plan stored
+  // before this field existed never stated a bar, and inventing an empty
+  // one would put a claim in its mouth. Assigned unconditionally for the
+  // reason `declined` is - an approving round must not leave an earlier
+  // round's bar standing - and on the same state save.
+  state.acceptanceCriteria = plan.acceptance_criteria?.map((c) => ({ ...c }));
+  recordAndSay(state, 'ok', 'plan_approved', approved, {
+    findings: findings.length,
+    carried: decision.tolerated.map((f) => f.id),
+    declined: state.declined.map((f) => f.id),
+    // Present only when there is something to hand on, so a plan approved
+    // with nothing to address records the data it always did (#425).
+    ...(nonBlocking.length === 0 ? {} : { nonBlocking: nonBlocking.map((f) => f.id) }),
+    // Present only when a bar was recorded. `?? []` here would log an
+    // explicit empty bar for a legacy plan that never claimed one, which is
+    // the absent-as-empty collapse the rest of this field refuses.
+    ...(state.acceptanceCriteria === undefined
+      ? {}
+      : { criteria: state.acceptanceCriteria.map((c) => c.id) }),
+    ...extra,
+  });
+  for (const f of decision.tolerated) log.info(`  ~ ${f.title}`);
+  // An approved plan has nothing outstanding: what the gate tolerated
+  // travels on `state.carried` into implementation, and leaving these set
+  // would have a resume revise a plan the critic just passed.
+  clearPendingFindings(state);
+}
+
 /** Plan, resolve questions, and critique until the critic raises no P1s. */
 async function planPhase(
   state: RunState,
@@ -947,6 +1163,36 @@ async function planPhase(
     // at the critique instead is what cost 7.5M tokens to learn nothing.
     const carried = takePendingFindings(state, 'plan');
     if (carried !== null) {
+      // Accepting on a person's demotion (#394). A pending plan finding whose
+      // severity a person moved means a move since the last critique - each
+      // critique replaces these - and the real gate over what is now pending
+      // decides, so a tolerated P1 is carried exactly as on any approval. Read
+      // from state, never from what this process remembers, so a death between
+      // the move and here changes nothing. A plain resume moves nothing and
+      // revises as it always did.
+      const moved = carried.some((f) => severityChangesOf(f).some((c) => c.by === 'human'));
+      if (moved && state.planRevisedByAnswer === true) {
+        // An answer wins: approving now would approve a plan revised against
+        // it that no critic has read. Said whether or not the gate would have
+        // passed, because the person who demoted and also answered is owed the
+        // sentence either way - a partial demotion with an answer is the same
+        // combination, and staying silent there left them guessing (review of
+        // #394 part 2).
+        log.info(
+          'Your severity changes were not taken as accepting the plan, because an answer was ' +
+            'also given - revising against the answer and the findings, then critiquing.',
+        );
+      } else if (moved) {
+        const accepted = gate(carried, cfg.loop.p1Tolerance);
+        if (accepted.pass) {
+          log.info(
+            'A person changed a severity since the last critique and the gate now passes - ' +
+              'approving the plan without another critique.',
+          );
+          approvePlan(state, cfg, plan, carried, accepted, { byPerson: true });
+          break;
+        }
+      }
       if (firstPass) {
         log.info(
           `Revising against ${carried.length} finding(s) carried across the stop - not re-critiquing.`,
@@ -1135,54 +1381,7 @@ async function planPhase(
     // the news was bad and nothing while it was good.
     sayFindings('plan', critique.findings, decision, cfg.loop.p1Tolerance);
     if (decision.pass) {
-      // Carried, not forgiven. The implementation is told about these so the
-      // phase that can actually settle them does.
-      if (decision.tolerated.length > 0) state.carried = decision.tolerated;
-      // The sentence, chosen before it is said, because since #223 saying it and
-      // recording it are one call and the call sits below the two assignments
-      // its data reads. The two branches and their wording are unchanged, and so
-      // is the order they reach a terminal in: this line, then the `~` list.
-      const approved =
-        decision.tolerated.length > 0
-          ? `Plan accepted with ${decision.tolerated.length} P1(s) carried into implementation - ` +
-            decision.tolerated.map((f) => f.id).join(', ')
-          : `Plan approved - ${critique.findings.length} non-blocking finding(s)`;
-      // The one round whose findings reach nobody otherwise: a revising round
-      // hands its deferrals to the planner through `pendingFindings`, and this
-      // one is about to clear them. Recorded, not acted on - `defer` decides
-      // what a later prompt is told, never whether a turn happens. Assigned
-      // unconditionally so an approving round that declined nothing cannot
-      // leave an earlier round's value standing, and written on the same state
-      // save that clears the pending findings below.
-      state.declined = critique.findings.filter(isDeferrable);
-      // The bar, frozen at the instant it was approved. A copy, not a view:
-      // replacing `state.plan` is not the only way its criteria can move - the
-      // array and each criterion are mutable, and anything later holding the
-      // same objects would edit an approved bar in place. Every field of a
-      // criterion is a primitive, so a spread per entry is a full clone.
-      //
-      // `undefined` is preserved rather than collapsed to `[]`: a plan stored
-      // before this field existed never stated a bar, and inventing an empty
-      // one would put a claim in its mouth. Assigned unconditionally for the
-      // reason `declined` is - an approving round must not leave an earlier
-      // round's bar standing - and on the same state save.
-      state.acceptanceCriteria = plan.acceptance_criteria?.map((c) => ({ ...c }));
-      recordAndSay(state, 'ok', 'plan_approved', approved, {
-        findings: critique.findings.length,
-        carried: decision.tolerated.map((f) => f.id),
-        declined: state.declined.map((f) => f.id),
-        // Present only when a bar was recorded. `?? []` here would log an
-        // explicit empty bar for a legacy plan that never claimed one, which is
-        // the absent-as-empty collapse the rest of this field refuses.
-        ...(state.acceptanceCriteria === undefined
-          ? {}
-          : { criteria: state.acceptanceCriteria.map((c) => c.id) }),
-      });
-      for (const f of decision.tolerated) log.info(`  ~ ${f.title}`);
-      // An approved plan has nothing outstanding: what the gate tolerated
-      // travels on `state.carried` into implementation, and leaving these set
-      // would have a resume revise a plan the critic just passed.
-      clearPendingFindings(state);
+      approvePlan(state, cfg, plan, critique.findings, decision);
       break;
     }
 
@@ -1190,11 +1389,20 @@ async function planPhase(
     for (const f of stoppers) log.info(`  - [${f.severity}] ${f.title}`);
 
     guardPlanBudget(state, cfg, stoppers);
+    // Ids a person raised, from this critique and from what the run carries.
+    // Empty in the plan loop today (`raise.ts`, decision 4); passed anyway so
+    // the stall rule's exclusion holds where it is stated (#394).
+    const human = new Set(
+      [...critique.findings, ...(takePendingFindings(state, 'plan') ?? [])]
+        .filter((f) => authorOf(f) === 'human')
+        .map((f) => f.id),
+    );
     guardProgress(cfg, state.p1Rounds, critique.findings, stoppers, {
       cap: cfg.loop.maxPlanRounds,
       round: state.planRound + 1,
       capName: 'maxPlanRounds',
       deadlockMsg: 'the planner and reviewer are deadlocked',
+      stall: { state, human },
     });
 
     // Back to the top rather than revising here: the findings this round bought
@@ -1237,6 +1445,17 @@ async function reviewPhase(
         );
       }
       firstPass = false;
+      // A final fix round that died inside its turn is resumed as itself.
+      const inFlight = state.fixInFlight;
+      if (inFlight?.final === true && inFlight.round === state.reviewRound) {
+        const tolerated = Array.isArray(state.outstanding) ? state.outstanding.filter(hasFindingShape) : [];
+        // From the ids the attempt persisted, not from today's config: this is
+        // that round, already started and paid for, resumed as itself (#425).
+        const ids = new Set(Array.isArray(state.finalFixNonBlocking) ? state.finalFixNonBlocking : []);
+        const nonBlocking = carried.filter((f) => ids.has(f.id));
+        await runFinalFix(state, cfg, cwd, plan, carried, tolerated, nonBlocking, roles, turns, true);
+        continue;
+      }
       await runFixRound(state, cfg, cwd, carried, roles, turns, host);
       // No OUTSTANDING.md here, even when these were the final round's
       // findings: the artifact says the fix ran *and verification still
@@ -1325,8 +1544,20 @@ async function reviewPhase(
       // instead: the run may still finish, but not while asserting a pass
       // nobody observed (#47).
       const caveat = verificationCaveat(state);
-      if (caveat === null) log.ok('Carried findings addressed and verification still passes.');
-      else log.warn(`Carried findings addressed, but ${caveat}.`);
+      // Says what the round worked on when it carried non-blocking findings
+      // (#425); a round for tolerated P1s alone keeps its sentence.
+      const nb = Array.isArray(state.finalFixNonBlocking) ? state.finalFixNonBlocking : [];
+      if (nb.length === 0) {
+        if (caveat === null) log.ok('Carried findings addressed and verification still passes.');
+        else log.warn(`Carried findings addressed, but ${caveat}.`);
+      } else {
+        const p1s = Array.isArray(state.outstanding) ? state.outstanding.filter(hasFindingShape).length : 0;
+        const what =
+          `The final fix round worked on ${p1s > 0 ? `${p1s} carried P1(s) and ` : ''}` +
+          `${nb.length} non-blocking finding(s)`;
+        if (caveat === null) log.ok(`${what}, and verification still passes.`);
+        else log.warn(`${what}, but ${caveat}.`);
+      }
       break;
     }
 
@@ -1339,19 +1570,27 @@ async function reviewPhase(
     // Inside the callback, for the reason given at the critique call site: a
     // held budget escalation must not cost the run the record of the review it
     // paid for.
-    const review = await withConcurrentCompaction(
+    const { found: review, unconfirmedP0 } = await withConcurrentCompaction(
       state,
       cfg,
       async () => {
-        const found = await runReview(state, cfg, cwd, plan, roles, turns);
+        const { report: found, unconfirmedP0 } = await runReview(state, cfg, cwd, plan, roles, turns);
         artifact(state, `code-review-${state.reviewRound}.json`, found);
+        // Who took this round's own turn, saved by `recordPendingFindings`
+        // below (#393). The fix that answers this round credits its findings
+        // to this seat, and a resume may change `roles.reviewer` in between.
+        state.reviewSeat = {
+          round: state.reviewRound,
+          provider: roles.reviewer.provider,
+          model: roles.reviewer.model ?? 'default',
+        };
         collectDeferred(state, found.findings);
         writeFollowUps(state, plan);
         // In here for the same reason as the artifact, and as in the plan
         // phase: what the run just paid 15M tokens for must survive a stop
         // between this turn and the fix that answers it.
         recordPendingFindings(state, 'review', found.findings);
-        return found;
+        return { found, unconfirmedP0 };
       },
       turns.claude,
       'reviewer',
@@ -1361,16 +1600,65 @@ async function reviewPhase(
     const decision = gate(review.findings, cfg.loop.p1Tolerance);
     const stoppers = blockingFindings(review.findings);
     sayFindings('review', review.findings, decision, cfg.loop.p1Tolerance);
+    // `review.unconfirmedP0: "halt"` (#388 Part C): after the artifact and the
+    // pending findings are written, never before - the stop is about a record
+    // that has to exist. The P0 is not moved. A resume with no answer carries it
+    // to the fix round, blocking, and casts no vote again: the votes in the
+    // artifact are the record. A person who disagrees moves it with the #142
+    // block NEEDS-INPUT.md already renders for every carried finding.
+    if (unconfirmedP0.length > 0) {
+      throw new Escalation(
+        EXIT.NEEDS_HUMAN,
+        `The review verifiers did not confirm ${unconfirmedP0.length} P0 finding(s), and ` +
+          'review.unconfirmedP0 is "halt". Each is still P0. Leave it alone and it keeps blocking: ' +
+          'the resume sends it to the fix round. To demote one, fill in its block under ' +
+          '"Change a severity" below, then resume.',
+        null,
+        unconfirmedP0,
+      );
+    }
     if (decision.pass) {
-      if (decision.tolerated.length === 0) {
-        recordAndSay(
-          state,
-          'ok',
-          'review_approved',
-          `Review clean - ${review.findings.length} non-blocking finding(s)`,
-          { findings: review.findings.length },
-        );
+      // What the gate let through that is still work (#425). Run 20261022-224848
+      // said "Review clean" over a REVISE verdict naming two P2s in the task's
+      // own files, and nothing ever read them again.
+      const nonBlocking = toAddress(cfg, review.findings);
+      if (decision.tolerated.length === 0 && !nonBlocking.some((f) => f.severity === 'P2')) {
+        if (nonBlocking.length === 0) {
+          recordAndSay(
+            state,
+            'ok',
+            'review_approved',
+            `Review clean - ${review.findings.length} non-blocking finding(s)`,
+            { findings: review.findings.length },
+          );
+        } else {
+          // P3s only. No turn is bought for them: the fix prompt tells the fixer
+          // to skip P3s unless incidental to required work, and there is none.
+          // So they are recorded, and the sentence no longer says clean.
+          //
+          // The findings are consumed on the SAME write that records them, and
+          // before the approval is said: a stop between the approval and a later
+          // clear would leave them pending, and the resume would hand them to
+          // `runFixRound` - a write turn this branch exists not to buy.
+          state.unaddressed = nonBlocking.map((f) => ({
+            finding: f,
+            outcome: 'not-attempted',
+            reason: '',
+          }));
+          state.pendingFindings = null;
+          saveState(state);
+          writeFollowUps(state, plan);
+          recordAndSay(
+            state,
+            'ok',
+            'review_approved',
+            `Review approved - ${nonBlocking.length} P3 finding(s) recorded in FOLLOW-UPS.md, ` +
+              'no fix round run',
+            { findings: review.findings.length, followUps: nonBlocking.map((f) => f.id) },
+          );
+        }
         // Nothing blocking came back, so there is nothing for a resume to fix.
+        // (Already cleared above on the P3-only road; clearing again is a no-op.)
         clearPendingFindings(state);
         break;
       }
@@ -1380,94 +1668,25 @@ async function reviewPhase(
       // reviewer found - the alternative was to finish with a known defect
       // untouched, which is not what "move on" should buy.
       //
+      // Since #425 a P2 to address buys the same round, and tolerated P1s plus
+      // P2s are still one round, not two. The fixer judges each finding under
+      // #228's scope rule in `fixPrompt`, unchanged; what it leaves goes to
+      // FOLLOW-UPS.md rather than being forced.
+      //
       // The result is deliberately not re-reviewed: that is what bounds this.
       // Another review round could raise something new and the loop would never
       // end, which is the situation the tolerance exists to escape.
-      state.reviewRound += 1;
-      state.finalFixDone = true;
-      state.outstanding = decision.tolerated;
-      saveState(state);
-      beginReport(state);
-
-      announceFixRound(state);
-      log.step(
-        `Incorporating ${decision.tolerated.length} carried P1(s), then finishing: ` +
-          decision.tolerated.map((f) => f.id).join(', '),
-        {
-          id: 'turn_started',
-          data: {
-            role: 'implementer',
-            kind: 'final-fix',
-            carried: decision.tolerated.map((f) => f.id),
-          },
-        },
-      );
-      for (const f of decision.tolerated) log.info(`  ~ ${f.title}`);
-
-      const finalFix = await writeTurn(
+      await runFinalFix(
         state,
         cfg,
         cwd,
-        {
-          role: 'implementer',
-          prompt: P.fixPrompt(review.findings, state.reviewRound, state.acceptanceCriteria, plan),
-          planInPrompt: true,
-          cwd,
-          label: `final-fix-${state.reviewRound}`,
-        },
-        turns,
+        plan,
+        review.findings,
+        decision.tolerated,
+        nonBlocking,
         roles,
-      );
-      recordReport(state, `fix-report-${state.reviewRound}.md`, finalFix.text);
-      // The moment the fix stops being worth buying again, and therefore the
-      // moment to drop the carry: the turn is done and its report is on disk.
-      // Everything after this - the record, three git invocations - can fail
-      // without making a second fix round useful, and the record is not lost by
-      // going first: `recoverOutstanding` rebuilds it from `state.outstanding`
-      // once the gate has passed. Same order as `runFixRound`.
-      clearPendingFindings(state);
-
-      // After the fix and before the artifact that describes it. This is the
-      // round the loop deliberately never reviews again, so OUTSTANDING.md has
-      // always had to say the findings were "worked on, and nobody has confirmed
-      // they are gone" - and for a finding that carried a reproducer, running it
-      // once more is the only thing that has ever been able to replace that
-      // sentence with a fact (#113).
-      const settled = await confirmFixed(state, cfg, cwd, roles, decision.tolerated);
-      state.outstanding = settled;
-      saveState(state);
-
-      // Written `pending`: the gate has not run yet at this point in the loop,
-      // so the file cannot say how it went. `finaliseOutstanding` rewrites it
-      // from the completion branch once it has.
-      const file = artifact(state, 'OUTSTANDING.md', renderOutstanding(state, settled, 'pending'));
-      log.info(`Carried findings and what was done about them: ${path.relative(cwd, file)}`);
-
-      writeCheckpoint(
-        state,
-        'final-fix',
-        await maybeCommit(cfg, cwd, `vibe: address carried review findings (final round)`),
-      );
-      // No hold here, and it is the one boundary that lost one (#140). The
-      // checkpoint stays - a fork of this point is worth having - but `final-fix`
-      // has no row in the matrix, so `holdAt` could only ever have returned. Two
-      // lines below is `continue`, which takes the loop back to the top so the
-      // verification gate proves this fix broke nothing; stopping in between is
-      // the same decision with less information behind it. See `UNGATEABLE`.
-      // Said as well as recorded (#223). The clean branch above has announced
-      // itself since #133 and this one never did, so the two ways a review can
-      // approve looked different to a window for no reason anybody chose: one
-      // arrived as `review_approved`, the other as silence.
-      recordAndSay(
-        state,
-        'ok',
-        'review_approved',
-        `Review approved with ${decision.tolerated.length} carried finding(s) fixed - ` +
-          decision.tolerated.map((f) => f.id).join(', '),
-        {
-          findings: review.findings.length,
-          carriedAndFixed: decision.tolerated.map((f) => f.id),
-        },
+        turns,
+        false,
       );
       // Back to the top once, so the gate proves the final fix broke nothing.
       continue;
@@ -1519,6 +1738,222 @@ function announceFixRound(state: RunState): void {
 }
 
 /**
+ * The carried-P1 final fix round: the turn, its record, the reproducers run
+ * once more, OUTSTANDING.md, and the commit.
+ *
+ * A function rather than the tail of the review branch because the loop now
+ * reaches it from two directions, as `runFixRound` is reached: the review that
+ * tolerated the findings, and a resume whose process died inside this round
+ * (#393). Before that second road existed, such a resume took the ordinary fix
+ * path - a new round number, a `fix-<n>` label, no `confirmFixed` - so the round
+ * the loop never reviews again lost the one check that replaces "nobody has
+ * confirmed they are gone" with a fact.
+ *
+ * `resumed` is that second road: the round, `finalFixDone` and
+ * `state.outstanding` were already persisted by the attempt that died, so they
+ * are reused rather than bought again.
+ */
+async function runFinalFix(
+  state: RunState,
+  cfg: Config,
+  cwd: string,
+  plan: Plan,
+  findings: readonly Finding[],
+  tolerated: readonly Finding[],
+  nonBlocking: readonly Finding[],
+  roles: RoleTable,
+  turns: AgentTurns,
+  resumed: boolean,
+): Promise<void> {
+  if (!resumed) {
+    state.reviewRound += 1;
+    state.finalFixDone = true;
+    state.outstanding = [...tolerated];
+    // The second witness, persisted with the first (#425). Absent for a round
+    // carried for P1s alone, so that round's state is what it always was.
+    if (nonBlocking.length > 0) state.finalFixNonBlocking = nonBlocking.map((f) => f.id);
+    else delete state.finalFixNonBlocking;
+  }
+  // Before the turn, so a process that dies inside it resumes this round as
+  // itself rather than as the next ordinary fix (#393). See `fixInFlight`.
+  state.fixInFlight = { round: state.reviewRound, final: true };
+  saveState(state);
+  beginReport(state);
+
+  announceFixRound(state);
+  // Says what it carries and counts each (#425). `carried` keeps meaning the
+  // P1s; a round for P1s alone keeps its line and data byte for byte.
+  log.step(
+    nonBlocking.length === 0
+      ? `Incorporating ${tolerated.length} carried P1(s), then finishing: ` +
+          tolerated.map((f) => f.id).join(', ')
+      : `Incorporating ${tolerated.length > 0 ? `${tolerated.length} carried P1(s) and ` : ''}` +
+          `${nonBlocking.length} non-blocking finding(s), then finishing: ` +
+          [...tolerated, ...nonBlocking].map((f) => f.id).join(', '),
+    {
+      id: 'turn_started',
+      data: {
+        role: 'implementer',
+        kind: 'final-fix',
+        carried: tolerated.map((f) => f.id),
+        ...(nonBlocking.length === 0 ? {} : { nonBlocking: nonBlocking.map((f) => f.id) }),
+      },
+    },
+  );
+  for (const f of [...tolerated, ...nonBlocking]) log.info(`  ~ ${f.title}`);
+
+  const finalFix = await writeTurn(
+    state,
+    cfg,
+    cwd,
+    {
+      role: 'implementer',
+      prompt: P.fixPrompt(findings, state.reviewRound, state.acceptanceCriteria, plan, true),
+      planInPrompt: true,
+      cwd,
+      label: `final-fix-${state.reviewRound}`,
+      jsonSchema: FIX_SCHEMA,
+    },
+    turns,
+    roles,
+  );
+  const finalRead = readFixOutput(finalFix);
+  recordReport(state, `fix-report-${state.reviewRound}.md`, finalRead.report);
+  // The moment the fix stops being worth buying again, and therefore the
+  // moment to drop the carry: the turn is done and its report is on disk.
+  // Everything after this - the record, three git invocations - can fail
+  // without making a second fix round useful, and the record is not lost by
+  // going first: `recoverOutstanding` rebuilds it from `state.outstanding`
+  // once the gate has passed. Same order as `runFixRound`.
+  // Before the findings are consumed, as in `runFixRound`, and before
+  // `confirmFixed`, so the carried P1s' `at: 'final-fix'` verdict lands on
+  // `state.outstanding` beside a record that already exists.
+  const dispositions = recordDispositions(state, finalRead, findings, `final-fix-${state.reviewRound}`);
+  // What the round left of the non-blocking findings it carried, recorded
+  // beside the dispositions and before the findings are consumed, so a stop
+  // after the turn still leaves it and a resumed round writes it again (#425).
+  // Everything the fixer did not mark `fixed` goes in, with its reason, so a
+  // rebuttal can be judged by a person; an unreadable answer puts every one in
+  // as unreadable, never as not addressed.
+  const left = leftBy(nonBlocking, dispositions);
+  if (nonBlocking.length > 0) {
+    state.unaddressed = left;
+    saveState(state);
+    writeFollowUps(state, plan);
+  }
+  delete state.fixInFlight;
+  clearPendingFindings(state);
+
+  // After the fix and before the artifact that describes it. This is the
+  // round the loop deliberately never reviews again, so OUTSTANDING.md has
+  // always had to say the findings were "worked on, and nobody has confirmed
+  // they are gone" - and for a finding that carried a reproducer, running it
+  // once more is the only thing that has ever been able to replace that
+  // sentence with a fact (#113).
+  // Over the tolerated P1s only: the non-blocking findings are recorded through
+  // `recordDispositions` above, and with no P1s this runs nothing (#425).
+  const settled = await confirmFixed(state, cfg, cwd, roles, tolerated);
+  state.outstanding = settled;
+  saveState(state);
+
+  // Written `pending`: the gate has not run yet at this point in the loop,
+  // so the file cannot say how it went. `finaliseOutstanding` rewrites it
+  // from the completion branch once it has.
+  //
+  // Only when P1s were carried (#425): the document says the review raised P1s
+  // within `loop.p1Tolerance`, and a round run for P2s alone would have it say
+  // "raised 0 P1 finding(s)". The gate-time rewrites already do nothing on an
+  // empty `outstanding`.
+  if (tolerated.length > 0) {
+    const file = artifact(state, 'OUTSTANDING.md', renderOutstanding(state, settled, 'pending'));
+    log.info(`Carried findings and what was done about them: ${path.relative(cwd, file)}`);
+  }
+
+  writeCheckpoint(
+    state,
+    'final-fix',
+    await maybeCommit(cfg, cwd, `vibe: address carried review findings (final round)`),
+  );
+  // No hold here, and it is the one boundary that lost one (#140). The
+  // checkpoint stays - a fork of this point is worth having - but `final-fix`
+  // has no row in the matrix, so `holdAt` could only ever have returned. Two
+  // lines below is `continue`, which takes the loop back to the top so the
+  // verification gate proves this fix broke nothing; stopping in between is
+  // the same decision with less information behind it. See `UNGATEABLE`.
+  // Said as well as recorded (#223). The clean branch above has announced
+  // itself since #133 and this one never did, so the two ways a review can
+  // approve looked different to a window for no reason anybody chose: one
+  // arrived as `review_approved`, the other as silence.
+  if (nonBlocking.length === 0) {
+    recordAndSay(
+      state,
+      'ok',
+      'review_approved',
+      `Review approved with ${tolerated.length} carried finding(s) fixed - ` +
+        tolerated.map((f) => f.id).join(', '),
+      {
+        findings: findings.length,
+        carriedAndFixed: tolerated.map((f) => f.id),
+      },
+    );
+    return;
+  }
+  // The one `review_approved` of a round that also carried non-blocking
+  // findings (#425): the pass branch did not say one, because the cockpit reads
+  // it as the run ending. Counted from the dispositions record, and it names
+  // FOLLOW-UPS.md only when something was put there.
+  const fixed = dispositions === null ? [] : nonBlocking.filter((f) => !left.some((l) => l.finding.id === f.id));
+  const parts = [
+    ...(tolerated.length > 0
+      ? [`${tolerated.length} carried P1(s) fixed - ${tolerated.map((f) => f.id).join(', ')}`]
+      : []),
+    dispositions === null
+      ? `the fixer's answer about ${nonBlocking.length} non-blocking finding(s) could not be read`
+      : `${fixed.length} of ${nonBlocking.length} non-blocking finding(s) fixed`,
+    ...(left.length > 0 ? [`${left.length} recorded in FOLLOW-UPS.md`] : []),
+  ];
+  recordAndSay(
+    state,
+    'ok',
+    'review_approved',
+    `Review approved after a final fix round - ${parts.join(', ')}`,
+    {
+      findings: findings.length,
+      carriedAndFixed: tolerated.map((f) => f.id),
+      nonBlocking: nonBlocking.map((f) => f.id),
+      nonBlockingFixed: fixed.map((f) => f.id),
+      followUps: left.map((l) => l.finding.id),
+    },
+  );
+}
+
+/**
+ * What a final round left of the non-blocking findings it carried (#425).
+ *
+ * Every one the fixer did not mark `fixed`, with its disposition and reason. A
+ * round whose dispositions could not be read (`null`) leaves every one, marked
+ * unreadable: that fails closed without claiming the fixer ignored them, which
+ * `recordDispositions` forbids. A finding the readable answer left out is
+ * already `not-addressed` there, which is a fact rather than a guess.
+ */
+function leftBy(
+  nonBlocking: readonly Finding[],
+  dispositions: FixDispositions | null,
+): UnaddressedFinding[] {
+  if (dispositions === null) {
+    return nonBlocking.map((f) => ({ finding: f, outcome: 'unreadable', reason: '' }));
+  }
+  const left: UnaddressedFinding[] = [];
+  for (const f of nonBlocking) {
+    const d = dispositions.dispositions.find((x) => x.id === f.id);
+    const disposition = d?.disposition ?? 'not-addressed';
+    if (disposition === 'fixed') continue;
+    left.push({ finding: f, outcome: disposition, reason: d?.reason ?? '' });
+  }
+  return left;
+}
+
+/**
  * One fix round: the turn, its report, and the commit.
  *
  * A function rather than the tail of the review loop because the loop now
@@ -1535,7 +1970,13 @@ async function runFixRound(
   turns: AgentTurns,
   host?: Host,
 ): Promise<void> {
-  state.reviewRound += 1;
+  // A process that died inside this round's turn persisted the increment and
+  // the marker, and resumes the same round rather than numbering a new one:
+  // a renumbered round would answer the wrong review and credit no seat (#393).
+  if (!(state.fixInFlight?.final === false && state.fixInFlight.round === state.reviewRound)) {
+    state.reviewRound += 1;
+  }
+  state.fixInFlight = { round: state.reviewRound, final: false };
   saveState(state);
   beginReport(state);
 
@@ -1555,19 +1996,26 @@ async function runFixRound(
     cwd,
     {
       role: 'implementer',
-      prompt: P.fixPrompt(findings, state.reviewRound, state.acceptanceCriteria, state.plan),
+      prompt: P.fixPrompt(findings, state.reviewRound, state.acceptanceCriteria, state.plan, true),
       planInPrompt: state.plan !== null,
       cwd,
       label: `fix-${state.reviewRound}`,
+      jsonSchema: FIX_SCHEMA,
     },
     turns,
     roles,
   );
-  recordReport(state, `fix-report-${state.reviewRound}.md`, fix.text);
+  const read = readFixOutput(fix);
+  recordReport(state, `fix-report-${state.reviewRound}.md`, read.report);
   // Consumed once the turn's report is on disk, and before the commit: a commit
   // that fails must not buy this turn a second time. Everything before this
   // point leaves them outstanding, which is what makes a died-mid-turn resume
   // retry the fix rather than skip it.
+  // The record before the consumption, so no stop can leave a consumed round
+  // without one: a resume finds the findings still pending and `fixInFlight`
+  // still set, and redoes this same round and label, record included (#393).
+  recordDispositions(state, read, findings, `fix-${state.reviewRound}`);
+  delete state.fixInFlight;
   clearPendingFindings(state);
   writeCheckpoint(
     state,
@@ -1818,21 +2266,33 @@ function renderOutstanding(
 }
 
 /**
- * What may appear in FOLLOW-UPS.md.
- *
- * Written against `unknown` on purpose. `validateStoredState` now owns this
- * invariant on the way in; the check remains as defence in depth, since the
- * field is also appended to mid-run from parsed model output.
- * Severity is checked as well as `defer`, even though `parseFindings` already
- * normalises, because the artifact this feeds asserts in prose that everything
- * in it was non-blocking - and an invariant a boundary states should be one the
- * boundary keeps. The string fields are checked - by `hasFindingShape`, which
- * the carried findings read through too, so the codebase holds one answer to
- * "is this stored object a finding" - because an entry missing one renders
- * `undefined` into a human-facing document.
+ * The findings a passing round still has work for (#425), or none when
+ * `loop.fixNonBlocking` is off - the one switch every new decision reads, so
+ * `false` takes the paths that existed before it.
  */
-function isDeferrable(f: unknown): f is Finding {
-  return hasFindingShape(f) && f.defer === true && (f.severity === 'P2' || f.severity === 'P3');
+function toAddress(cfg: Config, findings: readonly unknown[]): Finding[] {
+  return cfg.loop.fixNonBlocking ? findings.filter(isToAddress) : [];
+}
+
+/** How FOLLOW-UPS.md names each `UnaddressedFinding` outcome (#425). */
+const UNADDRESSED_LABEL: Record<UnaddressedFinding['outcome'], string> = {
+  'not-addressed': 'not addressed',
+  deferred: 'deferred by the fixer',
+  rebutted: 'rebutted',
+  unreadable: "the fixer's answer could not be read",
+  'not-attempted': 'not attempted: P3s only',
+};
+
+/**
+ * The findings FOLLOW-UPS.md lists as unconfirmed by vote (#436), in its order.
+ *
+ * The same filter and the same last-wins dedupe `writeFollowUps` applies, so
+ * the end-of-run summary names exactly the entries the file it points to holds
+ * under `*Unconfirmed by vote:*` - never a second opinion about which they are.
+ */
+export function voteMovedFollowUps(state: RunState): Finding[] {
+  if (!Array.isArray(state.deferred)) return [];
+  return [...new Map(state.deferred.filter(isDeferrable).map((f) => [f.id, f])).values()].filter(movedByVote);
 }
 
 /**
@@ -1923,8 +2383,15 @@ export function writeFollowUps(state: RunState, plan: Plan): string | null {
   // The one place absent and empty are treated alike: neither has anything to
   // report, so neither gets a section.
   const scope = plan.out_of_scope ?? [];
+  // What a passing review left of its non-blocking findings (#425). Guarded and
+  // deduped here for the reason `deferred` is; `isUnaddressed` refuses a P1 and
+  // a deferrable finding, so the header's non-blocking claim stays true and
+  // nothing is listed under two headings.
+  const left = Array.isArray(state.unaddressed)
+    ? [...new Map(state.unaddressed.filter(isUnaddressed).map((u) => [u.finding.id, u])).values()]
+    : [];
 
-  if (deferred.length === 0 && scope.length === 0) {
+  if (deferred.length === 0 && scope.length === 0 && left.length === 0) {
     removeArtifact(state, 'FOLLOW-UPS.md');
     return null;
   }
@@ -1943,6 +2410,22 @@ export function writeFollowUps(state: RunState, plan: Plan): string | null {
           .map(
             (f) =>
               `### ${f.title} \`${f.id}\`\n\n*Severity when deferred:* ${f.severity}\n\n` +
+              (movedByVote(f) && f.downgraded !== undefined
+                ? `*Unconfirmed by vote:* ${f.downgraded.reason}\n\n`
+                : '') +
+              `${f.detail}\n\n*Suggested fix:* ${f.suggested_fix}\n`,
+          )
+          .join('\n'),
+    );
+  }
+  if (left.length > 0) {
+    sections.push(
+      '## Left by the final fix round\n\n' +
+        left
+          .map(
+            ({ finding: f, outcome, reason }) =>
+              `### ${f.title} \`${f.id}\`\n\n*Severity:* ${f.severity}\n\n` +
+              `*Fixer's disposition:* ${UNADDRESSED_LABEL[outcome]}${reason === '' ? '' : ` - ${reason}`}\n\n` +
               `${f.detail}\n\n*Suggested fix:* ${f.suggested_fix}\n`,
           )
           .join('\n'),
@@ -1988,6 +2471,17 @@ export function reconcileFollowUps(state: RunState): string | null {
   const plan = state.plan;
   if (plan === null || plan === undefined) return null;
   collectDeferred(state, []);
+  // A repaired `unaddressed` is not a record to render from (#425): the loader
+  // replaced or dropped what it could not read, and re-rendering would delete
+  // or shorten the one place a passing review's leftovers were written down.
+  // So an existing file is kept as it is - unknown beats a false "nothing
+  // left". Only this resume-time pass needs it: `unaddressed` is written at the
+  // end of a review, after which the only other writer is a resumed final
+  // round, whose fresh record is trustworthy and is rendered as usual.
+  const repaired = state.events.some(
+    (e) => e.type === 'state_repaired' && e['field'] === 'unaddressed',
+  );
+  if (repaired && hasArtifact(state, 'FOLLOW-UPS.md')) return path.join(state.dir, 'FOLLOW-UPS.md');
   return writeFollowUps(state, plan);
 }
 
@@ -1998,6 +2492,12 @@ interface GuardArgs {
   round: number;
   capName: string;
   deadlockMsg: string;
+  /**
+   * What the plan loop's stall check needs (#394). Passed by the plan caller
+   * only, and its presence is the whole gate: the review and verify loops pass
+   * nothing and never consult `planStall`.
+   */
+  stall?: { state: RunState; human: ReadonlySet<string> };
 }
 
 /** Both brakes that stop a loop from running forever on the same disagreement. */
@@ -2064,13 +2564,69 @@ export function persistenceWarning(
   });
 }
 
+/** The `plan_stalled` sentence: what was counted, and what happens next. */
+function stallSentence(entry: PlanStallEntry): string {
+  const blocking = entry.counts.reduce((a, b) => a + b, 0);
+  const fresh = entry.fresh.reduce((a, b) => a + b, 0);
+  const head =
+    `The last ${entry.counts.length} critiques kept finding new blocking problems ` +
+    `(${entry.counts.join(', ')} blocking; ${fresh} of ${blocking} new)`;
+  return entry.action === 'step-back'
+    ? `${head}. Asking the planner to step back.`
+    : `${head} - still not converging after a step-back. Asking you.`;
+}
+
+/** The question a second stall asks. The first `OpenQuestion` vibe writes itself. */
+export const STALL_QUESTION: OpenQuestion = {
+  question:
+    'The plan has stopped converging even after the planner was asked to step back. ' +
+    'Narrow the brief, accept the plan with its remaining P1s, or continue? ' +
+    "To accept them, demote each under 'Change a severity' below and leave this answer empty, then resume.",
+  options: ['narrow the brief', 'accept the remaining P1s', 'continue'],
+  // No default, deliberately: which of the three is right is the person's call,
+  // and `writeEscalation` prints no default line for an empty one.
+  recommended: '',
+  kind: 'product',
+  blocking: true,
+};
+
+/**
+ * The stop a second stall makes (#394): exit 2, one question, the blockers.
+ *
+ * The counts are per critique record from the step-back it followed, counted
+ * the way `planStall` counts - each record's distinct ids, minus any a person
+ * raised - so the message and the detector cannot disagree.
+ */
+function stallEscalation(
+  state: RunState,
+  history: readonly RoundRecord[],
+  blockers: readonly Finding[],
+  human: ReadonlySet<string>,
+): Escalation {
+  const stalls = state.planStalls ?? [];
+  // The latest step-back before the entry just recorded, which is this one.
+  const steppedBack = stalls
+    .slice(0, -1)
+    .filter((s) => s.action === 'step-back')
+    .pop();
+  const from = steppedBack?.position ?? Math.max(0, history.length - 3);
+  const counts = history
+    .slice(from)
+    .map((r) => [...new Set(r.ids ?? [])].filter((id) => !human.has(id)).length);
+  const message =
+    `The plan loop stopped converging again after the planner was asked to step back at ` +
+    `critique record ${from}. Blocking findings per critique record since then ` +
+    `(excluding any a person raised): ${counts.join(', ')}.`;
+  return new Escalation(EXIT.NEEDS_HUMAN, message, [{ ...STALL_QUESTION }], [...blockers]);
+}
+
 /** Exported for tests: appends to `history`, may log, and may throw `Escalation`. */
 export function guardProgress(
   cfg: Config,
   history: RoundRecord[],
   all: readonly Finding[],
   blockers: readonly Finding[],
-  { cap, round, capName, deadlockMsg }: GuardArgs,
+  { cap, round, capName, deadlockMsg, stall }: GuardArgs,
 ): void {
   recordRound(
     history,
@@ -2083,28 +2639,64 @@ export function guardProgress(
     blockers.map((f) => ({ id: f.id, title: f.title })),
   );
 
-  const stall = assessConvergence(history, {
-    repeatThreshold: cfg.loop.oscillationThreshold,
-    window: cfg.loop.convergenceWindow,
-    cap,
-    round,
-  });
-  if (stall !== null) {
-    throw new Escalation(
-      EXIT.NO_CONVERGENCE,
-      `Stopping early: ${stall} - ${deadlockMsg}.`,
-      null,
-      [...blockers],
-    );
+  // The plan loop's stall check, before `assessConvergence` so a stall wins
+  // when both would fire on the same round (#394). Recorded through
+  // `recordAndSay`, whose save is also the one that persists the round just
+  // appended and the new `planStalls` entry - so the three land together.
+  let stalled: PlanStallEntry | null = null;
+  if (stall !== undefined) {
+    const { lastStall, action } = stallAction(stall.state.planStalls ?? []);
+    const found = planStall(history, {
+      stallAfter: cfg.loop.stallAfter,
+      lastStall,
+      human: stall.human,
+    });
+    if (found !== null) {
+      stalled = { position: history.length - 1, action, counts: found.counts, fresh: found.fresh };
+      (stall.state.planStalls ??= []).push(stalled);
+      recordAndSay(stall.state, 'warn', 'plan_stalled', stallSentence(stalled), {
+        position: stalled.position,
+        counts: stalled.counts,
+        fresh: stalled.fresh,
+        action,
+      });
+    }
   }
+  const escalation =
+    stall !== undefined && stalled?.action === 'escalated'
+      ? stallEscalation(stall.state, history, blockers, stall.human)
+      : null;
+
+  if (stalled === null) {
+    const trend = assessConvergence(history, {
+      repeatThreshold: cfg.loop.oscillationThreshold,
+      window: cfg.loop.convergenceWindow,
+      cap,
+      round,
+    });
+    if (trend !== null) {
+      throw new Escalation(
+        EXIT.NO_CONVERGENCE,
+        `Stopping early: ${trend} - ${deadlockMsg}.`,
+        null,
+        [...blockers],
+      );
+    }
+  }
+  // The cap stays the hard ceiling, stall or no stall (#394). A step-back on the
+  // cap round is already saved, so a resume with a raised cap sends its block;
+  // an escalation on it rides along, question and all, so the person who has to
+  // raise the cap is also asked the question the stall would have asked.
   if (round >= cap) {
     throw new Escalation(
       EXIT.NO_CONVERGENCE,
-      `Hit ${capName} (${cap}) with ${blockers.length} blocking finding(s) outstanding.`,
-      null,
+      `Hit ${capName} (${cap}) with ${blockers.length} blocking finding(s) outstanding.` +
+        (escalation === null ? '' : ` ${escalation.message}`),
+      escalation?.questions ?? null,
       [...blockers],
     );
   }
+  if (escalation !== null) throw escalation;
 
   // Beside the persistence notice and for the same reason - the run is
   // continuing, and every stop above has declined to fire. This one reports a
@@ -2379,7 +2971,10 @@ export async function prepareGit(
     // worktree has its branch created as a ref before the setup script runs, so
     // the script can be told `VIBE_BRANCH` and put the worktree on it. Adopt it
     // rather than `checkout -b` it again, which would fail on a branch that is
-    // there. Run ids are unique, so nothing else leaves one of these behind.
+    // there. Run ids are unique, so nothing else leaves one of these behind -
+    // and a name `--branch` chose is refused by `cmdRun` and again by the
+    // preflight gate when it already exists (#356), so the one this adopts is
+    // still only ever the ref the worktree site made for this run.
     if (await git.branchExists(cwd, branch)) {
       if ((await git.currentBranch(cwd)) !== branch) {
         // **Never move a worktree silently** (#249). A checkout that moves
@@ -2941,10 +3536,25 @@ export interface TurnRequest {
    * does. Still accepted, for a caller that has a reason of its own.
    */
   timeoutMs?: number | undefined;
-  /** Claude only: the response schema the turn is constrained to. */
+  /**
+   * The response schema the turn is constrained to, on either provider, or
+   * absent for the role's own (`RoleSpec.schema`). The two review fix turns
+   * set `FIX_SCHEMA` (#393); a writer given one gets its output back as text
+   * when it does not parse - see `CodexTurnOptions.unparseable`.
+   */
   jsonSchema?: object | undefined;
   /** Claude only: the tools the turn may use. */
   tools?: readonly string[] | undefined;
+  /**
+   * The config path of the review seat taking this turn - `review.finders[0]`,
+   * `review.verifiers[1]` - or absent for a role's own turn (#388 Part C).
+   *
+   * Read only by the sentences that name a setting a user would edit: a seat's
+   * model, timeout or MCP grant that fails mid-turn names the seat's line rather
+   * than `roles.reviewer`, which it did not come from. Absent, every one of
+   * those sentences is byte-identical to what it was.
+   */
+  seatPath?: string | undefined;
 }
 
 export interface TurnOutcome {
@@ -3172,13 +3782,15 @@ function noteRoleProvenance(
   roles: RoleTable,
   /** The figure this turn actually ran with - `DispatchRequest.timeoutMs`. */
   timeoutMs: number,
+  /** The review seat's path, when a seat took the turn - see `TurnRequest.seatPath`. */
+  seatPath?: string,
 ): unknown {
   const spec = roles[role];
   // The guard that keeps a run setting nothing byte-identical: no per-role
   // setting, no note.
   const notes: string[] = [];
   if (spec.model !== undefined) {
-    notes.push(`[this turn ran ${modelSource(role, roles)} = "${modelFor(role, cfg, roles)}"]`);
+    notes.push(`[this turn ran ${modelSource(role, roles, seatPath)} = "${modelFor(role, cfg, roles)}"]`);
   }
   // A bare number, no unit: the key names the unit, and `proc.ts`'s own "timed
   // out after 5400000ms" is already in the same message.
@@ -3190,7 +3802,7 @@ function noteRoleProvenance(
   // itself. No orchestrator call site does that today; the tests do, and a
   // future one that starts to gets silence rather than a false statement.
   if (spec.timeoutMs !== undefined && spec.timeoutMs === timeoutMs) {
-    notes.push(`[this turn ran roles.${role}.timeoutMs = ${spec.timeoutMs}]`);
+    notes.push(`[this turn ran ${seatPath ?? `roles.${role}`}.timeoutMs = ${spec.timeoutMs}]`);
   }
   if (notes.length === 0 || !(err instanceof Error)) return err;
   // Per note, so an error that has already been through here once - and there is
@@ -3281,6 +3893,7 @@ async function claudeDispatch(
             home: os.homedir(),
             configDir: process.env['CLAUDE_CONFIG_DIR'],
           }),
+          req.seatPath ?? `roles.${req.role}`,
         );
 
   // A rotation that could not be overlapped with Codex work happens here, at a
@@ -3289,7 +3902,14 @@ async function claudeDispatch(
   // for the turn about to use it, and the reset that follows has to tag the
   // model the next measurement will be taken under. Where the planner and the
   // implementer name different models this is the boundary that fires once.
-  if (shouldRotate(state, cfg, roles, model)) {
+  //
+  // Never for a turn on a slot that holds no conversation of the run (#388
+  // Part B). A finder on `fresh-claude` is not about to use `main`, and asked
+  // under its own model - one `main` was never measured under - `shouldRotate`
+  // answers "unmeasured, so rotate", which would compact the implementer's
+  // session in the middle of a review it takes no part in.
+  const perTurn = perTurnSlot(slot);
+  if (!perTurn && shouldRotate(state, cfg, roles, model)) {
     await rotateSession(state, cfg, turn, roles, model);
   }
 
@@ -3412,7 +4032,7 @@ async function claudeDispatch(
       },
     );
   } catch (err: unknown) {
-    throw noteRoleProvenance(err, req.role, cfg, roles, req.timeoutMs);
+    throw noteRoleProvenance(err, req.role, cfg, roles, req.timeoutMs, req.seatPath);
   }
 
   // Asked before `markSlotStarted`, which is what makes `slotForkParent` answer
@@ -3428,9 +4048,16 @@ async function claudeDispatch(
   // Tagged with the model that produced it: the ratio is a fraction of this
   // model's window and means nothing under another one. Through the shared seam
   // so the rotation turn in context.ts cannot drift out of step with this one.
-  recordTurnContext(state, model, result.usage);
+  //
+  // Not for a per-turn slot: `contextModel` / `contextRatio` are the record of
+  // how full `main` is, which rotation and every `ctx%` read, and a fresh
+  // finder's occupancy written there would replace the implementer's (#388).
+  if (!perTurn) recordTurnContext(state, model, result.usage);
 
-  const measured = measuredRatio(state, model);
+  // A per-turn slot's figure is its own measurement or nothing - never the
+  // stored one, which is `main`'s and would be reported as this turn's whenever
+  // the two share a model.
+  const measured = perTurn ? (result.usage?.ratio ?? null) : measuredRatio(state, model);
   const ctx = result.usage ? `, ctx ${(result.usage.ratio * 100).toFixed(0)}%` : '';
   applyCharge(state, cfg, {
     costUsd: result.costUsd,
@@ -3498,6 +4125,11 @@ async function withRateLimitRetry<T>(
   provider: 'claude' | 'codex',
   work: () => Promise<T>,
   onFailure?: (err: unknown) => void,
+  /**
+   * Asked after each failed attempt is charged: the work to run instead, for a
+   * failure the caller retries, or null. Only `cutOffRetry` passes one (#416).
+   */
+  retry?: (err: unknown) => (() => Promise<T>) | null,
 ): Promise<T> {
   for (;;) {
     try {
@@ -3533,6 +4165,12 @@ async function withRateLimitRetry<T>(
       // `err`, which has to reach cli.ts as the type it already is - and the
       // totals it updated are what the check below reads.
       chargeFailure(state, cfg, err, { label, provider });
+
+      const again = retry?.(err) ?? null;
+      if (again !== null) {
+        work = again;
+        continue;
+      }
 
       if (!(err instanceof RateLimitError)) throw err;
 
@@ -3784,10 +4422,14 @@ async function revisePlan(
    * every revision, and this is a frame for a host, not a new section for a
    * person. `phase_started` has never required a heading beside it.
    */
+  // Counted from one in the sentence, as `Plan critique (round N)` counts the
+  // same round, and raw in the frame, which names `plan-${planRound}.json`
+  // (#428). The sentence printed the raw round, so `Plan round 1` was followed
+  // by `Plan critique (round 2)` for one and the same round.
   log.info(
     advancing
-      ? `Plan round ${state.planRound}`
-      : `Revising plan ${state.planRound} against the answers`,
+      ? `Plan round ${state.planRound + 1}`
+      : `Revising plan ${state.planRound + 1} against the answers`,
     {
       id: 'phase_started',
       data: { phase: 'planning', round: state.planRound },
@@ -3802,7 +4444,7 @@ async function revisePlan(
     : `revise-q${state.questionRound}`;
   log.step(
     advancing
-      ? `${holderLabel('planner', roles)} is revising the plan (round ${state.planRound})`
+      ? `${holderLabel('planner', roles)} is revising the plan (round ${state.planRound + 1})`
       : `${holderLabel('planner', roles)} is revising the plan against the answers`,
     {
       id: 'turn_started',
@@ -3810,6 +4452,10 @@ async function revisePlan(
     },
   );
 
+  // The step-back a stall left for this revision, read from state so a resume
+  // re-entering here sends it too (#394). A findings revision only: answers are
+  // the person's steer, not the critic's churn.
+  const stepBack = args.findings !== undefined ? pendingStepBack(state.planStalls ?? []) : null;
   const outcome = await runTurn(
     state,
     cfg,
@@ -3829,6 +4475,7 @@ async function revisePlan(
         // so a bar it is not shown is a bar it re-derives or drops.
         acceptanceCriteria: state.plan?.acceptance_criteria,
         round: state.planRound,
+        stall: stepBack === null ? undefined : { counts: stepBack.counts, fresh: stepBack.fresh },
       }),
       planInPrompt: state.plan !== null,
       cwd,
@@ -3854,8 +4501,23 @@ async function revisePlan(
   // in `pendingAnswers` from the moment the answerer's turn is recorded, so
   // clearing them anywhere later leaves a window in which the plan answering
   // them is on disk and a resume revises against them again.
-  if (args.findings !== undefined) state.pendingFindings = null;
+  // The answer-wins marker (#394), on this same write for the reason the two
+  // consumptions below are on it: a revision against answers that leaves plan
+  // findings pending is followed by a findings revision and a critique, and a
+  // process that died between them must not come back and approve a plan no
+  // critic has read on the strength of a demotion. Read before the findings are
+  // consumed, and cleared by the findings revision that follows.
+  if (args.findings === undefined && args.answers !== undefined && takePendingFindings(state, 'plan') !== null) {
+    state.planRevisedByAnswer = true;
+  }
+  if (args.findings !== undefined) {
+    state.pendingFindings = null;
+    delete state.planRevisedByAnswer;
+  }
   if (args.answers !== undefined) state.pendingAnswers = null;
+  // Marked sent on the write that persists the plan it shaped, so a stop before
+  // it sends the block again and a stop after it does not (#394).
+  if (stepBack !== null) stepBack.sent = true;
   // Folded in by this revision whenever it took them, on the same write (#277).
   if (withAdvisory(args, state.advisoryAnswers) !== args.answers) delete state.advisoryAnswers;
   saveState(state);
@@ -3938,12 +4600,24 @@ async function codexDispatch(
   // As on the Claude side: the ordinary `await`, in a `try` so the failure can
   // name where this turn's model came from.
   let outcome: CodexTurnResult;
-  try {
-    outcome = await withRateLimitRetry(state, cfg, req.label, 'codex', async () => {
+  // One attempt, with the prompt it is given: the retry of a cut-off turn adds a
+  // note to the end and changes nothing else - the same thread, the same fork
+  // owed, the same seat (#416).
+  const attempt =
+    (attemptPrompt: string): (() => Promise<CodexTurnResult>) =>
+    async () => {
       await checkCodexLimits(state, cfg, req.cwd, req.label);
       return turn({
-        prompt,
-        schema: spec.schema,
+        prompt: attemptPrompt,
+        // The request's, which `runTurn` has already resolved to the role's
+        // where the caller named none - so a role turn sends exactly what it
+        // always did, and a caller with a per-turn schema reaches Codex as it
+        // already reached Claude (#393). Reading `spec.schema` here dropped it.
+        schema: req.jsonSchema ?? spec.schema,
+        // Stated here rather than inferred in the adapter: a writer's edits are
+        // made before its last message is read, so output that does not parse
+        // comes back as text; every read-only seat keeps failing the turn.
+        unparseable: spec.access === 'write' ? 'raw' : 'throw',
         schemaName: req.label,
         artifactDir: artifactDir(state, 'codex'),
         // As with effort below: the role's where it named one, this provider's
@@ -3986,9 +4660,19 @@ async function codexDispatch(
         // existed. Fixed before the numerator, rather than after.
         progress: progressOptions(state, cfg, req.label, model, 'codex'),
       });
-    });
+    };
+  try {
+    outcome = await withRateLimitRetry(
+      state,
+      cfg,
+      req.label,
+      'codex',
+      attempt(prompt),
+      undefined,
+      cutOffRetry(state, cfg, req.label, spec.access, req.jsonSchema ?? spec.schema, prompt, attempt),
+    );
   } catch (err: unknown) {
-    throw noteRoleProvenance(err, req.role, cfg, roles, req.timeoutMs);
+    throw noteRoleProvenance(err, req.role, cfg, roles, req.timeoutMs, req.seatPath);
   }
   const { structured, raw, sessionId, tokens, activity } = outcome;
 
@@ -4066,6 +4750,95 @@ async function codexDispatch(
     text: raw,
     structured,
     ...(activity === undefined ? {} : { activity }),
+  };
+}
+
+/**
+ * The one retry a read-only Codex seat gets when its answer was cut off at its
+ * output limit (#416), as a `withRateLimitRetry` retry: the next attempt's work,
+ * or null for a failure it does not retry.
+ *
+ * Inside that loop rather than around it, because the path that succeeds must
+ * not gain an await (`turn-seam.test.ts`): a wrapper awaiting the loop put one
+ * more microtask between a Codex result and its accounting, which is where a
+ * concurrent rotation can land.
+ *
+ * **Read-only seats only.** A writer may already have edited the tree, and
+ * running it again would edit it again; its cut-off fails the turn as before.
+ * **Once.** The cut-off is a wobble the reordered schema should all but remove,
+ * so a second one says something about this turn, and it ends the turn as a
+ * single cut-off always did, naming both attempts.
+ *
+ * The loop has charged the attempt by the time this is asked, so the ceilings
+ * are checked before spending again: one that is reached escalates instead of
+ * retrying. The retry runs on the same conversation - a resuming seat on its
+ * thread, a fresh one fresh - because the #389 thread kept its cut-off answer
+ * and the next two turns on it still worked, while a fresh thread would cost
+ * the critic its memory of earlier rounds.
+ *
+ * The cut-off answer is never the outcome. What it had written in full goes to
+ * the retry as unverified, and the retry's answer, or its failure, is what the
+ * loop acts on.
+ */
+function cutOffRetry(
+  state: RunState,
+  cfg: Config,
+  label: string,
+  access: RoleSpec['access'],
+  /** The schema the turn was sent with, which is what the note is worded for (#429). */
+  schema: object | undefined,
+  prompt: string,
+  attempt: (prompt: string) => () => Promise<CodexTurnResult>,
+): (err: unknown) => (() => Promise<CodexTurnResult>) | null {
+  let first: OutputCutOffError | null = null;
+  return (err) => {
+    if (!(err instanceof OutputCutOffError) || access === 'write') return null;
+    if (first !== null) {
+      // Both records, because each attempt kept its own (`cutOffRecordPath`).
+      const kept = [first.keptAt, err.keptAt].filter((p): p is string => p !== null);
+      throw new OutputCutOffError(
+        `${label} was cut off at its output limit on both attempts.\n` +
+          `First attempt: ${first.message.split(/\r?\n/)[0] ?? ''}\nRetry: ${err.message}` +
+          (kept.length === 0 ? '' : `\nWhat each attempt wrote is kept in ${kept.join(' and ')}.`),
+        err,
+      );
+    }
+    first = err;
+    // Codex turns charge no cost, so only the token ceiling applies here. Held
+    // rather than thrown at once: the cut-off is said first, so a run the
+    // ceiling ends still records why its last turn failed. The escalation, and
+    // the exit code it carries, are the ones `enforceCeilings` threw.
+    let ceiling: unknown = null;
+    try {
+      enforceCeilings(state, cfg, false);
+    } catch (reached: unknown) {
+      ceiling = reached;
+    }
+    const n = err.findings.length;
+    const counted =
+      err.chars === null || err.blankChars === null
+        ? ' before its final message arrived.'
+        : ` after ${(err.chars - err.blankChars).toLocaleString('en-US')} characters, followed by ` +
+          `${err.blankChars.toLocaleString('en-US')} characters of blank space.`;
+    recordAndSay(
+      state,
+      'warn',
+      'codex_cut_off',
+      `Codex's answer to ${label} was cut off at its output limit${counted} ` +
+        (ceiling === null
+          ? 'Trying the turn again (1 retry).' +
+            (n === 0 ? '' : ` It had written ${n} finding(s) in full; the retry is asked to check them again.`)
+          : 'Not tried again: the run has reached its token ceiling.' +
+            (n === 0
+              ? ''
+              : ` It had written ${n} finding(s) in full` +
+                (err.keptAt === null ? '.' : `, kept in ${err.keptAt}.`))) +
+        (err.reported ? '' : ' Codex did not report what the cut-off attempt used.'),
+      { label, chars: err.chars, blankChars: err.blankChars, findings: n, reported: err.reported },
+    );
+    if (ceiling !== null) throw ceiling;
+    recordEvent(state, 'turn_retried', { label, reason: 'max_output_tokens', attempt: 2 });
+    return attempt(`${prompt}\n\n${cutOffNote(err.findings, schema)}`);
   };
 }
 
@@ -4313,7 +5086,16 @@ async function runReview(
   plan: Plan,
   roles: RoleTable,
   turns: AgentTurns,
-): Promise<FindingsReport & { testChanges?: TestChanges }> {
+): Promise<{
+  report: FindingsReport & { testChanges?: TestChanges };
+  /**
+   * The P0s the vote did not confirm, under `review.unconfirmedP0: "halt"` -
+   * empty otherwise (#388 Part C). Handed back rather than thrown here because
+   * the caller writes `code-review-<n>.json`, and the stop has to come after
+   * the record of what it stopped for.
+   */
+  unconfirmedP0: Finding[];
+}> {
   // Before `log.step`, so the run never claims a reviewer started on a diff it
   // could not read. The decision that a gitless run is refused rather than
   // degraded is NOT made here - it is made by `gitPrecondition` in the preflight
@@ -4409,6 +5191,12 @@ async function runReview(
   // a report is small next to a 400k-character diff (#49, #50).
   const report = latestReport(state);
 
+  // The repository's REVIEW.md, from the commit the run started at - never the
+  // working tree, so an edit this run made reaches the NEXT run's review, not
+  // this one (#389). Settled once per run per process and handed to every part,
+  // every finder (through `reviewPromptFor`) and every verifier alike.
+  const reviewMd = await reviewStandardsFor(state, cwd);
+
   if (chunks.length > 1) {
     // How the round was SPLIT, which is true before any turn runs. What was
     // actually seen is `reviewCoverage`, recorded per completed part below.
@@ -4430,13 +5218,357 @@ async function runReview(
   // Per part, because a verdict only counts from the part that listed the file.
   const listedPerPart: FileChange[][] = [];
   const verdictsPerPart: RawVerdict[][] = [];
-  for (const [i, chunk] of chunks.entries()) {
-    // Only this part's judge files. A rename is listed wherever either of its
-    // paths is shown, since `chunk.files` names both sides (`--no-renames`).
-    const listed = judged.filter(
+  const chunked = chunks.length > 1;
+  // Only a part's judge files. A rename is listed wherever either of its
+  // paths is shown, since `chunk.files` names both sides (`--no-renames`).
+  const listedFor = (chunk: (typeof chunks)[number]): FileChange[] =>
+    judged.filter(
       (c) =>
         chunk.files.includes(c.path) || (c.oldPath !== null && chunk.files.includes(c.oldPath)),
     );
+  // One part's review prompt. The first finder and every additional finder are
+  // handed the same arguments (#388 Part B): an additional finder differs only
+  // in having no memory, which a memoryless reviewer already renders.
+  const reviewPromptFor = (i: number, hasMemory: boolean, carriesEarlierParts: boolean): string => {
+    const chunk = chunks[i];
+    if (chunk === undefined) throw new Error(`review part ${i + 1} does not exist`);
+    const listed = listedFor(chunk);
+    return P.reviewPrompt(
+      chunk.diff,
+      chunk.files,
+      plan.plan_md,
+      plan.out_of_scope,
+      state.reviewRound + 1,
+      hasMemory,
+      state.environment,
+      roles,
+      // The snapshot, and deliberately not `?? []`: the reviewer's rendering
+      // is three-state, so collapsing an absent bar to an empty one would
+      // have a legacy run claim done-ness is unobservable.
+      state.acceptanceCriteria,
+      // Absent for the ordinary round - one chunk, nothing cut - which is
+      // what keeps that prompt byte-identical. Present when a file was cut
+      // even in a single chunk, because that reviewer is the one that most
+      // needs telling to go and read the rest.
+      chunked || chunk.truncated.length > 0
+        ? {
+            index: i + 1,
+            total: chunks.length,
+            files: chunk.files,
+            truncated: chunk.truncated,
+            carriesEarlierParts,
+          }
+        : undefined,
+      // Every part, deliberately - see where it is read above. Never
+      // `undefined`: that is the "no caller statement" state which renders
+      // nothing, and a real round must always say something about the
+      // report, even when the thing it says is that there is none (#50).
+      report,
+      // Absent unless this run would actually place and run one, which is
+      // what keeps a `verify.reproducers: false` review byte-identical to
+      // the one before #113. Only gates with a command: a gate the run
+      // cannot execute is not a choice the reviewer has.
+      reproducerGates(cfg, cwd),
+      // Absent unless this part shows a judge file, which is what keeps every
+      // other round's prompt byte-identical (#112).
+      listed.length > 0 ? listed : undefined,
+      // Absent when the repository has none, or it was refused or unreadable,
+      // which keeps that prompt byte-identical too (#389).
+      reviewMd,
+    );
+  };
+  /**
+   * The additional finders (#388 Part B), after the first has reviewed every
+   * part, and the merge across all of them.
+   *
+   * Each finder is a reviewer whose seat was swapped (`seatTable`): the same
+   * `runTurn`, so its timeout, charge, heartbeat and path style follow the seat.
+   * In sequence, never at once - several children of one run would need the
+   * cancel latch, the charge seam, `saveState` and the heartbeat proven safe
+   * with two, which is its own change. A finder never sees another's findings:
+   * every one is handed the same prompt the first was, memoryless.
+   */
+  const runFinders = async (
+    entries: readonly FinderEntry[],
+    firstReport: FindingsReport,
+  ): Promise<FindingsReport> => {
+    const reported: FinderReport[] = [];
+    for (const f of entries) {
+      const table = seatTable(roles, f.setting);
+      const parts: FindingsReport[] = [];
+      let label = '';
+      try {
+        for (const i of chunks.keys()) {
+          label = chunked
+            ? `review-${state.reviewRound}-f${f.k}-part${i + 1}`
+            : `review-${state.reviewRound}-f${f.k}`;
+          log.step(`${holderLabel('reviewer', table)} is reviewing the implementation (finder ${f.k})`, {
+            id: 'turn_started',
+            data: { role: 'reviewer', kind: 'review', round: state.reviewRound, finder: f.k, seat: f.path },
+          });
+          const outcome = await runTurn(
+            state,
+            cfg,
+            {
+              role: 'reviewer',
+              prompt: P.withFocus(reviewPromptFor(i, false, false), f.focus),
+              cwd,
+              label,
+              seatPath: f.path,
+            },
+            turns,
+            table,
+          );
+          // Judged by what this turn did, attributed to the role it played. Its
+          // test verdicts are parsed by nothing here and so dropped: the first
+          // finder owns the round's `testChanges` and `reviewCoverage`, because
+          // two judges' verdicts on one file would need a rule for disagreeing,
+          // and inventing one is out of scope (#388 decision 6).
+          parts.push(
+            groundAndRecord(
+              state,
+              cwd,
+              'reviewer',
+              table,
+              parseFindings(readStructured(outcome)),
+              outcome.activity,
+            ),
+          );
+        }
+      } catch (err: unknown) {
+        // A stop, a ceiling, a rate limit waited out past its cap: the round
+        // ends exactly as it would for the first finder.
+        if (err instanceof Escalation || err instanceof Cancelled) throw err;
+        // And a ceiling this failure itself crossed. `chargeFailure` charged it
+        // and *returned* the ceiling rather than throwing it, so that a role's
+        // failure reaches cli.ts as itself - but a seat's failure is about to be
+        // absorbed here, and absorbing it must not absorb the brake with it.
+        enforceCeilings(state, cfg, f.setting.provider === 'claude');
+        // Anything else costs this finder only. Losing an extra seat can only
+        // leave out what that seat alone would have raised, so the round falls
+        // back to what a default config does - and the record says so.
+        const message = err instanceof Error ? err.message : String(err);
+        const error = message.split(/\r?\n/)[0] ?? '';
+        const provider = f.setting.provider;
+        const model = f.setting.model ?? 'default';
+        recordAndSay(
+          state,
+          'warn',
+          'review_finder_failed',
+          `Review finder ${f.k} (${f.path}, ${provider}/${model}) failed on ${label}: ${error}`,
+          { round: state.reviewRound, finder: f.k, seat: f.path, label, error },
+        );
+        continue;
+      }
+      const [single] = parts;
+      reported.push({
+        k: f.k,
+        seat: f.path,
+        provider: f.setting.provider,
+        model: f.setting.model ?? 'default',
+        report: parts.length === 1 && single !== undefined ? single : mergeReviewReports(parts),
+      });
+    }
+
+    const all: FinderReport[] = [
+      {
+        k: 0,
+        seat: 'roles.reviewer',
+        provider: roles.reviewer.provider,
+        model: roles.reviewer.model ?? 'default',
+        report: firstReport,
+      },
+      ...reported,
+    ];
+    const merge = mergeAcrossFinders(all);
+    const seats = entries.length + 1;
+    const raised = all.reduce((n, r) => n + r.report.findings.length, 0);
+    // Recorded, not narration only: this is the one account of how many
+    // finders reported in the attempt that wrote this round's artifact. A
+    // resumed round re-reviews from scratch, so a failure from an attempt that
+    // never got here leaves no merge event behind - the summary and the window
+    // read this, never a tally of failures.
+    recordAndSay(
+      state,
+      'info',
+      'review_finders_merged',
+      `review round ${state.reviewRound + 1}: ${seats} finders × ${chunks.length} part(s), ` +
+        `${all.length} of ${seats} reported, ${raised} findings → ${merge.report.findings.length} ` +
+        `after merge (${merge.byCitation} merged by citation, ${merge.byTitle} by title)`,
+      {
+        round: state.reviewRound,
+        finders: seats,
+        parts: chunks.length,
+        reported: all.length,
+        findings: raised,
+        merged: merge.report.findings.length,
+        byCitation: merge.byCitation,
+        byTitle: merge.byTitle,
+      },
+    );
+    return merge.report;
+  };
+  /**
+   * The vote on every blocking finding that was not reproduced (#388 Part C),
+   * after the reproducers and before the gate.
+   *
+   * Each eligible finding goes to every verifier, in sequence - every vote on
+   * finding 1, then every vote on finding 2 - for the reason the finders run in
+   * sequence. A verifier is a reviewer whose seat was swapped and whose job is a
+   * vote (`seatTable` with `VOTE_SCHEMA`): the same `runTurn`, so its timeout,
+   * charge, heartbeat and path style follow the seat. It is shown the claim and
+   * nothing about who made it, and never another verifier's vote.
+   *
+   * Not voted on: a P2 or P3, which includes everything a guard already moved;
+   * and a finding whose own reproducer reproduced, which is an observation the
+   * vote has nothing to add to - it blocks, whatever `unconfirmedP0` says.
+   */
+  const runVotes = async (
+    verifiers: readonly VerifierEntry[],
+    report: FindingsReport,
+  ): Promise<{ report: FindingsReport; held: Finding[] }> => {
+    const blocking = (f: Finding): boolean => f.severity === 'P0' || f.severity === 'P1';
+    const reproduced = (f: Finding): boolean =>
+      reproducerOutcomesOf(f).some((o) => o.verdict === 'reproduced');
+    // 1-based in the report as voted on, after reproducers: the `<n>` of the label.
+    const eligible = report.findings
+      .map((f, i) => ({ f, n: i + 1 }))
+      .filter(({ f }) => blocking(f) && !reproduced(f));
+    const notVoted = report.findings.filter((f) => blocking(f) && reproduced(f)).length;
+
+    const votes = new Map<string, Votes>();
+    let cast = 0;
+    for (const { f, n } of eligible) {
+      // The diff parts its evidence cites, or every part when it cites none
+      // of them: a claim about a file the diff never touched is still a claim
+      // about this change, and the verifier can read the rest of the tree.
+      const cited = new Set(
+        readEvidence(f.evidence).flatMap((e) => (typeof e.path === 'string' ? [e.path] : [])),
+      );
+      const touching = chunks.filter((c) => c.files.some((file) => cited.has(file)));
+      const shown = touching.length > 0 ? touching : chunks;
+      const prompt = P.votePrompt(
+        {
+          title: f.title,
+          detail: f.detail,
+          suggested_fix: f.suggested_fix,
+          ...(f.evidence === undefined ? {} : { evidence: f.evidence }),
+        },
+        shown.flatMap((c) => c.files),
+        shown.map((c) => c.diff).join('\n'),
+        plan.plan_md,
+        plan.out_of_scope,
+        state.environment,
+        roles,
+        reviewMd,
+      );
+      const ballots: Ballot[] = [];
+      for (const v of verifiers) {
+        const table = seatTable(roles, v.setting, VOTE_SCHEMA);
+        const req: TurnRequest = {
+          role: 'reviewer',
+          prompt,
+          cwd,
+          label: `vote-${state.reviewRound}-${n}-v${v.k}`,
+          seatPath: v.path,
+        };
+        log.step(`${holderLabel('reviewer', table)} is checking ${f.id} (verifier ${v.k})`, {
+          id: 'turn_started',
+          data: {
+            role: 'reviewer',
+            kind: 'vote',
+            round: state.reviewRound,
+            verifier: v.k,
+            seat: v.path,
+            finding: f.id,
+          },
+        });
+        cast += 1;
+        try {
+          const outcome = await runTurn(state, cfg, req, turns, table);
+          const said = parseVote(readStructured(outcome));
+          // The verifier's own path convention, because it typed the paths -
+          // the read `groundAndRecord` makes for the reviewer.
+          const grounded = groundVoteEvidence(
+            said.evidence,
+            cwd,
+            state.dir,
+            pathStyleFor(state, 'reviewer', table),
+          );
+          const counted = countBallot(said.vote, grounded.unresolved);
+          ballots.push({
+            seat: v.path,
+            provider: v.setting.provider,
+            model: v.setting.model ?? 'default',
+            vote: said.vote,
+            counted: counted.counted,
+            reason: said.reason,
+            evidence: grounded.evidence,
+            ...(counted.countedReason === undefined ? {} : { countedReason: counted.countedReason }),
+          });
+        } catch (err: unknown) {
+          // A stop, a ceiling, a rate limit waited out past its cap: not a vote.
+          if (err instanceof Escalation || err instanceof Cancelled) throw err;
+          // Nor a ceiling this failed turn itself crossed: `chargeFailure` has
+          // already charged it and held the ceiling rather than throwing it, and
+          // counting the failure as a ballot would go on to buy the next vote
+          // over the budget. Cost only for a Claude seat, `applyCharge`'s rule.
+          enforceCeilings(state, cfg, v.setting.provider === 'claude');
+          // Anything else is a vote not cast, and counts as one: `cannot-tell`,
+          // which can only keep the finding blocking. Too few usable votes must
+          // never let a finding through.
+          const ballot = failedBallot(v, err);
+          ballots.push(ballot);
+          log.warn(`Verifier ${v.k} (${v.path}) failed on ${req.label}, counted as cannot-tell: ${ballot.reason}`);
+        }
+      }
+      votes.set(f.id, tally(ballots, cfg.review.quorum));
+    }
+
+    const applied = applyVotes(report, votes, cfg.review.unconfirmedP0);
+    recordDowngrades(state, applied.downgraded);
+
+    const outcomes = [...votes.values()];
+    const count = (o: Votes['outcome']): number => outcomes.filter((v) => v.outcome === o).length;
+    const confirmed = count('confirmed');
+    const unconfirmed = count('unconfirmed');
+    const undecided = count('undecided');
+    const moved = applied.downgraded.length;
+    const held = applied.held.length;
+    const kept = unconfirmed - moved - held;
+    const fate = [
+      moved > 0 ? `${moved} moved to P2` : '',
+      kept > 0 ? `${kept} still blocking` : '',
+      held > 0 ? `${held} held for you` : '',
+    ].filter((s) => s !== '');
+    // Recorded, not narration only: the summary and the window read the last
+    // of these for the round, never a tally of failed turns - a resumed round
+    // that never reached here leaves none behind (Part B's rule for finders).
+    recordAndSay(
+      state,
+      'info',
+      'review_votes_tallied',
+      `review round ${state.reviewRound + 1}: ${eligible.length} findings to vote × ` +
+        `${verifiers.length} verifiers, ${cast} votes; ${confirmed} confirmed, ${unconfirmed} unconfirmed` +
+        `${fate.length > 0 ? ` (${fate.join(', ')})` : ''}, ${undecided} undecided (still blocking); ` +
+        `${notVoted} reproduced, not voted`,
+      {
+        round: state.reviewRound,
+        findings: eligible.length,
+        verifiers: verifiers.length,
+        votes: cast,
+        confirmed,
+        unconfirmed,
+        moved,
+        held,
+        undecided,
+        reproduced: notVoted,
+      },
+    );
+    return { report: applied.report, held: applied.held };
+  };
+  for (const [i, chunk] of chunks.entries()) {
+    const listed = listedFor(chunk);
     // Read inside the loop: the slot is marked started by the turn that
     // succeeds, so with a persistent thread part 1 is memoryless and parts 2..n
     // continue the conversation without anything new (#45).
@@ -4446,52 +5578,12 @@ async function runReview(
     // *this* round, and telling it not to repeat findings for them would ask it
     // to stay quiet about a diff it was never shown.
     const carriesEarlierParts = i > 0 && hasMemory;
-    const chunked = chunks.length > 1;
     const outcome = await runTurn(
       state,
       cfg,
       {
         role: 'reviewer',
-        prompt: P.reviewPrompt(
-          chunk.diff,
-          chunk.files,
-          plan.plan_md,
-          plan.out_of_scope,
-          state.reviewRound + 1,
-          hasMemory,
-          state.environment,
-          roles,
-          // The snapshot, and deliberately not `?? []`: the reviewer's rendering
-          // is three-state, so collapsing an absent bar to an empty one would
-          // have a legacy run claim done-ness is unobservable.
-          state.acceptanceCriteria,
-          // Absent for the ordinary round - one chunk, nothing cut - which is
-          // what keeps that prompt byte-identical. Present when a file was cut
-          // even in a single chunk, because that reviewer is the one that most
-          // needs telling to go and read the rest.
-          chunked || chunk.truncated.length > 0
-            ? {
-                index: i + 1,
-                total: chunks.length,
-                files: chunk.files,
-                truncated: chunk.truncated,
-                carriesEarlierParts,
-              }
-            : undefined,
-          // Every part, deliberately - see where it is read above. Never
-          // `undefined`: that is the "no caller statement" state which renders
-          // nothing, and a real round must always say something about the
-          // report, even when the thing it says is that there is none (#50).
-          report,
-          // Absent unless this run would actually place and run one, which is
-          // what keeps a `verify.reproducers: false` review byte-identical to
-          // the one before #113. Only gates with a command: a gate the run
-          // cannot execute is not a choice the reviewer has.
-          reproducerGates(cfg, cwd),
-          // Absent unless this part shows a judge file, which is what keeps every
-          // other round's prompt byte-identical (#112).
-          listed.length > 0 ? listed : undefined,
-        ),
+        prompt: reviewPromptFor(i, hasMemory, carriesEarlierParts),
         cwd,
         // Unchanged when there is one chunk: this string is Codex's output name
         // and the retry label, and a round that did not need splitting must look
@@ -4568,7 +5660,11 @@ async function runReview(
   }
 
   const [only] = reports;
-  const merged = reports.length === 1 && only !== undefined ? only : mergeReviewReports(reports);
+  const first = reports.length === 1 && only !== undefined ? only : mergeReviewReports(reports);
+  // With no additional finder, exactly the report of every round before #388:
+  // no extra turn, no `foundBy`, no event.
+  const finders = readFinders(cfg);
+  const merged = finders.length === 0 ? first : await runFinders(finders, first);
   // Inside `runReview` and after the merge, which are two separate decisions
   // (#113).
   //
@@ -4589,7 +5685,17 @@ async function runReview(
   // Into the round's `code-review-<n>.json`, which the caller writes once from
   // this. Absent rather than empty when no judge file was touched, so that
   // artifact is byte-for-byte what it was before (#112).
-  return testChanges === undefined ? proven : { ...proven, testChanges };
+  //
+  // The vote comes after the reproducers and inside this function for the same
+  // two reasons (#388 Part C): it is a decision about the merged round, and its
+  // record belongs in the one artifact the caller writes. With no verifier,
+  // exactly the report of every round before it: no turn, no `votes`, no event.
+  const verifiers = readVerifiers(cfg);
+  const voted = verifiers.length === 0 ? { report: proven, held: [] } : await runVotes(verifiers, proven);
+  return {
+    report: testChanges === undefined ? voted.report : { ...voted.report, testChanges },
+    unconfirmedP0: voted.held,
+  };
 }
 
 /**
@@ -4703,14 +5809,6 @@ async function proveFindings(
   recordDowngrades(state, applied.downgraded);
   return applied.report;
 }
-
-/** Most blocking first, so a later chunk can only ever raise a finding's severity. */
-const SEVERITY_RANK = {
-  P0: 0,
-  P1: 1,
-  P2: 2,
-  P3: 3,
-} satisfies Record<Severity, number>;
 
 /**
  * Several parts of one round, read as one report.
@@ -5047,15 +6145,21 @@ export function writeEscalation(state: RunState, escalation: Escalation): string
       lines.push(`### ${i + 1}. ${q.question}`);
       lines.push(`*Kind:* ${q.kind}`);
       if (q.options.length > 0) lines.push(`*Options:* ${q.options.join(' | ')}`);
-      lines.push(`*Claude would default to:* ${q.recommended}`);
+      // No line for no default (#394): the stall question has none on purpose,
+      // and an empty default line would read as one.
+      if (q.recommended.trim() !== '') lines.push(`*Claude would default to:* ${q.recommended}`);
       lines.push('\n**Your answer:**\n\n> \n');
     });
   }
 
   if (escalation.findings && escalation.findings.length > 0) {
-    lines.push('## Outstanding P1 findings\n');
+    // A stop for the vote (#388 Part C) lists what the verifiers said, each
+    // ballot with its reason; every other stop renders exactly as it did.
+    const voted = escalation.findings.every((f) => f.severity === 'P0' && f.votes?.outcome === 'unconfirmed');
+    lines.push(voted ? '## Unconfirmed P0 findings\n' : '## Outstanding P1 findings\n');
     for (const f of escalation.findings) {
       lines.push(`### ${f.title} \`${f.id}\`\n${f.detail}\n\n*Suggested fix:* ${f.suggested_fix}\n`);
+      if (voted && f.votes !== undefined) lines.push(`${describeVotes(f.votes).join('\n')}\n`);
     }
   }
 

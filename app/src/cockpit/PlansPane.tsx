@@ -3,6 +3,7 @@ import { Badge } from '@/ui/badge';
 import { Button } from '@/ui/button';
 import { Section } from './Disclosure';
 import { ofKind, planText } from './artifacts';
+import { shownRound } from './rounds';
 import { DOCUMENT, EMPTY, FILE, HEAD, NOTE, PANE } from './pane';
 import { useArtifact, useArtifacts, noText } from './useArtifacts';
 import type { Classified } from './artifacts';
@@ -198,7 +199,8 @@ export function PlansPane({
             setOpen((cur) => (cur === plan.name ? null : plan.name));
           }}
           title={
-            plan.round === null ? 'the approved plan' : `plan · round ${String(plan.round)}`
+            // From one, as the headings count (#428); the id and the link keep `plan-N.json`'s N.
+            plan.round === null ? 'the approved plan' : `plan · round ${String(shownRound(plan.round))}`
           }
           meta={
             <>

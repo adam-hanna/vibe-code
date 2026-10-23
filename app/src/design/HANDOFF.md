@@ -899,7 +899,7 @@ Rows are the code's own checkpoint boundaries, in order, with a **boundary** col
 | Final fix | `final-fix` | once, by construction (locked) |
 | Run complete | `complete` | — |
 
-There is **no fix cap** — fix rounds are counted by the verify and review counters. The five editable caps are `maxPlanRounds 5`, `maxReviewRounds 5`, `maxVerifyRounds 3`, `maxQuestionRounds 3`, `p1Tolerance 1`, with `oscillationThreshold 3` and `convergenceWindow 3` beside them.
+There is **no fix cap** — fix rounds are counted by the verify and review counters. The five editable caps are `maxPlanRounds 5`, `maxReviewRounds 5`, `maxVerifyRounds 3`, `maxQuestionRounds 3`, `p1Tolerance 1`, with `oscillationThreshold 3` and `convergenceWindow 3` beside them. `stallAfter 3` (#394) is editable beside `maxPlanRounds` but is a stall threshold, not a cap: reaching it asks the planner to step back, and the next stall asks the person; it never stops a run by itself.
 
 **The whole Gates section is #134 and unbuilt** — one gate exists today, with no per-boundary mode, no step and no countdown. The `proposed` chip sits on the section heading, not a row.
 

@@ -3,6 +3,7 @@ import { Badge } from '@/ui/badge';
 import { cn } from '@/lib/utils';
 import { clock, counted, elapsed, tokens, work } from './format';
 import { runningRow } from './model';
+import { turnRound } from './rounds';
 import type { ArchiveView, Turn } from './model';
 
 /**
@@ -90,7 +91,8 @@ export function RunningRow({
         {live && <LivenessDot state="live" />}
         <span className={cn('text-body-sm', live ? 'text-emphasis' : 'text-tertiary')}>
           {turn.role} · {turn.kind}
-          {turn.round === null ? '' : ` · round ${turn.round}`}
+          {/* No `round 0` on the first implementation, which is not a round (#428). */}
+          {turnRound(turn) === null ? '' : ` · round ${String(turnRound(turn))}`}
         </span>
         {/* Names why nothing is moving, so a completely still card does not read
             as a failed one. */}

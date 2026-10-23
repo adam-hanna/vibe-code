@@ -223,6 +223,28 @@ export interface StatsFrame {
   scorecard: ArchiveStats;
 }
 
+/**
+ * The repository's REVIEW.md at the commit the next run would start from, in
+ * reply to `review_md` (#389). A preview: the host never fetches for it, so
+ * `fetched` is always false, and a run reads the file from the commit it
+ * actually starts at. No text - presence and size only.
+ */
+export interface ReviewMdFrame {
+  type: 'review_md';
+  id: number;
+  dir: string;
+  ref: string | null;
+  tracking: boolean;
+  fetched: false;
+  commit: string | null;
+  reviewMd:
+    | { kind: 'present'; blob: string; bytes: number }
+    | { kind: 'absent' }
+    | { kind: 'refused' | 'unreadable'; reason: string }
+    | null;
+  reason?: string;
+}
+
 /** The archive, in reply to a request for it. */
 export interface Archive {
   type: 'archive';
@@ -402,6 +424,17 @@ export interface ReplayFrame {
    * a phrase invented for it.
    */
   exit: number | null;
+  /** `livenessOf`'s verdict on the run's lock (#396). Absent from a host older than it. */
+  liveness?: string;
+  /**
+   * Why nothing is running this run, in the core's words, or null (#396).
+   *
+   * Set only for a run with no exit whose lock rules out a live process - the
+   * core's decision, not the window's, for the reason `forcing` gives: the
+   * verdict is `livenessOf`'s. Absent from an older host, which is read as null
+   * and draws what it always drew.
+   */
+  lost?: string | null;
 }
 /**
  * The standing instruction blocks each turn is given (#223).
@@ -597,6 +630,7 @@ export type Frame =
   | FsFrame
   | Archive
   | StatsFrame
+  | ReviewMdFrame
   | ConfigFrame
   | DiffFrame
   | ArtifactsFrame
@@ -649,6 +683,9 @@ export function isFrame(v: unknown): v is Frame {
     type === 'archive' ||
     // The scorecard, ignored by the reducer for the archive's reason (#114).
     type === 'stats' ||
+    // REVIEW.md at the next run's start (#389): a fact about the repository,
+    // read by the settings note, and nothing about the run being narrated.
+    type === 'review_md' ||
     type === 'config' ||
     type === 'diff' ||
     // The two artifact reads (#223), ignored by the cockpit's reducer for the
@@ -1371,6 +1408,7 @@ export async function artifact(
 export async function replay(dir: string, runId: string): Promise<{
   steps: ReplayFrame['steps'];
   exit: number | null;
+  lost: string | null;
 }> {
   const id = nextRequestId();
   const frame = await ask<ReplayFrame>(
@@ -1379,7 +1417,18 @@ export async function replay(dir: string, runId: string): Promise<{
     'replay',
     'the host did not answer with the run',
   );
-  return { steps: frame.steps, exit: frame.exit };
+  return { steps: frame.steps, exit: frame.exit, lost: frame.lost ?? null };
+}
+
+/** REVIEW.md at the commit the next run would start from (#389). Never fetches. */
+export async function reviewMd(dir: string): Promise<ReviewMdFrame> {
+  const id = nextRequestId();
+  return ask<ReviewMdFrame>(
+    { type: 'review_md', id, dir },
+    id,
+    'review_md',
+    'the host did not answer with REVIEW.md',
+  );
 }
 
 /**

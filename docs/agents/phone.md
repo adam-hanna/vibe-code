@@ -90,10 +90,14 @@ with it:
   It sends `Take` or `Release` to `awake.rs`'s thread, which owns the `keepawake` guard. It
   holds idle and system sleep, never the display. A stalled D-Bus never blocks a spawn, and
   a failed take is a log line and a sentence. It never stops a run.
-- **Attribution in the window is gates only, and only a phone.** `reduce` folds
-  `gate_released`/`gate_stopped`'s `origin` into `Run.decidedFrom`. The footer then says
-  *Continued from* or *Stopped from* the phone. `remote/origin.ts` is the app's one spelling
-  of `phone:`, and a test reads it out of `bridge.rs`.
+- **Attribution in the window is gates, run starts and settings saves, and only a phone.**
+  `reduce` folds `gate_released`/`gate_stopped`'s `origin` into `Run.decidedFrom`, and the
+  footer says *Continued from* or *Stopped from* the phone (#344). `run_started` carries the
+  invoke's `origin` when it had one (#365), folded into `identity.startedFrom` and drawn as
+  *Started from* above the rail; a config `changed` from a phone reads *saved from* on the
+  settings screen. Where each is drawn and how long it stays is in `cockpit.md`.
+  `remote/origin.ts` is the app's one spelling of `phone:`, and a test reads it out of
+  `bridge.rs`.
 
 **The phone app is `app/mobile/`, and it is a client only** (#345). Its own Tauri crate
 and `package.json`, built from the same `app/src`; no Node host, no agent CLI, nothing

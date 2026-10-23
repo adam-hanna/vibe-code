@@ -24,9 +24,19 @@ export function Command({ className, ...props }: ComponentProps<typeof CommandPr
 
 export function CommandDialog({
   title,
+  filter,
   children,
   ...props
-}: ComponentProps<typeof DialogPrimitive.Root> & { title: string; children: ReactNode }) {
+}: ComponentProps<typeof DialogPrimitive.Root> & {
+  title: string;
+  /**
+   * The match `cmdk` runs per item per keystroke. Optional only in the type:
+   * left out, `cmdk` falls back to its fuzzy scorer, which froze the window on
+   * long values (#397), so the palette always passes one.
+   */
+  filter?: ComponentProps<typeof CommandPrimitive>['filter'];
+  children: ReactNode;
+}) {
   return (
     <DialogPrimitive.Root {...props}>
       <DialogPrimitive.Portal>
@@ -38,7 +48,7 @@ export function CommandDialog({
           <VisuallyHidden.Root>
             <DialogPrimitive.Title>{title}</DialogPrimitive.Title>
           </VisuallyHidden.Root>
-          <Command className="max-h-[70vh] [&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:py-1.5 [&_[cmdk-group-heading]]:text-chip [&_[cmdk-group-heading]]:font-bold [&_[cmdk-group-heading]]:uppercase [&_[cmdk-group-heading]]:tracking-wide [&_[cmdk-group-heading]]:text-tertiary">
+          <Command {...(filter === undefined ? {} : { filter })} className="max-h-[70vh] [&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:py-1.5 [&_[cmdk-group-heading]]:text-chip [&_[cmdk-group-heading]]:font-bold [&_[cmdk-group-heading]]:uppercase [&_[cmdk-group-heading]]:tracking-wide [&_[cmdk-group-heading]]:text-tertiary">
             {children}
           </Command>
         </DialogPrimitive.Content>

@@ -9,15 +9,19 @@ update it in the same PR when that code changes.
 src/main.ts          bin entry point — the thing package.json points at
 src/cli.ts           argument parsing, the six commands, run summary
 src/hostmain.ts      bin entry point for the app's sidecar — the second front end
+src/updatecheck.ts   the update notice (#323) — the one network request in src/, called only by main.ts
 src/serve.ts         the host session: NDJSON over stdio, gates as awaits
 src/protocol.ts      the frames those two processes agree on
 src/host.ts          what a host may be told at a boundary, and may answer
 src/gates.ts         which boundaries hold a run, what a hold costs, and the two that cannot
 src/orchestrator.ts  the loop: planPhase, reviewPhase, the guards, the prompt dispatch
-src/run.ts           run state, artifacts, checkpoints, convergence maths (assessConvergence et al)
+src/run.ts           run state, artifacts, checkpoints, convergence maths (assessConvergence, planStall et al)
 src/scorecard.ts     what the run archive says about the loop, and what it cannot
 src/fork.ts          `vibe fork`: preflight that only reads, then a commit phase that creates
 src/similarity.ts    the one similarity metric, its threshold, and the censuses behind it
+src/finder-merge.ts  one review round's reports across finders, merged by claim, with foundBy (#388)
+src/vote.ts          the review vote's fail-closed tally, pure: quorum, counted ballots, outcome (#388)
+src/dispositions.ts  a review fix round's dispositions joined onto its findings, with seats, pure (#393)
 src/questions.ts     when two wordings are one question: the threshold, and REPHRASED.md
 src/raise.ts         what a person does to a run's findings: raise one, move a severity
 src/roles.ts         who does what: the role table, refusals, warnings
@@ -32,10 +36,12 @@ src/clipaths.ts      where the two CLIs are when the settings say so, and what t
 src/auth.ts          how each vendor is reached, for runs and the pilot: the routes and a child's env
 src/heldkeys.ts      the API keys the app handed the host - in memory, and redacted from everything
 src/codex.ts         Codex adapter (codex exec --json)
+src/cutoff.ts        a Codex answer cut off at its output limit: whole findings salvaged, blank runs shortened (#416)
 src/appserver.ts     Codex app-server JSON-RPC client (rate limits only)
 src/ratelimits.ts    rate-limit windows and the brake
 src/charge.ts        the one seam every token and dollar is charged through
-src/slots.ts         session-slot lifecycle (main = Claude, judge + review = Codex, write = one-shot Codex)
+src/slots.ts         session-slot lifecycle (main = Claude, judge + review = Codex, write = one-shot Codex,
+                     fresh-claude + fresh-codex = one-shot read-only review seats, where finders sit)
 src/context.ts       context measurement, compaction, session rotation
 src/preflight.ts     toolchain contract enforcement, `vibe doctor`
 src/cliversions.ts   the installed claude/codex against the tested versions, and the flags vibe passes
@@ -47,6 +53,7 @@ src/work.ts          how far a write turn has got - measured, and labelled a pro
 src/schemas.ts       the JSON schemas both CLIs are pinned to
 src/validate.ts      parser vocabulary for model output
 src/proc.ts          child-process plumbing, and how a child ended
+src/review-md.ts     the repository's REVIEW.md, read from the run's start commit, for the review seats (#389)
 src/cancel.ts        stopping a turn that is already running - the latch, what it may kill, and the wait it may cut short
 src/commands.ts      a command a person pressed - no shell, no shim, and where it runs
 src/commandlog.ts    a command's output on disk, and what the last launch left there
@@ -77,6 +84,8 @@ app/src/cockpit/appearance.ts  how big the product is drawn, and nothing else ab
 app/src/cockpit/drafts.ts      saved prompt versions - the window's library, not the project's
 src/answers.ts          filling in NEEDS-INPUT.md from somewhere that is not a text editor
 app/src/cockpit/Settings.tsx   every setting, and which of the three places each one goes
+app/src/cockpit/seatform.ts    the review seats as a form: the finder and verifier lists, the quorum (#388)
+app/src/cockpit/reviewmd.ts    the settings note on REVIEW.md at the next run's start, as one sentence (#389)
 app/src/cockpit/outgroups.ts the output cut into rounds, and a finished run's transcript
 app/src/pilot/saved.ts       a conversation kept between launches, and which run it is about
 src/replay.ts           a finished run, said again - and what an archive cannot say
@@ -89,6 +98,7 @@ app/src/cockpit/PlansPane.tsx  every version of the plan, one section per round
 app/src/cockpit/ReportPane.tsx a judge's own report - the critique and the review, one screen
 app/src/cockpit/CodePane.tsx   what each round changed, from the range its commit carries
 app/src/pilot/log.ts       rounds and conversation in one scroll, and who may reorder whom
+app/src/pilot/bound.ts     which run a conversation reads, by id (#438), and what the read says when there is none
 app/src/shell/       the editor-shaped frame: activity bar, status bar, palette, and their pure tables
 app/src/shell/update.ts      what the window decides about an update: the skip, the setting, the bar
 app/src/shell/UpdatePopover.tsx  the ⬆ tool above ⚙, and what it opens

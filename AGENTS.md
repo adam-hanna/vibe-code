@@ -7,10 +7,19 @@ people *using* `vibe`; this file is for people *changing* it.
 
 A TypeScript CLI that automates the plan → critique → implement → review loop between the
 Claude Code CLI and the Codex CLI. It installs neither; it shells out to both and inherits
-whatever you are already logged into. There is no server, no daemon and no network code in
-the core — every external call `src/` makes is a child process. The desktop app has two
-network clients of its own, both in Rust under `app/`: the pilot's vendor adapters and the
-updater (#299).
+whatever you are already logged into. There is no server and no daemon in the core, and every
+external call `src/` makes is a child process **with one exception: `src/updatecheck.ts`**, a
+single unauthenticated GET of npm's public metadata for this package (#323). The desktop app
+has two network clients of its own, both in Rust under `app/`: the pilot's vendor adapters and
+the updater (#299).
+
+**That exception reverses a rule this file used to state**, *no network code in the core*, by
+the owner's decision on #323 (2026-10-20): a GET rather than `npm view` as a child, so the check
+does not depend on `npm` being on PATH and does not start a second Node process. It is one GET
+with no identifier, cookie or credential, through Node's own `fetch` with no dependency, bounded,
+once a day, terminal only, and `update-check-guard.test.ts` fails on any other `fetch(` or network
+import in `src/`. Anything more is a new decision, not an extension of this one; the reasoning and
+the limits are in [`docs/agents/processes.md`](docs/agents/processes.md).
 
 ## Commands
 
@@ -157,7 +166,7 @@ file for its area, not here. Keep this file to rules that apply to every change.
 - [`docs/agents/core-and-window.md`](docs/agents/core-and-window.md) — narration promoted from events, the read frames, sync between clients, artifacts, spend and silence ceilings, how a run ends and how a death is told apart.
 - [`docs/agents/run-worktrees.md`](docs/agents/run-worktrees.md) — `src/worktree.ts`: home versus work directory, the setup script, `git.baseRef`.
 - [`docs/agents/phone.md`](docs/agents/phone.md) — iroh, the bridge and the hub, `remote.json`, the phone app, pairing and reconnecting.
-- [`docs/agents/processes.md`](docs/agents/processes.md) — two front ends over one core, one host per run, several live runs in one window, one run per checkout, no shell in the webview.
+- [`docs/agents/processes.md`](docs/agents/processes.md) — two front ends over one core, one host per run, several live runs in one window, one run per checkout, no shell in the webview, the update check (the one network request in `src/`).
 - [`docs/agents/pilot.md`](docs/agents/pilot.md) — commands it may run, its tools, keys, the two backends and two roads per vendor, its context, its sandbox, the network code, its ledger.
 - [`docs/agents/loop.md`](docs/agents/loop.md) — gates and pauses, stop, question rounds, findings and severities, verification gates, reproducers, judge files, links under `.vibe/runs`, the scorecard, CLI versions.
 - [`docs/agents/updater-and-host-lifecycle.md`](docs/agents/updater-and-host-lifecycle.md) — `update.rs`, the reaper, a closed stdin, where the logs are.
@@ -375,9 +384,11 @@ A few things learned the expensive way:
   were preserved this way by hand. There is no command for this and there is not meant to be:
   for an ordinary user `.vibe/runs/` already persists in their repo across runs.
 - **What the past-run index reaches.** The planner is the only role *given* the index, but
-  Claude has one conversation — the implementer resumes `main` and inherits the planner's
-  history, that section included, exactly as it already inherits the plan prompt. The
-  Codex-seated roles (critic, answerer, reviewer) never see it.
+  Claude has one conversation — under the default table the implementer resumes `main` and
+  inherits the planner's history, that section included, exactly as it already inherits the
+  plan prompt. A role on another conversation never sees it: under the default table that is
+  the Codex-seated critic, answerer and reviewer, but any role can be seated on either
+  provider (`roles` in `src/roles.ts`), so it is the slot that decides, not the vendor.
 - **Prune when done**, after archiving the run above:
   `git worktree remove .worktrees/issue-22`.
 
@@ -408,14 +419,14 @@ Nothing in the tooling does this for you; the measurements are in
 6. Verify from a clean checkout: `npm run typecheck`, `npm test`, `npm pack --dry-run`.
 7. Merge, then tag: `git tag -a v<version> -m "..." && git push origin v<version>`.
 8. **When `release.yml` has finished on the tag, verify the draft before publishing it:**
-   `gh release download v<version> --pattern 'Vibe-macos-arm64.dmg' --pattern SHA256SUMS`, then
-   `gh attestation verify Vibe-macos-arm64.dmg --repo adam-hanna/vibe-code` and
+   `gh release download v<version> --pattern 'Vibe-macos-universal.dmg' --pattern SHA256SUMS`, then
+   `gh attestation verify Vibe-macos-universal.dmg --repo adam-hanna/vibe-code` and
    `sha256sum -c SHA256SUMS --ignore-missing`. An attestation is stored against a file's digest,
    not against the release, so it verifies while the release is still a draft.
 9. **Wait for `release.yml` and `mobile.yml` on the tag, install the draft on at least one machine and both
    phone apps on a phone, then publish the draft release.** The APK from the draft must install
    *over* the previous release's (same key, higher `versionCode`), and the `.ipa` must sign and
-   open through AltStore or Sideloadly; then pair each with the desktop. The workflow builds the Windows, macOS (Apple Silicon) and Linux bundles
+   open through AltStore or Sideloadly; then pair each with the desktop. The workflow builds the Windows, macOS (universal) and Linux bundles
    into one draft and never publishes it. A tag that is not `package.json`'s version still
    builds, with a warning, and the bundles carry `package.json`'s version - so a throwaway
    `v<version>-rc.N` tag is how to try the workflow, and it yields a draft pre-release. A tag

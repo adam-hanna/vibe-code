@@ -142,7 +142,15 @@ store reconciles what was announced while it was loading. **Two writes to one ke
 last one wins**, a start-up migration included; what is guaranteed is that the cache agrees
 with the disk, which is what stops a stale save. A config write's origin travels on `changed`
 and is never written - `vibe.config.json` is committed - while an invoke's is recorded once as
-`run_origin`, by `gate_released`'s carve-out, so a run with none is byte-identical.
+`run_origin`, by `gate_released`'s carve-out, so a run with none is byte-identical. **An
+invoke's origin is also said on `run_started`** (#365), on the start and both resume paths,
+with the key absent rather than null when there was none (`originData`). It is said there and
+**not recorded again**: `run_origin` is already the durable row a later reader asks, and a
+second one would be two records of one fact; `run_started` is the frame a window builds a run's
+identity from, so carrying it there is what lets *Started from <phone>* be drawn without joining
+narration to `state.events`. A replayed run (`src/replay.ts`) does not carry it yet: the
+replay says one `run_started` for the whole run, while `run_origin` is one row per invoke, so
+choosing which row to put on it is a decision #365 left alone.
 
 **And what is on screen follows it, both ways** (#371). #354 kept the caches right and nothing
 read them again: every reader took its value once, so a project added on the phone, a message

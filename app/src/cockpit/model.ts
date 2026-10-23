@@ -347,9 +347,28 @@ export interface Census {
   phase: 'plan' | 'review';
   /** All four, zeros included: where a gate decision is made, an absence is information. */
   counts: Readonly<Record<string, number>>;
-  tolerance: number;
-  pass: boolean;
-  /** Why the loop stopped, or null when it may proceed. Null is an answer. */
+  /**
+   * The `p1Tolerance` the gate judged this round against, or null when the frame
+   * did not say it (#437).
+   *
+   * Null, never `0`. A replayed census (`src/replay.ts`) is rebuilt from the
+   * round's artifact, which holds the report and not the gate's decision, so it
+   * carries the counts alone. This was `num(...) ?? 0`, and `0` is a real
+   * tolerance - the strictest one - so a review that passed at tolerance 1 drew
+   * `tolerance P1≤0`.
+   */
+  tolerance: number | null;
+  /**
+   * Whether the gate let the round through, or null when the frame did not say
+   * (#437). Null is not a block: `data['pass'] === true` made every census that
+   * lacked the field a blocked round, and the card then said *"The gate blocked
+   * this round."* over a review the loop called clean.
+   */
+  pass: boolean | null;
+  /**
+   * Why the loop stopped, or null when it may proceed. Null is an answer - but
+   * only beside a `pass`; with `pass` null it says nothing either way.
+   */
   reason: string | null;
   /** P1s being carried into the next phase rather than fixed. */
   tolerated: readonly string[];
@@ -360,6 +379,89 @@ export interface Census {
    * drawn from (#285). What attaches it to a round: `at` is this window's
    * arrival clock, and two frames read out of one chunk share a millisecond.
    */
+  seq: number;
+}
+
+/**
+ * The sentence a round card and the Review pane put under a census's counts, or
+ * null when the census does not say what the gate decided (#437).
+ *
+ * The loop's own `reason` where it blocked, because `gate()` names the exact
+ * arithmetic that stopped the round, and never one composed from the counts.
+ * A census with no `pass` - every replayed one - gets no sentence at all: the
+ * fallback *"The gate blocked this round."* is for a block the loop reported
+ * without a reason, not for a decision nobody reported.
+ */
+export function gateSentence(census: Census): string | null {
+  if (census.pass === null) return null;
+  return census.pass ? 'The gate passed.' : (census.reason ?? 'The gate blocked this round.');
+}
+
+/**
+ * What a review round's finders came to (#388 Part B), off `review_finders_merged`.
+ *
+ * Carried for one number above all: `reported`, the finders that actually
+ * reported that round, which is the only honest denominator for a finding's
+ * *"found by 2 of 3"*. The configured count is not it - a finder that failed
+ * contributed nothing, and counting it would claim a seat looked and saw nothing.
+ * Absent on a round with no additional finder, which writes no such frame.
+ */
+export interface FinderMerge {
+  /** The core's raw round, the number `code-review-<n>.json` is named by. Null when unsaid. */
+  round: number | null;
+  /** Every finder of the round, `roles.reviewer` included. */
+  finders: number;
+  reported: number;
+  parts: number | null;
+  /** Findings before the merge and after it, as the core counted them. */
+  findings: number | null;
+  merged: number | null;
+  at: number;
+  /** Arrival order, as a census has it (#285): what attaches it to a round. */
+  seq: number;
+}
+
+/**
+ * What a review round's vote came to (#388 Part C), off `review_votes_tallied`.
+ *
+ * Every number is the core's own count. Absent on a round with no verifier,
+ * which writes no such frame; a frame missing either of the two counts that say
+ * what was voted on is dropped rather than filled in.
+ */
+export interface VoteTally {
+  /** The core's raw round, the number `code-review-<n>.json` is named by. Null when unsaid. */
+  round: number | null;
+  /** Findings put to the vote, and the verifiers each went to. */
+  findings: number;
+  verifiers: number;
+  votes: number | null;
+  confirmed: number | null;
+  unconfirmed: number | null;
+  undecided: number | null;
+  /** Blocking findings that reproduced and so were not voted on. */
+  reproduced: number | null;
+  at: number;
+  seq: number;
+}
+
+/**
+ * A review fix round's dispositions (#393), off `fix_dispositions` - or the
+ * warning that they could not be read, off `fix_dispositions_unreadable`.
+ *
+ * Carried for the second above all: the findings pane says *"dispositions not
+ * recorded for this round"* off it, which a missing file alone cannot tell from
+ * a round that has not run yet. The dispositions themselves are read from
+ * `fix-dispositions-<round>.json`, never from here.
+ */
+export interface FixDispositionsFrame {
+  /** The fix round, the number its report and its dispositions file carry. */
+  round: number;
+  /** The review round it answers: `code-review-<answers>.json`. */
+  answers: number;
+  label: string | null;
+  /** False when the fixer's answer could not be read and nothing was recorded. */
+  recorded: boolean;
+  at: number;
   seq: number;
 }
 
@@ -631,6 +733,12 @@ export interface Run {
    * rounds behind it. Empty until a round reports one.
    */
   censuses: readonly Census[];
+  /** Every finder round's merge, oldest first (#388 Part B). Empty without finders. */
+  finderMerges: readonly FinderMerge[];
+  /** Every round's vote tally, oldest first (#388 Part C). Empty without verifiers. */
+  voteTallies: readonly VoteTally[];
+  /** Every review fix round's dispositions frame, oldest first (#393). */
+  fixDispositions: readonly FixDispositionsFrame[];
   /** What the run has spent, from the one seam every token goes through. */
   spend: Spend;
   /** Every compaction, oldest first. Empty until one happens (`5e`). */
@@ -786,6 +894,17 @@ export interface Run {
     /** The brief, as the run recorded it. The workstream's name. */
     task: string | null;
     resumed: boolean;
+    /**
+     * The phone that asked for this start or resume, by name (#365).
+     *
+     * `run_started` carries the invoke's `origin` only when it had one, and the
+     * bridge writes `phone:<name>` on every frame a phone sends. **Only a phone
+     * is folded**, by `decidedFrom`'s rule: the window's own invokes carry no
+     * origin, and a terminal or the pilot is not a person on another device.
+     * Absent rather than null, mirroring the wire - a run with no key here is
+     * every run that was not started from a phone, and draws nothing new.
+     */
+    startedFrom?: string;
     at: number;
   } | null;
   /**
@@ -841,6 +960,9 @@ export function emptyRun(): Run {
     rateLimit: null,
     verify: [],
     censuses: [],
+    finderMerges: [],
+    voteTallies: [],
+    fixDispositions: [],
     spend: { tokens: null, costUsd: null, codexTokens: null, charges: [] },
     compactions: [],
     baseSha: null,
@@ -941,6 +1063,25 @@ function readResumedFrom(v: unknown): ResumedFrom | null {
 function decidedFrom(how: 'continued' | 'stopped', data: Record<string, unknown>): Run['decidedFrom'] {
   const phone = phoneOf(data['origin']);
   return phone === null ? null : { how, boundary: str(data['boundary']), phone };
+}
+
+/**
+ * *Started from <phone>*, or *Resumed from <phone>* on a resume, or null (#365).
+ *
+ * The verb follows `resumed` because the frame is per invoke: a phone that
+ * resumed a run the window started did not start it, and saying so would be
+ * the attribution inventing a fact. Null for every run not started from a
+ * phone, so a window or terminal start draws nothing new.
+ */
+export function startedLine(identity: Run['identity']): string | null {
+  if (identity === null || identity.startedFrom === undefined) return null;
+  return `${identity.resumed ? 'Resumed' : 'Started'} from ${identity.startedFrom}.`;
+}
+
+/** The phone a run start came from, as a spreadable field; empty for anything else (#365). */
+function startedFrom(data: Record<string, unknown>): { startedFrom?: string } {
+  const phone = phoneOf(data['origin']);
+  return phone === null ? {} : { startedFrom: phone };
 }
 
 function str(v: unknown): string | null {
@@ -1664,6 +1805,10 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
             workDir: str(data['workDir']),
             task: str(data['task']),
             resumed: data['resumed'] === true,
+            // Who asked, when it was a phone (#365). Each `run_started` builds the
+            // identity afresh, so a resume from this window after a phone's start
+            // says nothing about the phone: this session was not started there.
+            ...startedFrom(data),
             at,
           },
           // What earlier sessions of this run already did (#211). Null on a
@@ -1857,6 +2002,80 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
         };
       }
 
+      case 'review_finders_merged': {
+        // Dropped rather than guessed when either count is missing: a
+        // denominator this window invented is the claim the frame exists to
+        // replace.
+        const finders = num(data['finders']);
+        const reported = num(data['reported']);
+        if (finders === null || reported === null) return next;
+        return {
+          ...next,
+          finderMerges: [
+            ...next.finderMerges,
+            {
+              round: num(data['round']),
+              finders,
+              reported,
+              parts: num(data['parts']),
+              findings: num(data['findings']),
+              merged: num(data['merged']),
+              at,
+              seq: id(),
+            },
+          ],
+        };
+      }
+
+      case 'review_votes_tallied': {
+        // Dropped rather than guessed when either count is missing, as the
+        // finders' merge frame is.
+        const findings = num(data['findings']);
+        const verifiers = num(data['verifiers']);
+        if (findings === null || verifiers === null) return next;
+        return {
+          ...next,
+          voteTallies: [
+            ...next.voteTallies,
+            {
+              round: num(data['round']),
+              findings,
+              verifiers,
+              votes: num(data['votes']),
+              confirmed: num(data['confirmed']),
+              unconfirmed: num(data['unconfirmed']),
+              undecided: num(data['undecided']),
+              reproduced: num(data['reproduced']),
+              at,
+              seq: id(),
+            },
+          ],
+        };
+      }
+
+      case 'fix_dispositions':
+      case 'fix_dispositions_unreadable': {
+        // Dropped rather than guessed when either round is missing, as the
+        // finders' merge frame is: the pane joins on them.
+        const round = num(data['round']);
+        const answers = num(data['answers']);
+        if (round === null || answers === null) return next;
+        return {
+          ...next,
+          fixDispositions: [
+            ...next.fixDispositions,
+            {
+              round,
+              answers,
+              label: str(data['label']),
+              recorded: frame.id === 'fix_dispositions',
+              at,
+              seq: id(),
+            },
+          ],
+        };
+      }
+
       case 'findings_reported': {
         const phase = str(data['phase']);
         // Only the two the loop reports, and an unrecognised one is dropped
@@ -1872,8 +2091,11 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
             {
               phase,
               counts,
-              tolerance: num(data['tolerance']) ?? 0,
-              pass: data['pass'] === true,
+              // Absent stays absent (#437): a census without them is drawn
+              // with no tolerance badge and no gate sentence, never as `0` and
+              // never as a block.
+              tolerance: num(data['tolerance']),
+              pass: typeof data['pass'] === 'boolean' ? data['pass'] : null,
               reason: str(data['reason']),
               tolerated: strings(data['tolerated']),
               findings: readFindings(data['findings']),
@@ -2432,6 +2654,31 @@ export function foldReplay(
     built = reduce(built, { type: 'narration', ...step.narration }, step.at);
   }
   return built;
+}
+
+/**
+ * An opened run's ending, applied to its fold (#223, #396).
+ *
+ * **Two endings, and the record holds at most one of them.** An `exit` is the
+ * run's own, applied as the `result` frame it is: it closes whatever turn was
+ * open and sets `completed`, which is what makes the footer draw this run's
+ * ending rather than nothing.
+ *
+ * A run whose record stops mid-loop has no exit, and that alone used to leave
+ * its last turn open for good - a run whose machine shut down under it came
+ * back pulsing on "code", with Pause and Stop that did nothing and no Resume.
+ * `lost` is the core's answer to whether anything still runs it, read off the
+ * lock, and it is applied through the same `hostLost` a live run's dead host
+ * goes through: the turn ends, and the footer says the process has gone.
+ * Neither means the run is still going, and it is drawn exactly as it was.
+ *
+ * `at` is the replay's last step, the same instant `forResume` closes a seeded
+ * turn at.
+ */
+export function openedEnding(run: Run, ending: { exit: number | null; lost: string | null }, at: number): Run {
+  if (ending.exit !== null) return reduce(run, { type: 'result', id: 0, exit: ending.exit }, at);
+  if (ending.lost !== null) return hostLost(run, at, ending.lost);
+  return run;
 }
 
 /**

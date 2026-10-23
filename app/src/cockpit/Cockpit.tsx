@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
 import { Activity, ChevronLeft, PanelLeft, PanelRightClose, PanelRightOpen, Monitor, Plus, Settings as SettingsIcon, Smartphone, Terminal, X } from 'lucide-react';
 import { usePanelRef } from 'react-resizable-panels';
 import type { Layout, LayoutChangedMeta, PanelImperativeHandle } from 'react-resizable-panels';
@@ -31,6 +32,8 @@ import type { KeyStatus } from '../pilot/keys';
 // differing only in case is a compile error on Windows and macOS both.
 import { PilotPane } from '../pilot/PilotPane';
 import { chatRun } from '../pilot/log';
+import { bindingOf, boundRun, sameBinding } from '../pilot/bound';
+import type { Binding } from '../pilot/bound';
 import { noCommands, reduceCommands, restore, running } from './commands';
 import { deviceKey, NOWHERE, readWhere, WHERE_KEY, startPanels, writableWhere } from './where';
 import type { BottomTab, Panels, Tab, Viewing, Where } from './where';
@@ -87,6 +90,8 @@ import { PairPrompt } from '../remote/PairPrompt';
 import { SpendPane } from './SpendPane';
 import { StopConfirm } from './StopConfirm';
 import { Summary } from './Summary';
+import { liveTab } from './rail';
+import { BriefOffer } from './BriefOffer';
 import { Workstreams } from './Workstreams';
 import { VerifyPane } from './VerifyPane';
 import { StalenessStrip } from './Staleness';
@@ -131,7 +136,9 @@ import {
 import { exitNotice, offerNotice, runNotice } from './notices';
 import type { CapRead, LiveRun, LiveRuns } from './hosts';
 import { useStats } from './useStats';
-import { rounds } from './rounds';
+import { inFlight, rounds } from './rounds';
+import type { RoundCard as RoundCardData } from './rounds';
+import { RoundCard } from '../pilot/RoundCard';
 import { implementArgv, readLaunchArgv, resumeArgv } from './argv';
 import { LIGHT_QUERY, SCALE_KEY, SCALE_VAR, THEME_KEY, readScale, readTheme, resolveTheme, writable, type Theme } from './appearance';
 import { LIMITS_KEY, readLimits, writeLimits } from '../pilot/ledger';
@@ -143,7 +150,7 @@ import { showsConfig } from '../changed';
 import { memory, useFollowedMemory, useMemoryRevision } from '../memory';
 import { connectedNames } from '../remote/pairing';
 import { useRemoteStatus } from '../remote/useRemoteStatus';
-import type { Run } from './model';
+import type { CycleKind, Run } from './model';
 
 /**
  * A tab in the main pane's bar (the UI rework). Stated rather than inherited:
@@ -154,6 +161,55 @@ import type { Run } from './model';
 const TAB =
   'cursor-pointer whitespace-nowrap border-0 border-b-2 border-transparent bg-transparent px-2.5 pt-2.5 pb-3 text-body-sm font-medium text-secondary hover:bg-column hover:text-primary focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent';
 const TAB_ON = 'border-accent text-accent';
+
+/**
+ * A stage's pane, with the round of that stage still running drawn at its foot
+ * (#409).
+ *
+ * The four artifact panes are built from what rounds wrote, so a round in flight
+ * was not on them at all. It is drawn here as the pilot's log draws it - the
+ * same `RoundCard`, from the same `rounds()` - rather than as a third design.
+ *
+ * **Below the pane's scroll, not inside it.** A reader who opened round 0 stays
+ * where they are and still sees what is running; a pane that scrolled to a live
+ * card would move the document out from under them, which is what the panes'
+ * *follow until touched* rule exists to prevent. And every pane's empty state
+ * gets it for free, which is when it matters most: the first critique round
+ * running over a pane that has nothing yet.
+ *
+ * The wrapper is always drawn, so a round starting or ending never remounts the
+ * pane under it and costs it the sections somebody opened.
+ */
+function InFlight({ card, children }: { card: RoundCardData | null; children: ReactNode }) {
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      {children}
+      {card !== null && (
+        <div className="max-h-[40%] flex-none overflow-y-auto border-t border-rule-structure bg-page px-7 pt-4" aria-label="the round running now">
+          <RoundCard card={card} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The mark on the tab for what the run is doing now (#409): the run path's live
+ * dot, so the bar and the rail draw one state one way. It pulses, under #307's
+ * rule - *a pulse means work is running* - which is why the sidebar's working
+ * rows pulse too; the mark is drawn only while something is. A state rather
+ * than a count, so it is an icon before the label and never `· n`, which in
+ * this bar always means how many things are behind the tab.
+ */
+function RunningMark({ on }: { on: boolean }) {
+  if (!on) return null;
+  return (
+    <span className="mr-1.5 inline-flex align-middle" title="The run is working here now">
+      <LivenessDot state="live" />
+      <span className="sr-only">running:</span>
+    </span>
+  );
+}
 
 /**
  * The cockpit, at the slice #159 scopes it to.
@@ -691,6 +747,12 @@ export function Cockpit({
   /** The person's standing instructions (#273), from the same read, for the pilot. */
   const [standing, setStanding] = useState<string | null>(null);
   /**
+   * The settings' `prompts` table, from the same read (#420): the pilot's
+   * edited blocks are in it. Null until read, which the prompt treats as every
+   * block's built-in rather than as an empty one.
+   */
+  const [pilotPrompts, setPilotPrompts] = useState<unknown>(null);
+  /**
    * Bumped by every save in Settings, so a change there reaches this read —
    * including the pilot's safe list, which an open conversation acts on.
    */
@@ -730,6 +792,7 @@ export function Cockpit({
           loop?: Partial<Caps>;
           gates?: Record<string, string>;
           instructions?: { text?: unknown };
+          prompts?: unknown;
         };
         if (cancelled) return;
         // The cap is the machine's and no run reads it, so it is read off the
@@ -739,6 +802,7 @@ export function Cockpit({
         setAccess(frame.pilot);
         const text = effective.instructions?.text;
         setStanding(typeof text === 'string' ? text : null);
+        setPilotPrompts(effective.prompts ?? null);
         if (effective.gates !== undefined) setGates(effective.gates);
         setOrder(frame.gateable);
         const loop = effective.loop;
@@ -1909,6 +1973,17 @@ export function Cockpit({
   // whichever run the column happens to hold (#223).
   const shownRunId = viewing?.runId ?? (drafting !== null ? null : shownLive !== null ? runIdOf(shownLive) : null);
   /**
+   * Whether what is on screen is a draft with no run behind it yet.
+   *
+   * **One expression for every surface that would otherwise fall through to
+   * the window's last live run** (#319). A draft sets `viewing` to null, so
+   * anything choosing between "the opened run" and `run` picked the live one -
+   * which, while a new run is being talked through, is a run the draft has
+   * nothing to do with. The column learned it in #294 and the round cards in
+   * #247; Code, Verify and Spend were the three that had not.
+   */
+  const noRun = draftHasNoRun(drafting);
+  /**
    * The question round the loop is on, through `model.ts` rather than by index.
    *
    * The badge on the Questions tab and the pane behind it read the **same**
@@ -1917,7 +1992,8 @@ export function Cockpit({
    * and the pane behind it disagreed about one run and it was reported as two
    * separate bugs.
    */
-  const openQuestions = latestQuestions(run);
+  // A draft has no questions: its pane draws none, so its badge counts none (#414).
+  const openQuestions = noRun ? null : latestQuestions(run);
   /**
    * Which repository those panes read in.
    *
@@ -1957,6 +2033,8 @@ export function Cockpit({
   const liveRepo = shownLive !== null ? repoOf(shownLive) : shownDir;
   /** Whether what is on screen is a run this window is not narrating live. */
   const past = viewing !== null && shownLive === null;
+  /** The Questions tab's badge and pane, from one expression (#414). */
+  const shownQuestions = past ? null : openQuestions;
   // The round cards, built once here and handed to the surfaces that draw them.
   // `rounds()` is a re-shaping of what is already on `Run` - it measures nothing
   // and infers nothing - and one call is what keeps the pilot's log, the report
@@ -1989,20 +2067,24 @@ export function Cockpit({
    * failed leaves it there with the failure said beside it — a column showing
    * one run while claiming to show another is the confusion this set out to fix.
    */
-  /**
-   * Whether what is on screen is a draft with no run behind it yet.
-   *
-   * **One expression for every surface that would otherwise fall through to
-   * the window's last live run** (#319). A draft sets `viewing` to null, so
-   * anything choosing between "the opened run" and `run` picked the live one -
-   * which, while a new run is being talked through, is a run the draft has
-   * nothing to do with. The column learned it in #294 and the round cards in
-   * #247; Code, Verify and Spend were the three that had not.
-   */
-  const noRun = draftHasNoRun(drafting);
   // A draft not yet started has no run, so the column is drawn empty rather than
   // falling through to the window's last live run.
   const columnRun = noRun ? blank : past && opened.run !== null ? opened.run : run;
+  /**
+   * Where the run is now, for the tab bar's mark and the round in flight at the
+   * foot of a stage's pane (#409). Off `columnRun`, the run the column draws, so
+   * the bar, the rail and the panes are about one run.
+   */
+  const live = liveTab(columnRun);
+  const columnCards = columnRun === run ? cards : rounds(columnRun);
+  const flying = (cycle: CycleKind): RoundCardData | null => inFlight(columnCards, columnRun, cycle);
+  /**
+   * How many commits the Code tab's pane draws, for its badge (#414): none in a
+   * draft, the opened run's for a past run (none until its replay arrives, as
+   * the pane says it is still reading), the live run's otherwise. It counted
+   * the live run's in all three.
+   */
+  const codeCommits = noRun ? 0 : past ? (opened.run?.commits.length ?? 0) : run.commits.length;
   /**
    * The verification passes the Verify tab draws, and the run whose directory
    * their logs are read from - **one run, never two** (#248). Each attempt opens
@@ -2025,12 +2107,15 @@ export function Cockpit({
             ? `This run could not be read again: ${opened.failure}`
             : 'Reading this run’s record…',
       }
-    : { passes: run.verify, dir: liveRepo, runId: run.identity?.runId ?? null, waiting: null };
+    : noRun
+      // A draft has run no gate. Its pane says there is no run, and its badge
+      // must not count the last run's passes beside that (#414).
+      ? { passes: [], dir: liveRepo, runId: null, waiting: null }
+      : { passes: run.verify, dir: liveRepo, runId: run.identity?.runId ?? null, waiting: null };
   /** One reading of the live turn's quiet, for the strip and the status bar (#267). */
   const quiet = staleness(run, now);
   // The run the pilot's conversation is about, for its log's round cards (#247).
-  // The pane still takes the live `run` for its tools.
-  const pilotRun = useMemo(() => ({ ...columnRun, protocol }), [columnRun, protocol]);
+  // Its tools read the run the conversation is bound to (#438) - see `bindPane`.
   const pilotLogRun = chatRun({
     runId: pilotRunId,
     drafting: drafting !== null,
@@ -2047,15 +2132,42 @@ export function Cockpit({
    */
   const shownPane = paneOf({ dir: pilotDir, runId: pilotRunId }, drafts);
   const paneProps = useRef(
-    new Map<string, { dir: string; runId: string | null; run: typeof pilotRun; logRun: typeof pilotLogRun; launched: LiveRun['sent'] }>(),
+    new Map<string, { dir: string; runId: string | null; logRun: typeof pilotLogRun; launched: LiveRun['sent'] }>(),
   );
   paneProps.current.set(shownPane, {
     dir: pilotDir,
     runId: pilotRunId,
-    run: pilotRun,
     logRun: pilotLogRun,
     launched: shownLive?.sent ?? null,
   });
+  /**
+   * The run each mounted pane's conversation reads (#438), worked out afresh on
+   * every render from its own `(dir, runId)` - by id, never from the column -
+   * so a pane in the background reads its own run as it now is, and two live
+   * runs in one window cannot cross. `bindings` keeps what each pane last read,
+   * both so an unchanged answer stays the same object and so a background pane
+   * whose run is no longer open finishes on the copy it had.
+   */
+  const bindings = useRef(new Map<string, Binding>());
+  const withProtocol = useRef(new WeakMap<Run, Run>());
+  const openedRead =
+    past && viewing !== null
+      ? { dir: viewing.dir, runId: viewing.runId, run: opened.run, failure: opened.failure }
+      : null;
+  const bindPane = (pane: string, spot: { dir: string; runId: string | null }): { binding: Binding; run: Run } => {
+    const kept = bindings.current.get(pane) ?? null;
+    const next = bindingOf({ spot, drafts, lives, opened: openedRead, kept });
+    const binding = kept !== null && sameBinding(kept, next) ? kept : next;
+    bindings.current.set(pane, binding);
+    // The protocol is the service host's, which a replayed run never heard.
+    const src = boundRun(binding, blank);
+    let run = withProtocol.current.get(src);
+    if (run === undefined || run.protocol !== protocol) {
+      run = { ...src, protocol };
+      withProtocol.current.set(src, run);
+    }
+    return { binding, run };
+  };
   const [knownPanes, setKnownPanes] = useState<readonly string[]>([]);
   useEffect(() => {
     setKnownPanes((k) => (k.includes(shownPane) ? k : [...k, shownPane]));
@@ -2093,6 +2205,17 @@ export function Cockpit({
    */
   const shutSheets = (): void => {
     if (SURFACE.overlayPanels) setPanels((p) => (p.sidebar || p.loop ? { ...p, sidebar: false, loop: false } : p));
+  };
+  /**
+   * `1b` for one repository (#396): the lost footer's way to the one screen that
+   * may take a dead process's lock back. The run's own repository where it names
+   * one, because the list is per repository and a lost run in another project
+   * would otherwise open a list it is not in.
+   */
+  const showRuns = (repo: string | null): void => {
+    if (repo !== null) rememberRepo(repo);
+    setTab('runs');
+    shutSheets();
   };
   // The composer is a dialog over everything, and what it starts lands in the
   // main pane, so on a phone opening it puts any sheet away.
@@ -2525,7 +2648,11 @@ export function Cockpit({
             <span className="flex items-center gap-1">
             <Button variant="quiet" size="sm" onClick={() => setTab('spend')} title="Usage for the live run">
               <Activity size={14} aria-hidden="true" />
-              {run.spend.tokens === null ? 'No usage reported' : `${fmtTokens(run.spend.tokens)} tokens`}
+              {noRun
+                // The last run's tokens beside a run that has not started would
+                // be that run's usage, read as this one's (#414).
+                ? 'No run yet'
+                : run.spend.tokens === null ? 'No usage reported' : `${fmtTokens(run.spend.tokens)} tokens`}
             </Button>
             {/* On a phone the run status is a sheet with no strip to reopen it
                 from (#347), so its way back is here - with the liveness dot the
@@ -2612,6 +2739,7 @@ export function Cockpit({
               aria-current={tab === 'plans' ? 'page' : undefined}
               onClick={() => open('plans')}
             >
+              <RunningMark on={live === 'plans'} />
               Plans
             </button>
             {/* The four artifact tabs are in `CycleKind`'s order — plan,
@@ -2638,6 +2766,7 @@ export function Cockpit({
               aria-current={tab === 'critique' ? 'page' : undefined}
               onClick={() => open('critique')}
             >
+              <RunningMark on={live === 'critique'} />
               Critique
             </button>
             {/* `1d`, per round. The whole-run diff is this pane's first section
@@ -2647,13 +2776,15 @@ export function Cockpit({
               aria-current={tab === 'code' ? 'page' : undefined}
               onClick={() => open('code')}
             >
-              Code{run.commits.length > 0 ? ` · ${String(run.commits.length)}` : ''}
+              <RunningMark on={live === 'code'} />
+              Code{codeCommits > 0 ? ` · ${String(codeCommits)}` : ''}
             </button>
             <button
               className={cn(TAB, tab === 'review' && TAB_ON)}
               aria-current={tab === 'review' ? 'page' : undefined}
               onClick={() => open('review')}
             >
+              <RunningMark on={live === 'review'} />
               Review
             </button>
             {/* `1f`. The count is blocking questions, not all of them: an
@@ -2665,8 +2796,8 @@ export function Cockpit({
               onClick={() => open('questions')}
             >
               Questions
-              {openQuestions !== null && openQuestions.blocking > 0
-                ? ` · ${String(openQuestions.blocking)}`
+              {shownQuestions !== null && shownQuestions.blocking > 0
+                ? ` · ${String(shownQuestions.blocking)}`
                 : ''}
             </button>
             {/* `5d`. The count is verification passes, not gates: the pane's
@@ -2677,6 +2808,7 @@ export function Cockpit({
               aria-current={tab === 'verify' ? 'page' : undefined}
               onClick={() => setTab('verify')}
             >
+              <RunningMark on={live === 'verify'} />
               Verify{verifyOf.passes.length > 0 ? ` · ${String(verifyOf.passes.length)}` : ''}
             </button>
             {/* The phone's way to the commands pane, which the desktop docks
@@ -2744,7 +2876,7 @@ export function Cockpit({
             ))}
           {tab === 'questions' && (
             <QuestionsPane
-              questions={past ? null : openQuestions}
+              questions={shownQuestions}
               dir={shownDir}
               runId={shownRunId}
               revision={run.artifacts.length}
@@ -2824,32 +2956,40 @@ export function Cockpit({
             />
           )}
           {tab === 'plans' && (
-            <PlansPane
-              dir={shownDir}
-              runId={shownRunId}
-              openAt={openAt}
-              revision={run.artifacts.length}
-            />
+            <InFlight card={flying('plan')}>
+              <PlansPane
+                dir={shownDir}
+                runId={shownRunId}
+                openAt={openAt}
+                revision={run.artifacts.length}
+              />
+            </InFlight>
           )}
           {tab === 'critique' && (
-            <ReportPane
-              dir={shownDir}
-              runId={shownRunId}
-              kind="critique"
-              rounds={past ? [] : cards}
-              openAt={openAt}
-              revision={run.artifacts.length}
-            />
+            <InFlight card={flying('critique')}>
+              <ReportPane
+                dir={shownDir}
+                runId={shownRunId}
+                kind="critique"
+                rounds={past ? [] : cards}
+                openAt={openAt}
+                revision={run.artifacts.length}
+              />
+            </InFlight>
           )}
           {tab === 'review' && (
-            <ReportPane
-              dir={shownDir}
-              runId={shownRunId}
-              kind="review"
-              rounds={past ? [] : cards}
-              openAt={openAt}
-              revision={run.artifacts.length}
-            />
+            <InFlight card={flying('review')}>
+              <ReportPane
+                dir={shownDir}
+                runId={shownRunId}
+                kind="review"
+                rounds={past ? [] : cards}
+                openAt={openAt}
+                revision={run.artifacts.length}
+                // An opened run's own replayed frames: a past run is never the live one.
+                fixDispositions={past ? (opened.run?.fixDispositions ?? []) : run.fixDispositions}
+              />
+            </InFlight>
           )}
           {/* **The run on screen, and its repository** (UI rework). This took
               the live run because an opened run had no shas on this side; the
@@ -2859,21 +2999,24 @@ export function Cockpit({
               committed three rounds. While the opened run is still being read
               the pane says that, rather than drawing the live run's shas
               against the opened run's repository. */}
-          {tab === 'code' &&
-            (noRun ? (
-              <NoRun>
-                The Code tab shows what a run's rounds changed, read from its commits. Start this run
-                and its first round lands here once it commits.
-              </NoRun>
-            ) : !past ? (
-              <CodePane run={run} dir={liveRepo} openAt={openAt} />
-            ) : opened.run !== null ? (
-              <CodePane run={opened.run} dir={shownDir} openAt={openAt} />
-            ) : (
-              <p className="m-0 p-6 text-body-sm text-secondary">
-                {opened.failure ?? 'Reading this run…'}
-              </p>
-            ))}
+          {tab === 'code' && (
+            <InFlight card={flying('code')}>
+              {noRun ? (
+                <NoRun>
+                  The Code tab shows what a run's rounds changed, read from its commits. Start this run
+                  and its first round lands here once it commits.
+                </NoRun>
+              ) : !past ? (
+                <CodePane run={run} dir={liveRepo} openAt={openAt} />
+              ) : opened.run !== null ? (
+                <CodePane run={opened.run} dir={shownDir} openAt={openAt} />
+              ) : (
+                <p className="m-0 p-6 text-body-sm text-secondary">
+                  {opened.failure ?? 'Reading this run…'}
+                </p>
+              )}
+            </InFlight>
+          )}
           {/* Mounted whatever tab is showing, and hidden rather than unmounted.
               A conversation is state nobody can get back, and a proposal waiting
               on a person would be destroyed by a glance at the output pane -
@@ -2895,15 +3038,16 @@ export function Cockpit({
               const at = paneProps.current.get(pane);
               if (at === undefined) return null;
               const visible = pane === shownPane;
+              const bound = bindPane(pane, { dir: at.dir, runId: at.runId });
               return (
                 <div key={pane} className={visible ? 'contents' : 'hidden'} hidden={!visible}>
                     <PilotPane
                       background={!visible}
                       onBusy={hooksFor(pane).busy}
-                      // The run on screen, live or replayed (#246): what the pilot is
-                      // told about is the run a person is looking at. The protocol is the
-                      // service host's, which a replayed run never heard.
-                      run={at.run}
+                      // The run this conversation is bound to (#438), live or replayed:
+                      // its own, or the one it started - never whatever the column draws.
+                      run={bound.run}
+                      binding={bound.binding}
                       logRun={at.logRun}
                       launched={at.launched}
                       // **The run's repository, not the window's** (#223). Every other
@@ -2936,6 +3080,7 @@ export function Cockpit({
                       ask={askFor(brief, at)}
                       onAsked={() => setBrief(null)}
                       standing={standing}
+                      pilotPrompts={pilotPrompts}
                       onPending={visible ? setProposals : undefined}
                       limits={limits}
                       statuses={keyStatuses}
@@ -3158,27 +3303,15 @@ export function Cockpit({
 
                     Offered again once the command has RETURNED, not once the
                     loop said it was done: `serve.ts` runs one at a time and
-                    refuses a second invoke until the first settles. */}
-                {(shownLive === null || settled(run)) && !outside && (
-                  <>
-                    <div className="mx-4 mb-2 rounded-md border border-rule-card bg-card px-4 py-3.5">
-                      <span className="text-body-sm font-medium text-primary">waiting for the brief</span>
-                      <p className="mt-1.5 mb-0 text-body-sm leading-relaxed text-secondary">
-                        Describe the work to your pilot. Review the brief, then approve its proposal to begin.
-                      </p>
-                    </div>
-                    {/* `4a`, for the one moment somebody is deciding how THIS run
-                        should differ from the project's defaults. */}
-                    <Button
-                      variant="secondary"
-                      size="sm"
-                      className="mx-4 mb-3 self-start"
-                      onClick={() => setComposing({ dir: repoDir, locked: false })}
-                      disabled={busy || !wire.connected}
-                    >
-                      Customize this run
-                    </Button>
-                  </>
+                    refuses a second invoke until the first settles. That offer
+                    is made after the run, below - not here in the empty
+                    column's words, above a run that has finished (#410). */}
+                {shownLive === null && !outside && (
+                  <BriefOffer
+                    after={false}
+                    onCustomize={() => setComposing({ dir: repoDir, locked: false })}
+                    disabled={busy || !wire.connected}
+                  />
                 )}
               </>
             )}
@@ -3213,6 +3346,19 @@ export function Cockpit({
                   banner and its one action rather than a summary of work that
                   stopped early. */}
               {columnRun.completed?.exit === 0 && <Summary run={columnRun} />}
+              {/* The next run, offered after the one that ended (#410) - after
+                  its summary, or after its rail on a halt. The footer is pinned
+                  outside this scroll, so "after the run" is the end of the
+                  scroll rather than below the footer's one action. A run opened
+                  from the archive is not offered one: `past` takes the other
+                  branch above, and only the live run's command has returned. */}
+              {!past && shownLive !== null && settled(run) && !outside && (
+                <BriefOffer
+                  after
+                  onCustomize={() => setComposing({ dir: repoDir, locked: false })}
+                  disabled={busy || !wire.connected}
+                />
+              )}
             </div>
             {/* The same footer, about the same run. Its live controls draw
                 themselves off `run.completed`, which a finished run has set — so
@@ -3234,6 +3380,7 @@ export function Cockpit({
                 shutSheets();
                 return implement(runId, dir, columnRun.identity?.task ?? null);
               }}
+              onShowRuns={showRuns}
               caps={caps}
               gates={gates}
               order={order}
@@ -3272,6 +3419,10 @@ export function Cockpit({
                   onStop={() => setConfirmStop(true)}
                   onResume={(runId, dir, raise) => resume(runId, dir, raise, false, run.identity?.task ?? null)}
                   onImplement={(runId, dir) => implement(runId, dir, run.identity?.task ?? null)}
+                  onShowRuns={(repo) => {
+                    setGateOpen(false);
+                    showRuns(repo);
+                  }}
                   caps={caps}
                   gates={gates}
                   order={order}

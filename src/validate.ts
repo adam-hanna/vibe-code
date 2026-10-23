@@ -6,6 +6,7 @@ import type {
   Assumption,
   CheckKind,
   Confidence,
+  Disposition,
   Evidence,
   EvidenceKind,
   Finding,
@@ -21,6 +22,7 @@ import type {
   Severity,
   SeverityChange,
   Verdict,
+  VoteValue,
 } from '@src/types.js';
 
 /**
@@ -215,51 +217,81 @@ export function parsePlan(raw: unknown): Plan {
   };
 }
 
+/**
+ * One finding, read exactly as `parseFindings` reads each element of a report.
+ *
+ * Its own export so that a lone finding can be judged without wrapping it in a
+ * report with an invented verdict: what a cut-off Codex answer had written in
+ * full is kept only where this accepts it (#416). `raw` is what an error quotes.
+ */
+export function parseFinding(f: unknown, i: number, raw: unknown = f): Finding {
+  const r = record(f, `report.findings[${i}]`, raw);
+  const severity = oneOf(r, 'severity', SEVERITIES, `report.findings[${i}]`, raw);
+  const title = str(r, 'title', `report.findings[${i}]`, raw);
+  // An id is the oscillation guard's primary key; derive a stable one rather
+  // than dropping a finding that omitted it.
+  const rawId = r['id'];
+  const id = typeof rawId === 'string' && rawId.trim() ? rawId.trim() : slug(title);
+  // Tolerant on read, for two different reasons. A report stored before this
+  // field existed carries none, and must still parse. And a blocking finding
+  // can never be a follow-up whatever the model claimed, so `defer` on a
+  // P0/P1 is dropped here - the schema states the constraint, this makes it
+  // true on our side of the wire. Both defaults only ever make a finding more
+  // blocking, and `gate` reads severity alone, so no control flow changes.
+  const defer = r['defer'] === true && severity !== 'P0' && severity !== 'P1';
+  // Absent rather than `[]` when nothing usable came back: "cited nothing" is
+  // what actually happened, and an empty list would assert the model offered
+  // a list. Both read the same downstream - `groundFindings` downgrades a
+  // blocker either way - but only one of them is true.
+  const evidence = readEvidence(r['evidence']);
+  // Absent rather than a repaired half-object, for the reason the evidence
+  // list is tolerant: the schema asks for `null` when there is no reproducer,
+  // and a model that returns a path with no contents has described no test
+  // (#113). The finding is kept either way - a missing witness has never been
+  // held against a finding and is not now.
+  const reproducer = readReproducer(r['reproducer']);
+  return {
+    id,
+    severity,
+    title,
+    detail: str(r, 'detail', `report.findings[${i}]`, raw),
+    suggested_fix: str(r, 'suggested_fix', `report.findings[${i}]`, raw),
+    defer,
+    ...(evidence.length > 0 ? { evidence } : {}),
+    ...(reproducer === null ? {} : { reproducer }),
+  };
+}
+
 export function parseFindings(raw: unknown): FindingsReport {
   const o = record(raw, 'report', raw);
-  const findings: Finding[] = arr(o, 'findings', 'report', raw).map((f, i) => {
-    const r = record(f, `report.findings[${i}]`, raw);
-    const severity = oneOf(r, 'severity', SEVERITIES, `report.findings[${i}]`, raw);
-    const title = str(r, 'title', `report.findings[${i}]`, raw);
-    // An id is the oscillation guard's primary key; derive a stable one rather
-    // than dropping a finding that omitted it.
-    const rawId = r['id'];
-    const id = typeof rawId === 'string' && rawId.trim() ? rawId.trim() : slug(title);
-    // Tolerant on read, for two different reasons. A report stored before this
-    // field existed carries none, and must still parse. And a blocking finding
-    // can never be a follow-up whatever the model claimed, so `defer` on a
-    // P0/P1 is dropped here - the schema states the constraint, this makes it
-    // true on our side of the wire. Both defaults only ever make a finding more
-    // blocking, and `gate` reads severity alone, so no control flow changes.
-    const defer = r['defer'] === true && severity !== 'P0' && severity !== 'P1';
-    // Absent rather than `[]` when nothing usable came back: "cited nothing" is
-    // what actually happened, and an empty list would assert the model offered
-    // a list. Both read the same downstream - `groundFindings` downgrades a
-    // blocker either way - but only one of them is true.
-    const evidence = readEvidence(r['evidence']);
-    // Absent rather than a repaired half-object, for the reason the evidence
-    // list is tolerant: the schema asks for `null` when there is no reproducer,
-    // and a model that returns a path with no contents has described no test
-    // (#113). The finding is kept either way - a missing witness has never been
-    // held against a finding and is not now.
-    const reproducer = readReproducer(r['reproducer']);
-    return {
-      id,
-      severity,
-      title,
-      detail: str(r, 'detail', `report.findings[${i}]`, raw),
-      suggested_fix: str(r, 'suggested_fix', `report.findings[${i}]`, raw),
-      defer,
-      ...(evidence.length > 0 ? { evidence } : {}),
-      ...(reproducer === null ? {} : { reproducer }),
-    };
-  });
+  const findings: Finding[] = arr(o, 'findings', 'report', raw).map((f, i) => parseFinding(f, i, raw));
 
   const summaryRaw = o['summary'];
   return {
     verdict: oneOf(o, 'verdict', VERDICTS, 'report', raw),
     summary: typeof summaryRaw === 'string' ? summaryRaw : '',
     findings,
+  };
+}
+
+const VOTES: readonly VoteValue[] = ['real', 'not-real', 'cannot-tell'];
+
+/**
+ * One verifier's vote, as the turn returned it (#388 Part C).
+ *
+ * Strict on `vote` and `reason` and throws otherwise: a vote that cannot be read
+ * is a failed turn, which the caller counts as `cannot-tell` - so a malformed
+ * answer can only ever keep a finding blocking. `evidence` is returned as the
+ * model gave it, unvalidated, because `groundFindings` is what decides whether a
+ * citation resolves and a missing list is "cited nothing", not a parse error.
+ */
+export function parseVote(raw: unknown): { vote: VoteValue; reason: string; evidence: unknown[] } {
+  const o = record(raw, 'vote', raw);
+  const evidence = o['evidence'];
+  return {
+    vote: oneOf(o, 'vote', VOTES, 'vote', raw),
+    reason: str(o, 'reason', 'vote', raw),
+    evidence: Array.isArray(evidence) ? (evidence as unknown[]) : [],
   };
 }
 
@@ -289,6 +321,38 @@ export function parseTestVerdicts(raw: unknown): RawVerdict[] {
     out.push({ file, justified, reason });
   }
   return out;
+}
+
+const DISPOSITIONS: readonly Disposition[] = ['fixed', 'rebutted', 'deferred', 'not-addressed'];
+
+/** A review fix turn's output, as `FIX_SCHEMA` shapes it (#393). */
+export interface FixOutput {
+  report: string;
+  dispositions: { id: string; disposition: Disposition; reason: string }[];
+}
+
+/**
+ * A review fix turn's report and dispositions, or a throw.
+ *
+ * Strict, and deliberately so: one malformed entry fails the whole output
+ * rather than being dropped. The caller reads a throw as *unreadable* and
+ * records nothing for the round - a partly read answer would turn the entries
+ * it could not read into findings the fixer appeared to have left out, which
+ * is the invented `not-addressed` the record exists to refuse.
+ */
+export function parseFixOutput(raw: unknown): FixOutput {
+  const o = record(raw, 'fix', raw);
+  const report = str(o, 'report', 'fix', raw);
+  const dispositions = arr(o, 'dispositions', 'fix', raw).map((d, i) => {
+    const path = `fix.dispositions[${String(i)}]`;
+    const e = record(d, path, raw);
+    return {
+      id: str(e, 'id', path, raw),
+      disposition: oneOf(e, 'disposition', DISPOSITIONS, path, raw),
+      reason: str(e, 'reason', path, raw),
+    };
+  });
+  return { report, dispositions };
 }
 
 export function parseAnswers(raw: unknown): AnswersReport {
@@ -486,6 +550,20 @@ export const p0s = (findings: readonly Finding[]): Finding[] =>
  */
 export const blockers = (findings: readonly Finding[]): Finding[] =>
   findings.filter((f) => f.severity === 'P0' || f.severity === 'P1');
+
+/**
+ * Most blocking first, so a later chunk can only ever raise a finding's severity.
+ *
+ * Here rather than in the orchestrator since #388 Part B: the merge across
+ * finders (`src/finder-merge.ts`) ranks by the same table, and two copies would
+ * be two orders a severity could fall between.
+ */
+export const SEVERITY_RANK = {
+  P0: 0,
+  P1: 1,
+  P2: 2,
+  P3: 3,
+} satisfies Record<Severity, number>;
 
 export interface Gate {
   /** True when the loop may move on. */

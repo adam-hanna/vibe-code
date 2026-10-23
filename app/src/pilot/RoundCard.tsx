@@ -3,13 +3,13 @@ import { Badge } from '@/ui/badge';
 import { cn } from '@/lib/utils';
 import { Counts } from '../cockpit/Counts';
 import { elapsed, work as describeWork } from '../cockpit/format';
-import { SEVERITIES } from '../cockpit/model';
-import { roundTitle } from '../cockpit/rounds';
+import { SEVERITIES, gateSentence } from '../cockpit/model';
+import { STAGE_TAB } from '../cockpit/rail';
+import { phaseRound, roundTitle } from '../cockpit/rounds';
 import type { Severity } from '../design';
 import type { RoundCard as Round } from '../cockpit/rounds';
 import type { GateRun } from '../cockpit/model';
 import type { OpenAt } from '../cockpit/LoopColumn';
-import type { Tab } from '../cockpit/where';
 
 /**
  * What a round left behind, in the log (hi-fi 5, #223).
@@ -72,7 +72,8 @@ function gateLine(gate: GateRun): string {
  * knows.** `CycleKind` is four and so is this, so a fifth group fails to compile
  * here rather than producing a card whose heading is a link to nowhere — the same
  * reason `format.ts` holds the boundary and exit-code maps and `contract.test.ts`
- * fails on the commit that adds a ninth code.
+ * fails on the commit that adds a ninth code. It is `rail.ts`'s `STAGE_TAB`
+ * since #409, so the tab bar's running mark reads the same map as these links.
  *
  * The round travels with it. A card is a summary of *one* round, so a link that
  * opened the pane at whichever round happened to be newest would be the wrong
@@ -80,12 +81,7 @@ function gateLine(gate: GateRun): string {
  * up already earned: the largest thing on the surface was inert while something
  * smaller beside it did the navigating.
  */
-const PANE: Readonly<Record<Round['cycle'], Tab>> = {
-  plan: 'plans',
-  critique: 'critique',
-  code: 'code',
-  review: 'review',
-};
+const PANE = STAGE_TAB;
 
 /** A measured duration on the card: monospace and tabular, so a column of them lines up. */
 const TOOK = 'font-mono text-mono-sm tabular-nums text-tertiary';
@@ -109,6 +105,7 @@ export function RoundCard({
 }) {
   const open = card.endedAt === null;
   const counts = card.census?.counts ?? null;
+  const gate = card.census === null ? null : gateSentence(card.census);
   const go = onOpen === undefined ? null : () => { onOpen(PANE[card.cycle], card.round); };
 
   return (
@@ -139,11 +136,13 @@ export function RoundCard({
             {roundTitle(card)}
           </button>
         )}
-        {/* The archive's round, which is the number that names the artifact
-            behind it — the file is `plan-critique-0.json`, and a card has to
-            agree with the file. It is also what the link above carries, so the
-            pane opens at this round rather than at the newest one. */}
-        {card.round !== null && <Badge className="font-mono normal-case tracking-normal">round {card.round}</Badge>}
+        {/* The round as the terminal's heading counts it, from one (#428): a
+            person reads `Plan critique (round 1)` and this chip, never the file
+            name `plan-critique-0.json`. The link above carries the raw round,
+            which is what names the file, so the pane opens at this round rather
+            than at the newest one. No chip on the first implementation, which
+            has no round of its own. */}
+        {phaseRound(card) !== null && <Badge className="font-mono normal-case tracking-normal">round {phaseRound(card)}</Badge>}
         {card.endedAt !== null && (
           <span className={cn(TOOK, 'ml-auto')}>{elapsed(card.endedAt - card.startedAt)}</span>
         )}
@@ -240,12 +239,9 @@ export function RoundCard({
           />
           {/* The loop's own sentence where it blocked, because `gate()` names
               the exact arithmetic that stopped the round. Never one composed
-              here from the counts. */}
-          <div className="text-body-sm text-primary">
-            {card.census.pass
-              ? 'The gate passed.'
-              : (card.census.reason ?? 'The gate blocked this round.')}
-          </div>
+              here from the counts, and none where the census did not say what
+              the gate decided - a replayed one carries the counts alone (#437). */}
+          {gate !== null && <div className="text-body-sm text-primary">{gate}</div>}
           {card.census.findings.slice(0, 3).map((f) => (
             <div className="flex items-baseline gap-2" key={f.id}>
               <SeverityChip severity={weight(f.severity)} label={f.severity} />

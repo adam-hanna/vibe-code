@@ -40,6 +40,36 @@ against them too: a plan can drift. An approved plan and its acceptance criteria
 guide the work, but a demonstrated correctness or safety defect must still be
 reported. Explain a necessary departure; never silently enlarge or lower the bar.`;
 
+/**
+ * What a findings revision is told after the plan loop stops converging (#394).
+ *
+ * The overridable half of the step-back. The counts line that precedes it is
+ * written by `stallCountsLine` and sits outside the block, so an override
+ * replaces this instruction and can never drop what was measured.
+ */
+const STALL_STEP_BACK =
+  'Patching each finding has not converged. Before revising, list what these findings have in ' +
+  'common, and reconsider the approach rather than fixing each one in place. If the brief itself ' +
+  'is the problem (too broad, contradictory, or missing a decision only a person can make), say so ' +
+  "plainly in the plan's open questions.";
+
+/** The step-back's measured line, from `planStall`'s `{counts, fresh}`. Not overridable. */
+function stallCountsLine({ counts, fresh }: StallMeasure): string {
+  const rounds = counts.map((c, i) =>
+    i === 0 ? `${c} blocking (${fresh[i] ?? 0} new)` : `${c} (${fresh[i] ?? 0} new)`,
+  );
+  return (
+    `The last ${counts.length} critiques kept finding new blocking problems instead of fewer: ` +
+    `${rounds.join(', ')}.`
+  );
+}
+
+/** What `planStall` measured, as a revision is handed it. */
+export interface StallMeasure {
+  counts: readonly number[];
+  fresh: readonly number[];
+}
+
 /** The user's brief survives every stage without being rewritten by an agent. */
 export function taskContext(task: string, extraContext: string | null): string {
   return `## Original task
@@ -426,6 +456,12 @@ function hasBar(items: readonly AcceptanceCriterion[] | undefined): items is rea
  * above it rather than below. And the carried section stays the tail of the
  * prompt, byte for byte, which `declined-findings.test.ts` pins as the frozen
  * output of the build before `findingBullet` was extracted (#31).
+ *
+ * The plan critique's non-blocking findings (#425) go between this and the
+ * carried section, for both reasons at once: their own "say in your report"
+ * has its antecedent above it, and the carried section is still the tail
+ * before the declined one, byte for byte. The declined section's "Unlike
+ * anything listed above" stays true, because those findings are work to do.
  */
 function reportRequest(
   criteria: readonly AcceptanceCriterion[] | undefined,
@@ -879,6 +915,12 @@ export interface RevisePlanArgs {
    */
   acceptanceCriteria?: readonly AcceptanceCriterion[] | undefined;
   round: number;
+  /**
+   * The step-back after the plan loop stopped converging (#394), or absent.
+   * Optional so every revision that is not the one after a stall builds the
+   * prompt it always did, byte for byte.
+   */
+  stall?: StallMeasure | undefined;
 }
 
 export function revisePlanPrompt({
@@ -888,6 +930,7 @@ export function revisePlanPrompt({
   outOfScope,
   acceptanceCriteria,
   round,
+  stall,
 }: RevisePlanArgs): string {
   const parts: string[] = [`Revise your plan. This is revision round ${round}.`];
 
@@ -907,6 +950,17 @@ ${findings.map(formatFinding).join('\n\n')}${deferralNote(findings, 'planner')}
 For each P1: fix the plan, or, if you believe the finding is wrong, say so explicitly in the plan with your reasoning. Do not silently ignore one.
 
 ${block(BLOCK.fix, FIX_BREADTH)}`);
+  }
+
+  // After the findings it is about and before the answers (#394). The counts
+  // line is its own string, outside `block()`, so `prompts.stall` replaces the
+  // instruction and keeps the measurement.
+  if (stall !== undefined) {
+    parts.push(`## Stepping back
+
+${stallCountsLine(stall)}
+
+${block(BLOCK.stall, STALL_STEP_BACK)}`);
   }
 
   if (answers && answers.length > 0) {
@@ -970,7 +1024,21 @@ export function implementPrompt(
   acceptanceCriteria: readonly AcceptanceCriterion[] | undefined = [],
   /** The approved boundary, rather than relying on the planner's conversation. */
   outOfScope?: readonly OutOfScopeItem[] | undefined,
+  /**
+   * The approving critique's non-blocking findings that are not deferrable
+   * (#425). Their own section, not "Known open issues": that text gives a P1's
+   * reason, and these are framed the #228 way - address what belongs to the
+   * task, leave the rest.
+   */
+  nonBlocking: readonly Finding[] = [],
 ): string {
+  const alsoRaised =
+    nonBlocking.length === 0
+      ? ''
+      : `\n## Non-blocking findings from the plan critique\n\nThe plan critique also raised these non-blocking findings. Address each one that belongs to the task as you implement, and leave the rest; say in your report what you did about each.\n\n${nonBlocking
+          .map(findingBullet)
+          .join('\n')}\n`;
+
   const known =
     carried.length === 0
       ? ''
@@ -1016,7 +1084,7 @@ ${planMd}
 ## Out of scope
 
 ${formatOutOfScope(outOfScope)}
-${implementerCriteria(acceptanceCriteria)}${reportRequest(acceptanceCriteria, 'implement')}${known}${notDoing}`;
+${implementerCriteria(acceptanceCriteria)}${reportRequest(acceptanceCriteria, 'implement')}${alsoRaised}${known}${notDoing}`;
 }
 
 /** One part of a review round, as the reviewer is told about it. */
@@ -1153,6 +1221,141 @@ function judgeLine(change: FileChange): string {
 }
 
 /**
+ * An additional finder's focus, appended to its review prompt only (#388 Part B).
+ *
+ * Without one the prompt is returned as it came, so a finder with no `focus`
+ * reads exactly what a memoryless reviewer reads. Appended rather than woven in,
+ * so no other finder's prompt - and no default run's - changes a byte.
+ */
+export function withFocus(prompt: string, focus: string | undefined): string {
+  return focus === undefined ? prompt : `${prompt}\n\n## Focus for this review\n\n${focus}`;
+}
+
+/**
+ * How a vote cites, in the vote's own terms. Not `EVIDENCE_RULE`, which is about
+ * what happens to a *finding's* severity when its citations fail - a verifier
+ * sets no severity, and telling it about one is the thing its prompt avoids.
+ * The kinds and the checks are the same, because `groundFindings` runs them.
+ */
+const VOTE_EVIDENCE = `Each citation names one kind of place:
+- \`code\` - this line does X. Needs \`path\` (a file); may add \`line\` and \`excerpt\`. Checked against the repository: the file must exist, \`line\` must be inside it, and \`excerpt\` must appear somewhere in it.
+- \`artifact\` - a run artifact such as \`PLAN.md\`, by basename. Checked against the run directory.
+- \`absence\` - something is missing from a file or directory. Needs \`path\`; only that the place exists is checked.
+- \`external\` - a fact about another tool, a spec, or a URL. Needs \`ref\`. Nothing is checked.
+
+A path must name something inside the repository - or, for \`artifact\`, inside the run directory. Your citations count if **any one** of them resolves.`;
+
+/** What a verifier is shown of a finding: the claim, and nothing about who made it. */
+export type VoteClaim = Pick<Finding, 'title' | 'detail' | 'suggested_fix' | 'evidence'>;
+
+/**
+ * One verifier's prompt: is this one claimed defect real? (#388 Part C)
+ *
+ * **What it is never told, by construction.** It takes the four fields of the
+ * claim and nothing else of the finding, so there is no argument through which
+ * the finder that raised it, how many did (`foundBy`), the id, the severity, the
+ * id's history or another verifier's vote could reach it. A verifier that knew
+ * three finders agreed, or that the others had already said `real`, would be
+ * counting heads rather than reading code - which is the opposite of what the
+ * vote is for.
+ *
+ * It judges existence, not severity or worth: the severity was the finder's
+ * call and a person's to move (#142), and a vote that also re-graded would
+ * be two decisions taken under one name.
+ */
+export function votePrompt(
+  claim: VoteClaim,
+  changedFiles: readonly string[],
+  diff: string,
+  planMd: string,
+  outOfScope: readonly OutOfScopeItem[] | undefined,
+  environment?: EnvironmentFacts | null,
+  roles: RoleTable = ROLES,
+  /**
+   * The repository's `REVIEW.md`, read from the run's start commit (#389), or
+   * absent. A verifier needs it because "invents a number" is a defect only by
+   * this repository's standard. Trailing and absent-renders-nothing, so the
+   * frozen vote prompt is byte-identical without one.
+   */
+  reviewMd?: ReviewStandards | undefined,
+): string {
+  return `You are checking one claimed defect in a code change. Someone reviewing the change says the defect below exists. Decide whether it does.
+
+Read the repository as needed - the diff is context, not the whole picture. Check the code the claim points at and the code around it, and run the tests if that is the fastest way to settle the question.
+
+${environmentBlock(environment, 'reviewer', roles)}
+
+## How to vote
+
+Judge **whether the defect exists** in this code - not how severe it is, and not whether it is worth fixing. Those are not your question.
+
+- **\`real\`** - the defect the claim describes is there. You need no evidence beyond the claim's own; agreeing with what it points at is enough.
+- **\`not-real\`** - the claim is false. Give a concrete reason it is false, and evidence for that reason that a reader can open: the code that shows it, cited the way a finding cites code. A \`not-real\` vote whose evidence resolves to nothing is counted as \`cannot-tell\`.
+- **\`cannot-tell\`** - anything in between. If you are in doubt, this is your vote. It is not a failure; it keeps the claim standing, which is the right outcome when nobody can show it is wrong.${standardsSection(reviewMd, true)}
+
+## Evidence
+
+${VOTE_EVIDENCE}
+
+## The claim
+
+### ${claim.title}
+
+${claim.detail}${citation(claim, '\n\n')}
+
+*Suggested fix:* ${claim.suggested_fix}
+
+## Scope the plan declared
+
+${formatOutOfScope(outOfScope)}
+
+## Files changed
+
+${changedFiles.length > 0 ? changedFiles.map((f) => `- ${f}`).join('\n') : '(none detected)'}
+
+## Diff
+
+\`\`\`diff
+${diff || '(empty diff)'}
+\`\`\`
+
+## The plan this was implementing
+
+${planMd}
+
+${block(BLOCK.json, RESPOND_WITH_JSON)}`;
+}
+
+/** The repository's `REVIEW.md` as a review turn receives it (#389). */
+export interface ReviewStandards {
+  /** The file, verbatim. */
+  text: string;
+  /** The full commit it was read from. */
+  commit: string;
+}
+
+/**
+ * The repository's review standards, after vibe's own standing text so the
+ * severity definitions and `APPROVE_COST` still frame them, and named as the
+ * repository's so a reader of the prompt can tell whose words are whose.
+ * Absent renders nothing.
+ */
+function standardsSection(s: ReviewStandards | undefined, forVote: boolean): string {
+  if (s === undefined) return '';
+  const vote = forVote
+    ? ' Any severity rules in it are not your question, as above - use it only to decide whether the claimed defect exists.'
+    : '';
+  // The vote prompt places this straight after a list item, so it needs the
+  // blank line the review prompt's interpolation already provides.
+  return `${forVote ? '\n' : ''}
+## This repository's review standards (REVIEW.md)
+
+This was written by this repository's owners and read from commit \`${s.commit.slice(0, 7)}\`. It adds to the instructions above and does not replace them.${vote}
+
+${s.text}${s.text.endsWith('\n') ? '' : '\n'}`;
+}
+
+/**
  * The block asking for a verdict on each change to the judge (#112).
  *
  * The definition of "justified" is AGENTS.md's rule for when a test may be
@@ -1165,13 +1368,13 @@ function judgeSection(judge: readonly FileChange[] | undefined): string {
   return `
 ## Changes to the judge
 
-This change touches files that decide whether the work passes - its tests, or \`vibe.config.json\`, where the verification gates are configured. A change here can make the gate go green without the code getting any better, so each one needs your verdict.
+This change touches files that decide whether the work passes - its tests, \`vibe.config.json\`, where the verification gates are configured, or \`REVIEW.md\`, the repository's review standards. A change here can make the gate go green without the code getting any better, so each one needs your verdict.
 
 ${judge.map(judgeLine).join('\n')}
 
 For each file above, return exactly one entry in \`test_verdicts\` - \`file\` spelled exactly as listed, \`justified\`, and a \`reason\`.
 
-**What justified means.** Editing or removing a test is justified ONLY when the test's claim is no longer the contract: the behaviour it checks genuinely moved, as the plan intended, or the test asserted more than the thing it was guarding. It is NEVER justified merely because it makes the gate pass - a test changed to agree with the code is the defect this check exists to catch. A newly added test is fine to mark justified; adding tests is not suspicious. For \`vibe.config.json\`, the question is whether the change to the gates or the configuration is something the plan called for.
+**What justified means.** Editing or removing a test is justified ONLY when the test's claim is no longer the contract: the behaviour it checks genuinely moved, as the plan intended, or the test asserted more than the thing it was guarding. It is NEVER justified merely because it makes the gate pass - a test changed to agree with the code is the defect this check exists to catch. A newly added test is fine to mark justified; adding tests is not suspicious. For \`vibe.config.json\` and \`REVIEW.md\`, the question is whether the change is something the plan called for.
 
 A listed file you leave out is recorded as unjudged, never as justified. This does not block the run and it is not a finding: if a change here is wrong, ALSO raise it as an ordinary finding at its true severity.
 `;
@@ -1225,6 +1428,16 @@ export function reviewPrompt(
    * verdicts on no files.
    */
   judge?: readonly FileChange[] | undefined,
+  /**
+   * The repository's `REVIEW.md`, read from the run's start commit (#389), or
+   * absent - which is also how a refused or unreadable file arrives.
+   *
+   * Trailing and absent-renders-nothing for the reason `chunk` is: a
+   * repository without one gets the prompt it got before this existed, byte for
+   * byte. It is not a `block()`, so a `prompts.<block>` override never touches
+   * it: replacing vibe's text and adding the repository's are separate.
+   */
+  reviewMd?: ReviewStandards | undefined,
 ): string {
   return `You are reviewing a code change against the plan it was meant to implement.${
     round > 1 ? continuityNote(round, hasMemory, 'change') : ''
@@ -1269,7 +1482,7 @@ There is no per-criterion verdict to report and no field to set. Your findings a
 
 ${block(BLOCK.review, REVIEW_BREADTH)}
 ${block(BLOCK.simple, SIMPLE_SOLUTION)}
-${chunk === undefined ? '' : chunkNote(chunk)}${reportSection(report)}${judgeSection(judge)}
+${standardsSection(reviewMd, false)}${chunk === undefined ? '' : chunkNote(chunk)}${reportSection(report)}${judgeSection(judge)}
 ## Files changed
 
 ${changedFiles.length > 0 ? changedFiles.map((f) => `- ${f}`).join('\n') : '(none detected)'}
@@ -1303,6 +1516,14 @@ export function fixPrompt(
   acceptanceCriteria?: readonly AcceptanceCriterion[] | undefined,
   /** The approved plan and boundary travel on every fix, including verification. */
   plan?: Plan | null | undefined,
+  /**
+   * Ask for the report and a disposition per finding as `FIX_SCHEMA` JSON (#393).
+   *
+   * True only on the two review fix turns. `verify-fix` passes nothing - its one
+   * finding is a gate failure, not a reviewer's claim - and its prompt is
+   * byte-identical to what it was, as is every rendering with this false.
+   */
+  dispositions = false,
 ): string {
   return `A code reviewer found issues in your implementation. This is fix round ${round}.
 
@@ -1319,7 +1540,25 @@ ${plan == null ? '' : `## Approved plan of record\n\n${plan.plan_md}\n\n## Out o
 Re-run the project's tests after fixing. If you believe a finding is incorrect, fix nothing for it but explain why in your final message - do not silently skip it.
 
 Do not commit - the orchestrator handles git.
-${implementerCriteria(acceptanceCriteria)}${reportRequest(acceptanceCriteria, 'fix')}`;
+${implementerCriteria(acceptanceCriteria)}${reportRequest(acceptanceCriteria, 'fix')}${
+    dispositions ? dispositionsRequest(findings) : ''
+  }`;
+}
+
+/**
+ * The one addition a review fix turn's prompt carries (#393): return the report
+ * and the dispositions as `FIX_SCHEMA` JSON, one entry per id it was shown.
+ *
+ * Appended after the report request rather than woven into `FIX_BREADTH`, which
+ * is shared with the implement turn and overridable, so neither of those moves.
+ */
+function dispositionsRequest(findings: readonly Finding[]): string {
+  const ids = findings.map((f) => `\`${f.id}\``).join(', ');
+  return `
+## Dispositions
+
+Return your final message as JSON in the response schema. \`report\` holds the whole report described above, with its five headings: it is what the next reviewer reads. \`dispositions\` has one entry for each finding id listed above (${ids}): \`disposition\` is \`fixed\`, \`rebutted\`, \`deferred\` or \`not-addressed\`, and \`reason\` says why in a sentence or two. Use only those ids.
+`;
 }
 
 /**
@@ -1443,7 +1682,7 @@ const DEFERRED_MARK =
  * `C:\...` a citation may legitimately arrive as is not a path the reader's
  * shell can open. Repo-relative is the one form true for both.
  */
-function citation(f: Finding, indent: string): string {
+function citation(f: Pick<Finding, 'evidence'>, indent: string): string {
   const parts = readEvidence(f.evidence)
     .map((e) => {
       if (e.kind === 'external') {
@@ -1663,6 +1902,7 @@ const BLOCK = {
   fix: 'fix breadth',
   deferred: 'a deferred finding',
   simple: 'simple solution',
+  stall: 'stall',
 } as const;
 
 let installed: Readonly<Record<string, string>> = {};
@@ -1792,6 +2032,8 @@ export function promptBlocks(): readonly PromptBlock[] {
     // is never shown a deferral mark, which is what the test caught when this
     // line claimed otherwise.
     of(BLOCK.deferred, ['planner', 'implementer'], DEFERRED_MARK),
+    // Only the findings revision after a stall carries it (#394).
+    of(BLOCK.stall, ['planner'], STALL_STEP_BACK),
   ];
 }
 
@@ -1805,3 +2047,23 @@ export function promptBlocks(): readonly PromptBlock[] {
 export function promptBlockNames(): readonly string[] {
   return promptBlocks().map((b) => b.name);
 }
+
+/**
+ * The pilot's editable blocks, by name only (#420).
+ *
+ * The desktop pilot's own prompt is built in the webview (`app/src/pilot/
+ * brief.ts`), so its fixed prose - who it is, how it takes in a request, how
+ * it reads the run block - is edited in Settings -> Prompts beside these
+ * blocks and stored in the same `prompts` table, as `prompts."pilot: intake"`
+ * and so on. The core never renders them and does not hold their text: a copy
+ * here would be the core owning a fact about the pilot, going stale on the
+ * release that edits one. What the core does need is the **names**, because
+ * the validator refuses a name this build does not have, and a pilot block
+ * refused as a typo would be an edit nobody could make.
+ *
+ * Prefixed `pilot: ` so they cannot collide with a core block's name and so a
+ * config file says whose they are. Not in `promptBlocks()`: that answers what
+ * the loop's turns are told, and no turn of a run is told these.
+ * `tests/pilot-prompt-names.test.ts` keeps this list equal to the app's.
+ */
+export const PILOT_PROMPT_BLOCKS: readonly string[] = ['pilot: who', 'pilot: intake', 'pilot: how to read'];

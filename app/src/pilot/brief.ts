@@ -1,5 +1,6 @@
 import { FENCE } from './emit';
-import { declare, describeRun } from './tools';
+import { declare, describeBound } from './tools';
+import type { Binding } from './bound';
 import type { Launched } from '../cockpit/argv';
 import type { PilotAccess } from './access';
 import type { Run } from '../cockpit/model';
@@ -192,6 +193,12 @@ export function ownTools(cli: 'claude' | 'codex', access: PilotAccess | null): s
  * model that rounds that to zero reports a measurement that was never taken.
  */
 const HOW_TO_READ = [
+  '`run` at the top says which run this conversation reads, by id, and whether it',
+  'is starting, live, ended or lost; an ended run carries how it ended. `none`',
+  'means no run is open for this conversation, and names the last run it started;',
+  '`unreadable` says why its narration cannot be read. Say so, rather than guessing',
+  'that a run is still starting.',
+  '',
   'If `before` is present this run was RESUMED, and everything else in the block',
   'describes only the part since it was picked up. `before` is what earlier',
   'sessions already did - rounds, spend, findings still open.',
@@ -307,6 +314,11 @@ const INTAKE = [
   '',
   'The person still presses the button. What you are deciding is when to put it',
   'in front of them.',
+  '',
+  'Name the branch on every start_run, in its "branch" field: short and',
+  'descriptive of the work, such as fix/login-timeout. vibe creates it; you do',
+  'not. If the person\'s instructions give a naming rule, follow it. If they ask',
+  'for a different name, propose the run again with that one.',
 ].join('\n');
 
 /** The brief, or the fact that this window has not launched anything. */
@@ -500,24 +512,37 @@ export function systemPrompt(
    * nothing, so a pilot with none is told exactly what it was before.
    */
   standing: string | null = null,
+  /**
+   * The `prompts` table from the person's settings (#420): where a
+   * `pilot: <block>` entry replaces one of the fixed prose blocks. Unknown
+   * until the config is read, and null then, which is every block's built-in.
+   */
+  prompts: unknown = null,
+  /**
+   * Which run this conversation reads (#438). The block below carries the same
+   * `run` header `read_run` does, so the prompt and the tool still agree. Null
+   * for a caller with no window, which prints the run alone, as before.
+   */
+  bound: Binding | null = null,
 ): string {
+  const text = (name: PilotBlockName): string => resolvePilotBlock(name, prompts).text;
   return [
-    WHO,
+    text(PILOT_BLOCK.who),
     '',
     ...standingBlock(standing),
     // **Before the run block, deliberately.** Everything below this is a
     // description of a run that may not exist yet; this is the job. A doctrine
     // buried under two hundred lines of JSON is one a model reads last.
-    INTAKE,
+    text(PILOT_BLOCK.intake),
     '',
     whatWasAsked(launched),
     ...whereTheWorkIs(run),
     '',
     '## The run, as this window holds it',
     '',
-    JSON.stringify(describeRun(run), null, 2),
+    JSON.stringify(describeBound(run, bound), null, 2),
     '',
-    HOW_TO_READ,
+    text(PILOT_BLOCK.read),
     '',
     // The one place the two backends are told different things about
     // themselves, because they *are* different: one has the repository and the
@@ -530,4 +555,118 @@ export function systemPrompt(
     accessNote(access),
     ...(channel === 'emitted' ? ['', howToCall()] : []),
   ].join('\n');
+}
+
+// ---- the editable blocks ------------------------------------------------------
+
+/**
+ * The pilot's fixed prose, editable in Settings -> Prompts like the core's
+ * blocks (#420).
+ *
+ * **Asked for so a project can tell the pilot its own rules** - #356 decided a
+ * branch-naming standard is something the person tells the pilot rather than
+ * something vibe enforces, and the person could not edit a word the pilot was
+ * told. The owner chose the core's shape knowing its cost: a block somebody
+ * edits stops receiving the product's improvements to it, and *use the default*
+ * (which clears the key) is how it starts receiving them again.
+ *
+ * **Three blocks, and the rest stay code on purpose.** `WHO`, `INTAKE` and
+ * `HOW_TO_READ` are the only parts of `systemPrompt` that are prose and nothing
+ * else. Everything else is assembled from something the window holds - the
+ * brief, the worktree, the run JSON, the access list, the tool table - and an
+ * edited copy of any of them would be a description of a run, a setting or a
+ * tool table that has since moved on: the fabrication this file is arranged
+ * against. `ownTools` and the one-line note for the API road are prose too,
+ * but each is a statement about which backend this turn is on and what its
+ * sandbox enforces, and one edited text sent to both roads would be false on
+ * one of them - which is the defect that note was written to fix. `howToCall`
+ * is the parser's contract with the model (`emit.ts` reads what it describes).
+ * Standing instructions are the person's own text already.
+ *
+ * **The names say whose they are.** `pilot: intake` cannot collide with a core
+ * block's name, and a config file that holds one reads as what it is. They live
+ * in the same `prompts` table as the core's, so one validator refuses a typo
+ * in either and `configDiff` names a change to either. The core knows these
+ * names - `PILOT_PROMPT_BLOCKS` in `src/prompts.ts`, for the validator - and
+ * not the texts: the texts are built here, in the webview that sends them, and
+ * a copy in the core would be the core owning a fact about the pilot.
+ * `tests/pilot-prompt-names.test.ts` keeps the two lists of names equal.
+ */
+export const PILOT_BLOCK = {
+  who: 'pilot: who',
+  intake: 'pilot: intake',
+  read: 'pilot: how to read',
+} as const;
+
+export type PilotBlockName = (typeof PILOT_BLOCK)[keyof typeof PILOT_BLOCK];
+
+/** Each block's built-in text: the constants above, untouched. */
+const BUILT_IN: Readonly<Record<PilotBlockName, string>> = {
+  [PILOT_BLOCK.who]: WHO,
+  [PILOT_BLOCK.intake]: INTAKE,
+  [PILOT_BLOCK.read]: HOW_TO_READ,
+};
+
+/** The shape the core's blocks arrive in, so Settings draws both alike. */
+export interface PilotPromptBlock {
+  name: PilotBlockName;
+  usedBy: readonly string[];
+  /** As it will be sent: the person's, or the built-in. */
+  text: string;
+  /** The built-in, always. */
+  fallback: string;
+  overridden: boolean;
+  /**
+   * Why a stored value was NOT used, when one was there and could not be.
+   * Said rather than swallowed, because an override that silently did nothing
+   * is somebody believing they changed the pilot's instructions.
+   */
+  problem: string | null;
+}
+
+/**
+ * What a block is in force as, from the settings' `prompts` table.
+ *
+ * **Fails closed to the built-in, never to empty.** A table that is not an
+ * object, an entry that is not text, a blank entry: each is the built-in. Blank
+ * is the core's rule (`block()` in `src/prompts.ts`): clearing the box means
+ * *give me the default back*, and a pilot with no intake doctrine is not a
+ * pilot following a weaker one. A value that is not text is told as a problem,
+ * because somebody wrote it meaning something.
+ *
+ * Shared with Settings for the core's blocks too, because the core's answer to
+ * "what is in force" is its run-time latch, and the host that answers Settings
+ * never runs a loop - so the table the screen already read is the one place
+ * either kind of block's state is known.
+ */
+export function inForce(
+  name: string,
+  fallback: string,
+  prompts: unknown,
+): { text: string; overridden: boolean; problem: string | null } {
+  const built = (problem: string | null) => ({ text: fallback, overridden: false, problem });
+  if (prompts === null || prompts === undefined) return built(null);
+  if (typeof prompts !== 'object' || Array.isArray(prompts)) {
+    return built('the prompts setting is not a table, so the built-in is in force');
+  }
+  const stored = (prompts as Record<string, unknown>)[name];
+  if (stored === undefined || stored === null) return built(null);
+  if (typeof stored !== 'string') {
+    return built(`prompts."${name}" is not text, so the built-in is in force`);
+  }
+  if (stored.trim() === '') return built(null);
+  return { text: stored, overridden: stored !== fallback, problem: null };
+}
+
+/** One pilot block as it will be sent. */
+export function resolvePilotBlock(name: PilotBlockName, prompts: unknown): PilotPromptBlock {
+  const fallback = BUILT_IN[name];
+  return { name, usedBy: ['pilot'], fallback, ...inForce(name, fallback, prompts) };
+}
+
+/** Every editable pilot block, in the order the prompt carries them. */
+export function pilotPromptBlocks(prompts: unknown): readonly PilotPromptBlock[] {
+  return [PILOT_BLOCK.who, PILOT_BLOCK.intake, PILOT_BLOCK.read].map((name) =>
+    resolvePilotBlock(name, prompts),
+  );
 }

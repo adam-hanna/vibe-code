@@ -1,0 +1,350 @@
+{
+  "run": "20261014-130025-346-pair-connect-and-reconnect-from-the-",
+  "critiques": [
+    {
+      "file": "plan-critique-0.json",
+      "findings": [
+        {
+          "id": "initial-replay-can-be-lost",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        },
+        {
+          "id": "bridge-test-helpers-are-not-exportable",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        },
+        {
+          "id": "pair-cancel-has-no-shared-owner",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        },
+        {
+          "id": "phone-hello-uses-wrong-version-source",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        },
+        {
+          "id": "suspended-is-not-a-run-event",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        },
+        {
+          "id": "connected-event-contract-drift",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        }
+      ]
+    },
+    {
+      "file": "plan-critique-1.json",
+      "findings": [
+        {
+          "id": "request-pause-throws-outside-callers",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        },
+        {
+          "id": "stale-replay-release-after-close",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        },
+        {
+          "id": "biometric-availability-is-not-device-lock",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        }
+      ]
+    },
+    {
+      "file": "plan-critique-2.json",
+      "findings": [
+        {
+          "id": "phone-originated-remote-off-close-path",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        },
+        {
+          "id": "control-handshake-can-hang",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        },
+        {
+          "id": "phone-plugins-not-registered",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        },
+        {
+          "id": "unpair-leaves-dangling-current",
+          "severity": "P2",
+          "defer": false,
+          "raisedBy": "critic"
+        }
+      ]
+    },
+    {
+      "file": "plan-critique-3.json",
+      "findings": [
+        {
+          "id": "phone-originated-remote-off-close-path",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        },
+        {
+          "id": "phone-pairing-adds-forbidden-timeout",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        }
+      ]
+    },
+    {
+      "file": "plan-critique-4.json",
+      "findings": [
+        {
+          "id": "reconnect-generation-event-can-be-lost",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        },
+        {
+          "id": "noncurrent-desktops-lack-reachability",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        },
+        {
+          "id": "unpair-does-not-stop-reconnect-loop",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        }
+      ]
+    },
+    {
+      "file": "plan-critique-5.json",
+      "findings": [
+        {
+          "id": "resync-can-roll-back-to-stale-generation",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        },
+        {
+          "id": "paired-list-writes-race-during-probes",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        },
+        {
+          "id": "notifications-misclassify-control-results",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        }
+      ]
+    },
+    {
+      "file": "plan-critique-6.json",
+      "findings": [
+        {
+          "id": "barcode-scanner-package-omitted",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        },
+        {
+          "id": "phone-link-missing-iroh-dependency",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        },
+        {
+          "id": "failed-run-notification-path",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        }
+      ]
+    },
+    {
+      "file": "plan-critique-7.json",
+      "findings": [
+        {
+          "id": "run-host-exit-notification",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        },
+        {
+          "id": "unreachable-close-is-dropped",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        }
+      ]
+    },
+    {
+      "file": "plan-critique-8.json",
+      "findings": [
+        {
+          "id": "network-diagnosis-inputs-are-not-defined",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        },
+        {
+          "id": "stale-relay-hint-breaks-reconnect",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        },
+        {
+          "id": "phone-endpoint-misses-mdns",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        }
+      ]
+    },
+    {
+      "file": "plan-critique-9.json",
+      "findings": [
+        {
+          "id": "phone-pairing-adds-forbidden-timeout",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        },
+        {
+          "id": "unpair-stale-hint-fallback-has-no-budget",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        },
+        {
+          "id": "custom-relay-outage-is-not-classifiable",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        },
+        {
+          "id": "client-net-reader-not-thread-safe",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        },
+        {
+          "id": "net-of-advertised-addresses-not-interface-state",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        }
+      ]
+    },
+    {
+      "file": "plan-critique-10.json",
+      "findings": [
+        {
+          "id": "pairing-paused-time-test-missing-tokio-feature",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        },
+        {
+          "id": "relay-state-is-not-route-specific",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        }
+      ]
+    },
+    {
+      "file": "plan-critique-11.json",
+      "findings": [
+        {
+          "id": "network-change-poke-only-on-online-toggle",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        },
+        {
+          "id": "relay-state-hides-target-relay-failure",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        },
+        {
+          "id": "relay-state-table-not-constructible",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        }
+      ]
+    },
+    {
+      "file": "plan-critique-12.json",
+      "findings": [
+        {
+          "id": "pairing-code-never-reaches-phone-screen",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        },
+        {
+          "id": "no-device-lock-warning-is-unspecified",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        }
+      ]
+    },
+    {
+      "file": "plan-critique-13.json",
+      "findings": [
+        {
+          "id": "initial-phone-lock-is-not-enforced",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        },
+        {
+          "id": "pair-cancel-can-leave-one-sided-pairing",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        },
+        {
+          "id": "pairing-storage-errors-have-no-result-path",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        }
+      ]
+    },
+    {
+      "file": "plan-critique-14.json",
+      "findings": [
+        {
+          "id": "late-paired-not-saved-is-hidden",
+          "severity": "P1",
+          "defer": false,
+          "raisedBy": "critic"
+        }
+      ]
+    }
+  ]
+}

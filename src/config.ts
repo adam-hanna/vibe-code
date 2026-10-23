@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   DEFAULT_ROLE_PROVIDERS,
+  FINDER_KEYS,
   patchRoles,
   providersForRoles,
   ROLE_NAMES,
@@ -17,7 +18,7 @@ import { setOwn } from '@src/runtime.js';
 import type { AgentProvider, ToolchainContract, ToolRequirement, Phase } from '@src/runtime.js';
 import { DEFAULT_GATES, validateGates } from '@src/gates.js';
 import { DEFAULT_TEST_PATHS } from '@src/judge.js';
-import { promptBlockNames } from '@src/prompts.js';
+import { PILOT_PROMPT_BLOCKS, promptBlockNames } from '@src/prompts.js';
 import { readPilotAccess, refuseProjectPilot } from '@src/pilotaccess.js';
 import { readCliPaths, refuseProjectCli } from '@src/clipaths.js';
 import { readRoutes, refuseProjectAuth } from '@src/auth.js';
@@ -28,7 +29,9 @@ import type {
   GatesConfig,
   LoadedConfig,
   PromptOverrides,
+  ReviewConfig,
   Sandbox,
+  UnconfirmedP0,
   VerifyConfig,
 } from '@src/types.js';
 
@@ -40,6 +43,12 @@ import type {
 export { EFFORTS };
 
 const SANDBOXES: readonly Sandbox[] = ['read-only', 'workspace-write', 'danger-full-access'];
+
+/** What `review.unconfirmedP0` may say (#388): the owner's three, 2026-10-20. */
+export const UNCONFIRMED_P0: readonly UnconfirmedP0[] = ['block', 'halt', 'demote'];
+
+/** The keys of the `review` section, in the order a message lists them. */
+const REVIEW_KEYS = ['finders', 'verifiers', 'quorum', 'unconfirmedP0'] as const;
 
 /**
  * The agent CLI versions this build was tested against (#298).
@@ -56,7 +65,7 @@ const SANDBOXES: readonly Sandbox[] = ['read-only', 'workspace-write', 'danger-f
  * the installed CLI's `--help` does not declare (`src/cliversions.ts`).
  */
 export const TESTED_CLI_VERSIONS: Readonly<Record<AgentProvider, string>> = {
-  claude: '2.1.303',
+  claude: '2.1.307',
   codex: '0.163.0',
 };
 
@@ -115,6 +124,18 @@ export const DEFAULTS: Config = {
     // have converged.
     oscillationThreshold: 3,
     convergenceWindow: 3,
+    // Picked from part 1's replay of the plan archive (#394,
+    // `scripts/replay-plan-stall.mjs`): 2, 3 and 4 gave the same result - #246-b
+    // first stalls at record 4, #346 at 4, and no other run stalls at all - so 3
+    // is the issue's number, unrefuted rather than tuned. 0 turns it off.
+    stallAfter: 3,
+    // On (#425). Run 20261022-224848 passed a review whose verdict was REVISE
+    // with two P2s in the task's own files, said "Review clean", and ran no fix;
+    // a person found both in code-review-0.json and fixed them by hand. A pass
+    // still does not block on them - it buys the one final round the carried-P1
+    // path already has, never re-reviewed, and the fixer still judges each under
+    // #228's scope rule. What it leaves goes to FOLLOW-UPS.md.
+    fixNonBlocking: true,
   },
   budget: {
     // NOT a spend limit on a Claude subscription - the CLI derives this from
@@ -246,6 +267,17 @@ export const DEFAULTS: Config = {
   prompts: {},
   // Empty: nobody's instructions until somebody writes some (#273).
   instructions: { text: '' },
+  // More review seats and a vote (#388), read by `runReview` when either list
+  // is non-empty. Empty lists, so a default run is byte-identical to one from
+  // before the key existed. `block` is the owner's decision (2026-10-20): an
+  // unconfirmed P0 still blocks unless somebody chooses otherwise. No
+  // recommended set of seats ships until #388's measurement has been made.
+  review: { finders: [], verifiers: [], quorum: null, unconfirmedP0: 'block' },
+  // On, by the owner's decision on #323: a terminal user is told once, at the
+  // end of `vibe run`, `vibe plan` or `vibe doctor`, when npm has a newer vibe.
+  // It is the one network request in `src/` - see `src/updatecheck.ts` for what
+  // is sent and every other switch that turns it off.
+  updates: { check: true },
   toolchain: {
     // Deliberately minimal. `git` is needed in every phase because vibe commits
     // per round; node and npm only matter once something is being built or
@@ -336,6 +368,23 @@ function mergeGates(base: GatesConfig, override: unknown): GatesConfig {
   return out as unknown as GatesConfig;
 }
 
+/**
+ * Merge the review seats, keeping anything wrong for validation to name (#388).
+ *
+ * `mergeGates`' shape and reason: `mergeSection` iterates the base's keys, so a
+ * misspelt `quorom` would be dropped and `"review": null` swallowed - a vote the
+ * user believes they configured, silently not there. A key's value is replaced
+ * whole, so a project's `finders` replaces the global file's list rather than
+ * appending to it, and a `quorum` the project does not name is left standing.
+ */
+function mergeReview(base: ReviewConfig, override: unknown): ReviewConfig {
+  if (override === undefined) return base;
+  if (!isRecord(override)) return override as ReviewConfig;
+  const out: Record<string, unknown> = { ...base };
+  for (const [key, value] of Object.entries(override)) setOwn(out, key, value);
+  return out as unknown as ReviewConfig;
+}
+
 export function mergeConfig(base: Config, override: unknown): Config {
   if (!isRecord(override)) return base;
   return {
@@ -353,6 +402,8 @@ export function mergeConfig(base: Config, override: unknown): Config {
     toolchain: mergeToolchain(base.toolchain, override['toolchain']),
     prompts: mergePrompts(base.prompts, override['prompts']),
     instructions: mergeInstructions(base.instructions, override['instructions']),
+    review: mergeReview(base.review, override['review']),
+    updates: mergeSection(base.updates, override['updates']),
   };
 }
 
@@ -520,6 +571,8 @@ const SECTIONS = [
   'progress',
   'prompts',
   'instructions',
+  'review',
+  'updates',
 ] as const;
 
 /**
@@ -703,7 +756,7 @@ function validateRoles(raw: unknown): void {
     // Through the one reader, so what a config accepts and what `tableFor`
     // accepts are the same statement rather than two that have to be kept in
     // step. It throws, naming the role and what is wrong with it.
-    roleSetting(role, raw[role]);
+    roleSetting(`roles.${role}`, raw[role]);
   }
 }
 
@@ -722,6 +775,15 @@ function validate(cfg: Config): void {
   }
   if (!SANDBOXES.includes(cfg.codex.sandbox)) {
     throw new Error(`codex.sandbox must be one of ${SANDBOXES.join(', ')}`);
+  }
+  // Refused by name rather than read as truthy (#323): `"false"` in a config
+  // file would otherwise be a string, truthy, and leave the check on for
+  // somebody who believes they turned it off.
+  if (typeof cfg.updates.check !== 'boolean') {
+    throw new Error('updates.check must be true or false');
+  }
+  if (typeof cfg.loop.fixNonBlocking !== 'boolean') {
+    throw new Error('loop.fixNonBlocking must be true or false');
   }
   for (const key of [
     'maxPlanRounds',
@@ -770,6 +832,10 @@ function validate(cfg: Config): void {
   // Zero is meaningful here, unlike the round caps: it demands a spotless verdict.
   if (!Number.isInteger(cfg.loop.p1Tolerance) || cfg.loop.p1Tolerance < 0) {
     throw new Error('loop.p1Tolerance must be zero or a positive integer');
+  }
+  // Zero is meaningful here too: it turns stall detection off (#394).
+  if (!Number.isInteger(cfg.loop.stallAfter) || cfg.loop.stallAfter < 0) {
+    throw new Error('loop.stallAfter must be zero (off) or a positive integer');
   }
   if (!Number.isFinite(cfg.budget.maxCostUsd) || cfg.budget.maxCostUsd <= 0) {
     throw new Error('budget.maxCostUsd must be a positive number');
@@ -848,6 +914,71 @@ function validate(cfg: Config): void {
   // instruction is a good one, and a length limit would be a number with
   // nothing behind it - the same answer `validatePrompts` gives (#273).
   if (typeof cfg.instructions.text !== 'string') throw new Error('instructions.text must be a string');
+  validateReview(cfg.review);
+}
+
+/**
+ * The `review` section (#388), refused by name and by index.
+ *
+ * Each seat goes through `roleSetting`, the one reader `roles.<role>` uses, so
+ * what a seat may say and what a role may say cannot drift apart - only the
+ * path in the message and the key list differ. A finder's `focus` is the one
+ * key `roleSetting` permits without checking, so it is checked here.
+ *
+ * The quorum is checked against the list in the same config, which is why it
+ * is refused after the seats are read: "2 but there are only 1 verifiers" is
+ * only a true sentence about a list that is itself legal.
+ */
+function validateReview(review: unknown): void {
+  const takes = `review takes ${REVIEW_KEYS.slice(0, -1).join(', ')} and ${REVIEW_KEYS[REVIEW_KEYS.length - 1] ?? ''}`;
+  if (!isRecord(review)) {
+    throw new Error(`review must be an object with finders, verifiers, quorum and unconfirmedP0`);
+  }
+  for (const key of Object.keys(review)) {
+    if (!(REVIEW_KEYS as readonly string[]).includes(key)) {
+      throw new Error(`review.${key} is not a setting; ${takes}`);
+    }
+  }
+  const finders: unknown = review['finders'];
+  const verifiers: unknown = review['verifiers'];
+  if (!Array.isArray(finders)) throw new Error('review.finders must be a list of seats, or [] for none');
+  if (!Array.isArray(verifiers)) throw new Error('review.verifiers must be a list of seats, or [] for none');
+  finders.forEach((entry: unknown, i) => {
+    const where = `review.finders[${i}]`;
+    roleSetting(where, entry, { keys: FINDER_KEYS, noun: 'a finder' });
+    if (isRecord(entry) && Object.prototype.hasOwnProperty.call(entry, 'focus')) {
+      const focus = entry['focus'];
+      // Blank is refused rather than read as "no focus": absent already says
+      // that, and a key holding nothing is a setting somebody meant to write.
+      if (typeof focus !== 'string' || focus.trim() === '') {
+        throw new Error(
+          `${where}.focus is ${JSON.stringify(focus) ?? String(focus)}; must be a non-empty string, ` +
+            'or absent for the shared prompt',
+        );
+      }
+    }
+  });
+  verifiers.forEach((entry: unknown, i) => {
+    roleSetting(`review.verifiers[${i}]`, entry, { noun: 'a verifier' });
+  });
+  const quorum: unknown = review['quorum'];
+  if (quorum !== null) {
+    if (typeof quorum !== 'number' || !Number.isInteger(quorum) || quorum < 1) {
+      throw new Error('review.quorum must be a positive whole number of verifiers, or null for a majority');
+    }
+    if (verifiers.length === 0) {
+      throw new Error(
+        `review.quorum is ${quorum} but review.verifiers is empty; a quorum needs verifiers to count`,
+      );
+    }
+    if (quorum > verifiers.length) {
+      throw new Error(`review.quorum is ${quorum} but there are only ${verifiers.length} verifiers`);
+    }
+  }
+  const p0: unknown = review['unconfirmedP0'];
+  if (typeof p0 !== 'string' || !UNCONFIRMED_P0.includes(p0 as UnconfirmedP0)) {
+    throw new Error(`review.unconfirmedP0 must be one of ${UNCONFIRMED_P0.join(', ')}`);
+  }
 }
 
 const PHASES: readonly Phase[] = ['plan', 'implement', 'review'];
@@ -1508,7 +1639,9 @@ function validateVerify(verify: VerifyConfig): void {
  * would be a number with nothing behind it.
  */
 function validatePrompts(prompts: PromptOverrides): void {
-  const known = new Set(promptBlockNames());
+  // The pilot's blocks share the table (#420): no run renders them, but a name
+  // refused here would be a pilot instruction nobody could adopt.
+  const known = new Set([...promptBlockNames(), ...PILOT_PROMPT_BLOCKS]);
   for (const [name, text] of Object.entries(prompts)) {
     if (!known.has(name)) {
       throw new Error(
