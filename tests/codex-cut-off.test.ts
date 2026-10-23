@@ -103,9 +103,106 @@ test('a cut-off whose stream carried no message is still a cut-off, with nothing
   );
   assert.ok(err instanceof OutputCutOffError);
   assert.equal(err.text, '');
-  assert.equal(err.chars, 0);
-  assert.equal(err.blankChars, 0);
+  // Absent, not zero: no message arrived, so nothing was counted (#416).
+  assert.equal(err.chars, null);
+  assert.equal(err.blankChars, null);
   assert.deepEqual(err.findings, []);
+  assert.match(err.message, /cut off at its output limit before its final message arrived/);
+  assert.match(err.message, /It wrote no message\./);
+  assert.doesNotMatch(err.message, /\b0 characters/);
+  const record = JSON.parse(readFileSync(path.join(dir, 'critique-1.cutoff.json'), 'utf8')) as Record<string, unknown>;
+  assert.equal(record['chars'], null);
+  assert.equal(record['blankChars'], null);
+  assert.equal(record['text'], null);
+});
+
+test('an earlier message followed by more work is not counted as the cut-off answer', async () => {
+  // The final message never completed: the last completed message is a note
+  // from before a command ran, and quoting its length as "characters of JSON"
+  // would describe the wrong message. Nothing is counted or salvaged from it.
+  const dir = mkdtempSync(path.join(tmpdir(), 'vibe-cut-off-'));
+  const earlier = JSON_PART + '"reproducer":null}]}';
+  const err: unknown = await codexTurn(
+    options(dir),
+    stream([
+      JSON.stringify({ type: 'item.completed', item: { id: 'item_0', type: 'agent_message', text: earlier } }),
+      JSON.stringify({ type: 'item.started', item: { id: 'item_1', type: 'command_execution', command: 'ls' } }),
+      JSON.stringify({ type: 'item.completed', item: { id: 'item_1', type: 'command_execution', command: 'ls' } }),
+      JSON.stringify({ type: 'error', message: CUT_OFF }),
+      JSON.stringify({ type: 'turn.failed', error: { message: CUT_OFF } }),
+    ]),
+  ).then(
+    () => assert.fail('a cut-off turn must not succeed'),
+    (e: unknown) => e,
+  );
+  assert.ok(err instanceof OutputCutOffError);
+  assert.equal(err.chars, null);
+  assert.equal(err.blankChars, null);
+  assert.equal(err.text, '');
+  assert.deepEqual(err.findings, [], 'nothing is salvaged from a message that was not the answer');
+  assert.match(err.message, /before its final message arrived/);
+  assert.match(err.message, /followed by more work, so it was not the answer/);
+  assert.doesNotMatch(err.message, /characters of JSON/);
+  assert.ok(!err.message.includes('three findings'), 'the earlier message is not quoted as the ending');
+});
+
+test('a message followed only by the start of another message is not the answer either', async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'vibe-cut-off-'));
+  const err: unknown = await codexTurn(
+    options(dir),
+    stream([
+      JSON.stringify({ type: 'item.completed', item: { id: 'item_0', type: 'agent_message', text: 'Looking.' } }),
+      JSON.stringify({ type: 'item.started', item: { id: 'item_1', type: 'agent_message', text: '' } }),
+      JSON.stringify({ type: 'turn.failed', error: { message: CUT_OFF } }),
+    ]),
+  ).then(
+    () => assert.fail('a cut-off turn must not succeed'),
+    (e: unknown) => e,
+  );
+  assert.ok(err instanceof OutputCutOffError);
+  assert.equal(err.chars, null);
+});
+
+test('the final message is still the answer when updates of that same message precede its completion', async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'vibe-cut-off-'));
+  const text = JSON_PART + BLANK;
+  const err: unknown = await codexTurn(
+    options(dir),
+    stream([
+      JSON.stringify({ type: 'item.started', item: { id: 'item_3', type: 'agent_message', text: '' } }),
+      JSON.stringify({ type: 'item.updated', item: { id: 'item_3', type: 'agent_message', text: '{' } }),
+      JSON.stringify({ type: 'item.completed', item: { id: 'item_3', type: 'agent_message', text } }),
+      JSON.stringify({ type: 'turn.failed', error: { message: CUT_OFF } }),
+    ]),
+  ).then(
+    () => assert.fail('a cut-off turn must not succeed'),
+    (e: unknown) => e,
+  );
+  assert.ok(err instanceof OutputCutOffError);
+  assert.equal(err.chars, text.length);
+  assert.equal(err.blankChars, 50_000);
+});
+
+test('a second cut-off of the same label keeps its own record beside the first', async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'vibe-cut-off-'));
+  const cutOffWith = (text: string): Promise<unknown> =>
+    codexTurn(
+      options(dir),
+      stream([message(text), JSON.stringify({ type: 'turn.failed', error: { message: CUT_OFF } })]),
+    ).then(
+      () => assert.fail('a cut-off turn must not succeed'),
+      (e: unknown) => e,
+    );
+  const first = await cutOffWith(`{"verdict":"REVISE","summary":"first"${BLANK}`);
+  const second = await cutOffWith(`{"verdict":"REVISE","summary":"second"${BLANK}`);
+
+  assert.ok(first instanceof OutputCutOffError && second instanceof OutputCutOffError);
+  assert.equal(first.keptAt, path.join(dir, 'critique-1.cutoff.json'));
+  assert.equal(second.keptAt, path.join(dir, 'critique-1.cutoff-2.json'));
+  const read = (name: string): string =>
+    String((JSON.parse(readFileSync(path.join(dir, name), 'utf8')) as Record<string, unknown>)['text']);
+  assert.match(read('critique-1.cutoff.json'), /"first"/, 'the first record is not overwritten');
+  assert.match(read('critique-1.cutoff-2.json'), /"second"/);
 });
 
 test('a turn.failed for a bad model name stays a plain Error', async () => {
