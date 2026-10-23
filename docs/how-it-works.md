@@ -2,7 +2,7 @@
 
 vibe runs two phases. In **planning**, the planner writes a plan and the critic attacks it, until the plan has no blocking findings. In **implementation**, the implementer writes the code, vibe runs your verification gates itself, and the reviewer reviews the diff, until that has no blocking findings either. A fifth role, the answerer, answers the planner's questions.
 
-By default Claude is the planner and the implementer, and Codex is the critic, the answerer and the reviewer. Each role can be seated on either Claude or Codex, with its own model and effort; which agent holds each job is the [role table](./configuration#roles).
+By default Claude is the planner and the implementer, and Codex is the critic, the answerer and the reviewer. Each role can be seated on either Claude or Codex, with its own model and effort; which agent holds each job is the [role table](./configuration#roles). The review can also seat more finders and verifiers, under [`review`](./configuration#review); see [More finders, and a vote](#more-finders-and-a-vote).
 
 Under the default table the planner plans in Claude's read-only plan mode, and the implementer then resumes **the same session** with permissions bypassed, so it starts with the plan and the whole investigation in context. An implementer that does not share the planner's conversation, such as one on Codex, starts without that history and works from the approved plan, which every implement prompt carries. Either way implementation writes to your checkout, which is also why vibe works on a branch of its own.
 
@@ -103,6 +103,23 @@ The reviewer supplies a path and the file's contents, never a command. vibe writ
 | Anything else | Unproven: nothing changes. |
 
 A reproducer that failed before a final fix and passes after it closes the finding by evidence, and `OUTSTANDING.md` says so. `verify.reproducers: false` turns this off.
+
+### More finders, and a vote
+
+By default one reviewer reviews each round. [`review`](./configuration#review) can add two kinds of seat, each on Claude or Codex with its own model and effort, and each a fresh, read-only turn that never resumes a conversation:
+
+- **Finders** review the same diff after the reviewer, each without seeing what the others found. Their findings are merged by claim: two findings are one defect when they cite the same file and line or say the same thing in their titles, and otherwise both are kept. A finder whose turn fails, other than by a stop or a ceiling, contributes nothing, and the round goes on with the rest.
+- **Verifiers** vote on each P0 and P1 once the findings are merged and any reproducers have run. A finding whose own reproducer reproduced blocks without a vote. Each verifier sees the claim, the plan, the parts of the diff the claim cites and the repository, never who raised it or how the others voted, and answers `real`, `not-real` or `cannot-tell`.
+
+The vote is fail-closed. A finding is confirmed when `review.quorum` verifiers say `real` (a majority, by default). It is unconfirmed only when enough say `not-real` that the quorum is out of reach. Otherwise it is undecided and keeps blocking. A verifier whose turn failed counts as `cannot-tell`, so too few usable votes never let a finding through. An unconfirmed P1 is moved to P2 with the tally as its reason, and listed in `FOLLOW-UPS.md`. An unconfirmed P0 keeps blocking by default; `review.unconfirmedP0` can instead stop the run for you (exit 2) or move it to P2. Every vote is recorded on its finding in `code-review-<n>.json`.
+
+Both cost turns inside `budget.maxTokens`, and the run summary's `Finders:` and `Votes:` lines say what they cost in turns and tokens.
+
+### What the fixer did with each finding
+
+A review fix round, including the final one, returns its report and, for every finding it was given, one of `fixed`, `rebutted`, `deferred` or `not-addressed`, with a reason. A finding it leaves out is recorded as `not-addressed`. The answers go in `fix-dispositions-<n>.json`, credited to the seats that raised each finding. If the answer cannot be read, nothing is recorded for that round, rather than recording every finding as ignored, and the run log says so. The report itself is kept and handed to the next reviewer as before.
+
+`vibe stats` totals these per reviewer seat and by severity, and the app shows each finding's outcome in the Code review tab. A `rebutted` is what the fixer said, not a verdict on the finding.
 
 ### Changes to the run's own judge
 
