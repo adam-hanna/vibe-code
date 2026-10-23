@@ -4384,29 +4384,49 @@ function cutOffRetry(
   return (err) => {
     if (!(err instanceof OutputCutOffError) || access === 'write') return null;
     if (first !== null) {
+      // Both records, because each attempt kept its own (`cutOffRecordPath`).
+      const kept = [first.keptAt, err.keptAt].filter((p): p is string => p !== null);
       throw new OutputCutOffError(
         `${label} was cut off at its output limit on both attempts.\n` +
-          `First attempt: ${first.message.split(/\r?\n/)[0] ?? ''}\nRetry: ${err.message}`,
+          `First attempt: ${first.message.split(/\r?\n/)[0] ?? ''}\nRetry: ${err.message}` +
+          (kept.length === 0 ? '' : `\nWhat each attempt wrote is kept in ${kept.join(' and ')}.`),
         err,
       );
     }
     first = err;
-    // Codex turns charge no cost, so only the token ceiling applies here.
-    enforceCeilings(state, cfg, false);
-    const written = err.chars - err.blankChars;
+    // Codex turns charge no cost, so only the token ceiling applies here. Held
+    // rather than thrown at once: the cut-off is said first, so a run the
+    // ceiling ends still records why its last turn failed. The escalation, and
+    // the exit code it carries, are the ones `enforceCeilings` threw.
+    let ceiling: unknown = null;
+    try {
+      enforceCeilings(state, cfg, false);
+    } catch (reached: unknown) {
+      ceiling = reached;
+    }
     const n = err.findings.length;
+    const counted =
+      err.chars === null || err.blankChars === null
+        ? ' before its final message arrived.'
+        : ` after ${(err.chars - err.blankChars).toLocaleString('en-US')} characters, followed by ` +
+          `${err.blankChars.toLocaleString('en-US')} characters of blank space.`;
     recordAndSay(
       state,
       'warn',
       'codex_cut_off',
-      `Codex's answer to ${label} was cut off at its output limit after ` +
-        `${written.toLocaleString('en-US')} characters, followed by ` +
-        `${err.blankChars.toLocaleString('en-US')} characters of blank space. ` +
-        `Trying the turn again (1 retry).` +
-        (n === 0 ? '' : ` It had written ${n} finding(s) in full; the retry is asked to check them again.`) +
+      `Codex's answer to ${label} was cut off at its output limit${counted} ` +
+        (ceiling === null
+          ? 'Trying the turn again (1 retry).' +
+            (n === 0 ? '' : ` It had written ${n} finding(s) in full; the retry is asked to check them again.`)
+          : 'Not tried again: the run has reached its token ceiling.' +
+            (n === 0
+              ? ''
+              : ` It had written ${n} finding(s) in full` +
+                (err.keptAt === null ? '.' : `, kept in ${err.keptAt}.`))) +
         (err.reported ? '' : ' Codex did not report what the cut-off attempt used.'),
       { label, chars: err.chars, blankChars: err.blankChars, findings: n, reported: err.reported },
     );
+    if (ceiling !== null) throw ceiling;
     recordEvent(state, 'turn_retried', { label, reason: 'max_output_tokens', attempt: 2 });
     return attempt(`${prompt}\n\n${cutOffNote(err.findings)}`);
   };

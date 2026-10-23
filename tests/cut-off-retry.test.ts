@@ -7,7 +7,7 @@ import { OutputCutOffError } from '@src/codex.js';
 import { DEFAULTS } from '@src/config.js';
 import * as log from '@src/log.js';
 import type { Narration } from '@src/log.js';
-import { Escalation, orchestrate } from '@src/orchestrator.js';
+import { Escalation, EXIT, orchestrate } from '@src/orchestrator.js';
 import type { Config, Finding, RunState } from '@src/types.js';
 import {
   agents,
@@ -192,4 +192,79 @@ test('a ceiling reached by the cut-off attempt escalates instead of retrying', a
   assert.ok(error instanceof Escalation, `expected an escalation, got ${String(error)}`);
   assert.equal(count(calls, 'critique-0'), 1);
   assert.equal(state.events.some((e) => e.type === 'turn_retried'), false);
+});
+
+test('a ceiling that ends the run after a cut-off still says the turn was cut off, first', async () => {
+  // The warning is said before the ceiling is enforced, so the record shows why
+  // the last turn failed. It must not claim a retry that never happens, and the
+  // escalation keeps the ceiling's exit code.
+  const state = freshRun({ prefix: 'vibe-cutoff-ceiling-said-' });
+  const cfg = config({}, { budget: { ...DEFAULTS.budget, maxTokens: 1_000_000 } });
+  const { seen, error } = await drive(state, cfg, {
+    codex: (label) => {
+      if (label === 'critique-0') throw attachSpend(cutOff(), { costUsd: null, tokens: 2_000_000 });
+      return report([]);
+    },
+  });
+
+  assert.ok(error instanceof Escalation, `expected an escalation, got ${String(error)}`);
+  assert.equal(error.code, EXIT.BUDGET, 'the ceiling exit code is unchanged');
+  assert.match(error.message, /^Token ceiling exceeded/);
+
+  const warned = seen.find((n) => n.id === 'codex_cut_off');
+  assert.ok(warned !== undefined, 'the cut-off is narrated even though the ceiling ends the run');
+  assert.match(warned.message, /Codex's answer to critique-0 was cut off at its output limit after [\d,]+ characters/);
+  assert.match(warned.message, /Not tried again: the run has reached its token ceiling\./);
+  assert.doesNotMatch(warned.message, /Trying the turn again/);
+  assert.ok(state.events.some((e) => e.type === 'codex_cut_off'), 'and it is in the run record');
+  assert.equal(state.events.some((e) => e.type === 'turn_retried'), false);
+});
+
+test('a cut-off with no final message is narrated without counts', async () => {
+  // chars and blankChars are null when the adapter could name no final
+  // message: the warning says so, and quotes no zero as if it were measured.
+  const state = freshRun({ prefix: 'vibe-cutoff-nomessage-' });
+  let seenCritique = 0;
+  const { seen, error } = await drive(state, config(), {
+    codex: (label) => {
+      if (label === 'critique-0' && ++seenCritique === 1) {
+        throw new OutputCutOffError('cut off before its final message arrived (fixture)', {
+          text: '',
+          findings: [],
+          reported: false,
+          chars: null,
+          blankChars: null,
+        });
+      }
+      return report([]);
+    },
+  });
+
+  assert.equal(error, null);
+  const warned = seen.find((n) => n.id === 'codex_cut_off');
+  assert.ok(warned !== undefined);
+  assert.match(
+    warned.message,
+    /^Codex's answer to critique-0 was cut off at its output limit before its final message arrived\. Trying the turn again \(1 retry\)\./,
+  );
+  assert.doesNotMatch(warned.message, /\b0 characters/);
+  assert.equal(warned.data?.['chars'], null);
+  assert.equal(warned.data?.['blankChars'], null);
+});
+
+test("a second cut-off's error points at both attempts' records", async () => {
+  const state = reviewingRun({ prefix: 'vibe-cutoff-records-' });
+  let n = 0;
+  const { error } = await drive(state, config(), {
+    codex: (label) => {
+      if (label !== 'review-0') return report([]);
+      n += 1;
+      const keptAt = path.join(state.dir, 'codex', n === 1 ? 'review-0.cutoff.json' : 'review-0.cutoff-2.json');
+      throw new OutputCutOffError(`cut off (fixture ${n})`, { text: '', findings: [], reported: false, keptAt });
+    },
+  });
+
+  assert.ok(error instanceof OutputCutOffError);
+  assert.ok(error.message.includes(path.join(state.dir, 'codex', 'review-0.cutoff.json')), error.message);
+  assert.ok(error.message.includes(path.join(state.dir, 'codex', 'review-0.cutoff-2.json')), error.message);
 });

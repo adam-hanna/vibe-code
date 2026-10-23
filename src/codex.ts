@@ -146,9 +146,18 @@ interface CodexEvents {
   failed: boolean;
   /**
    * The text of the last completed `agent_message`, or null when none arrived.
-   * On a turn cut off at its output limit this is the cut-off answer (#416).
    */
   lastMessage: string | null;
+  /**
+   * Whether `lastMessage` was the last item the stream reported: no item of
+   * any other kind started, updated or completed after it. Only then can it be
+   * read as the turn's final message - the cut-off answer, on a turn cut off
+   * at its output limit (#416). A message followed by a command or a
+   * reasoning item was a progress note, and on a cut-off turn it means the
+   * final message never completed, so nothing in the stream is the answer and
+   * nothing may be counted as one. False when no message arrived.
+   */
+  lastMessageFinal: boolean;
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -197,7 +206,9 @@ export function parseEvents(stdout: string): CodexEvents {
     failure: null,
     failed: false,
     lastMessage: null,
+    lastMessageFinal: false,
   };
+  let lastMessageId: unknown;
 
   for (const line of stdout.split(/\r?\n/)) {
     const trimmed = line.trim();
@@ -221,10 +232,25 @@ export function parseEvents(stdout: string): CodexEvents {
       if (typeof message === 'string') out.failure = message;
       if (event['type'] === 'turn.failed') out.failed = true;
     } else if (event['type'] === 'item.completed' && isRecord(event['item'])) {
-      // The last one wins: the answer is the final message, and what a cut-off
-      // turn's error carries (#416).
+      // The last one wins, and only while nothing follows it (#416): see
+      // `lastMessageFinal`.
       const item = event['item'];
-      if (item['type'] === 'agent_message' && typeof item['text'] === 'string') out.lastMessage = item['text'];
+      if (item['type'] === 'agent_message' && typeof item['text'] === 'string') {
+        out.lastMessage = item['text'];
+        out.lastMessageFinal = true;
+        lastMessageId = item['id'];
+      } else if (item['id'] === undefined || item['id'] !== lastMessageId) {
+        out.lastMessageFinal = false;
+      }
+    } else if (
+      typeof event['type'] === 'string' &&
+      event['type'].startsWith('item.') &&
+      isRecord(event['item']) &&
+      (event['item']['id'] === undefined || event['item']['id'] !== lastMessageId)
+    ) {
+      // Another item began or moved after the message: a message still being
+      // written, or more work. Either way the message before it was not final.
+      out.lastMessageFinal = false;
     }
   }
   return out;
@@ -455,11 +481,20 @@ function directForkWorks(options: Set<string> | null, hasSchema: boolean): boole
  * retry's note and for diagnosis, and nothing reads them as a result.
  */
 export class OutputCutOffError extends Error {
-  /** The last `agent_message`, uncollapsed; empty when the stream carried none. */
+  /**
+   * The turn's final message, uncollapsed; empty when none can be named (see
+   * `chars`).
+   */
   readonly text: string;
-  readonly chars: number;
-  /** How much of `text` is trailing blank space. */
-  readonly blankChars: number;
+  /**
+   * The final message's length, and how much of it is trailing blank space.
+   * Null, not zero, when the stream carried no message that can be read as the
+   * answer: none arrived, or the last one was followed by other work, so the
+   * final message never completed. Nothing was counted then, and the error and
+   * the narration say so rather than quote a count (#416).
+   */
+  readonly chars: number | null;
+  readonly blankChars: number | null;
   readonly findings: Finding[];
   /**
    * Whether the stream reported any usage for the attempt. Kept here because
@@ -467,39 +502,77 @@ export class OutputCutOffError extends Error {
    * and the narration must say so when Codex reported nothing.
    */
   readonly reported: boolean;
+  /**
+   * Where this attempt's record was written (`codex/<label>.cutoff.json`, or
+   * `.cutoff-2.json` and on for a later cut-off of the same label), or null
+   * when it could not be.
+   */
+  readonly keptAt: string | null;
 
   constructor(
     message: string,
-    detail: { text: string; findings: readonly Finding[]; reported: boolean; chars?: number; blankChars?: number },
+    detail: {
+      text: string;
+      findings: readonly Finding[];
+      reported: boolean;
+      chars?: number | null;
+      blankChars?: number | null;
+      keptAt?: string | null;
+    },
   ) {
     super(message);
     this.name = 'OutputCutOffError';
     this.text = detail.text;
-    this.chars = detail.chars ?? detail.text.length;
-    this.blankChars = detail.blankChars ?? trailingBlank(detail.text);
+    this.chars = detail.chars === undefined ? detail.text.length : detail.chars;
+    this.blankChars = detail.blankChars === undefined ? trailingBlank(detail.text) : detail.blankChars;
     this.findings = [...detail.findings];
     this.reported = detail.reported;
+    this.keptAt = detail.keptAt ?? null;
+  }
+}
+
+/**
+ * The first unused record name for a cut-off of `schemaName`: `.cutoff.json`,
+ * then `.cutoff-2.json`, `.cutoff-3.json`. A retry that is cut off again, and a
+ * resumed run cut off on the same label, each keep their own record rather than
+ * overwrite the attempt before them.
+ */
+function cutOffRecordPath(artifactDir: string, schemaName: string): string {
+  for (let n = 1; ; n += 1) {
+    const candidate = path.join(artifactDir, `${schemaName}.cutoff${n === 1 ? '' : `-${n}`}.json`);
+    if (!existsSync(candidate)) return candidate;
   }
 }
 
 /**
  * Build the cut-off error, and keep the attempt beside `.superseded.json`.
  *
+ * `answer` is the final message, or null when the stream named none (see
+ * `CodexEvents.lastMessageFinal`); then nothing is counted or salvaged.
+ *
  * The record is best effort, as `supersede` is: failing to write a diagnosis
  * must not replace the failure it describes.
  */
 function cutOffError(
-  text: string,
-  at: { ending: string; failure: string; stderr: string; reported: boolean; keepAt: string },
+  answer: string | null,
+  at: { ending: string; failure: string; stderr: string; reported: boolean; keepAt: string; earlier: boolean },
 ): OutputCutOffError {
-  const findings = salvageFindings(text);
-  const chars = text.length;
-  const blankChars = trailingBlank(text);
+  const text = answer ?? '';
+  const findings = answer === null ? [] : salvageFindings(answer);
+  const chars = answer === null ? null : answer.length;
+  const blankChars = answer === null ? null : trailingBlank(answer);
+  let keptAt: string | null = at.keepAt;
   try {
     writeFileSync(
       at.keepAt,
       JSON.stringify(
-        { reason: 'max_output_tokens', chars, blankChars, findings, text: collapseBlankRuns(text) },
+        {
+          reason: 'max_output_tokens',
+          chars,
+          blankChars,
+          findings,
+          text: answer === null ? null : collapseBlankRuns(answer),
+        },
         null,
         2,
       ),
@@ -507,16 +580,28 @@ function cutOffError(
     );
   } catch {
     // See above.
+    keptAt = null;
   }
   const said = text.trimEnd();
   const tail = said.length > 400 ? `…${said.slice(-400)}` : said;
+  const counted =
+    chars === null || blankChars === null
+      ? 'before its final message arrived'
+      : `after ${(chars - blankChars).toLocaleString('en-US')} characters of JSON, then ` +
+        `${blankChars.toLocaleString('en-US')} characters of blank space`;
+  const ended =
+    answer === null
+      ? at.earlier
+        ? 'Its last message was followed by more work, so it was not the answer, and nothing was counted from it.'
+        : 'It wrote no message.'
+      : said === ''
+        ? 'Its final message was blank.'
+        : `It ended: ${collapseBlankRuns(tail)}`;
   const message =
-    `Codex's answer was cut off at its output limit after ${(chars - blankChars).toLocaleString('en-US')} ` +
-    `characters of JSON, then ${blankChars.toLocaleString('en-US')} characters of blank space ` +
-    `(${at.ending}).\ncodex reported: ${at.failure}\n` +
-    (said === '' ? 'It wrote no message.' : `It ended: ${collapseBlankRuns(tail)}`) +
+    `Codex's answer was cut off at its output limit ${counted} ` +
+    `(${at.ending}).\ncodex reported: ${at.failure}\n${ended}` +
     `\nstderr:\n${at.stderr.slice(-2000)}`;
-  return new OutputCutOffError(message, { text, findings, reported: at.reported, chars, blankChars });
+  return new OutputCutOffError(message, { text, findings, reported: at.reported, chars, blankChars, keptAt });
 }
 
 /**
@@ -784,12 +869,13 @@ export async function codexTurn(
       // stream carried no message is still a cut-off, with nothing to salvage.
       if (events.failure?.includes('max_output_tokens') === true) {
         throw attachSpend(
-          cutOffError(events.lastMessage ?? '', {
+          cutOffError(events.lastMessageFinal ? events.lastMessage : null, {
             ending: describeEnding({ code, signal }),
             failure: events.failure,
             stderr,
             reported: events.tokens.total > 0,
-            keepAt: path.join(artifactDir, `${schemaName}.cutoff.json`),
+            keepAt: cutOffRecordPath(artifactDir, schemaName),
+            earlier: events.lastMessage !== null && !events.lastMessageFinal,
           }),
           spent,
         );

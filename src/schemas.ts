@@ -252,7 +252,17 @@ export const FINDINGS_SCHEMA = {
         // in the *middle* does not do it: 53 entries had `line` and `excerpt` both
         // null mid-object with no blank run before either. So **a nullable filler
         // field must never be the last one after content**, and here the null
-        // ones come first and each object ends on what the model wants to close.
+        // ones come first. A finding now ends on its `evidence`, and a
+        // reproducer on its `contents`.
+        //
+        // An evidence entry does only for `code`, where `path`, `line` and
+        // `excerpt` are written last. One order cannot suit every kind: an
+        // `external` entry now ends `ref:"https://…", path:null, line:null,
+        // excerpt:null`, and an `absence` entry `path:"x", line:null,
+        // excerpt:null`, so their content comes before nulls still owed. That is
+        // 54 of the archive's 812 evidence entries (40 `external`, 14
+        // `absence`), down from 742 of 790 that ended on a null `ref` before.
+        // Whether they stall, and what to do if they do, is #429.
         //
         // Left alone on the same evidence: `test_verdicts` (last in
         // `REVIEW_SCHEMA`, often `[]`) shows no blank run before it in the
@@ -393,7 +403,10 @@ export const FINDINGS_SCHEMA = {
               //
               // `ref` second rather than last (#416): it is null in 742 of 790
               // entries, and as the last key after `excerpt` it was where 60 of
-              // the archive's 150 blank runs sat. See the note on the finding.
+              // the archive's 150 blank runs sat. This ends a `code` entry on
+              // its content, but not an `external` or `absence` one, which still
+              // ends on null fields after it (54 of 812 entries; #429). See the
+              // note on the finding.
               required: ['kind', 'ref', 'path', 'line', 'excerpt'],
               properties: {
                 kind: {

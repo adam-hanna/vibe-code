@@ -754,7 +754,12 @@ The run then died with `codex wrote no structured output … reason: max_output_
   That leaves `,` or blank space, and twice the blank space fed itself. A usually-null field in
   the *middle* does not do it: 53 entries had `line` and `excerpt` null mid-object, with no blank
   run before either. So the order is now `…, defer, reproducer, evidence`, `kind, ref, path, line,
-  excerpt` and `gate, path, contents`, and each object ends on what the model wants to close.
+  excerpt` and `gate, path, contents`. A finding ends on its evidence and a reproducer on its
+  contents. An evidence entry ends on its content only for `code`. One order cannot suit every
+  kind: an `external` entry now ends `ref:"https://…", path:null, line:null, excerpt:null`, and an
+  `absence` entry `path:"x", line:null, excerpt:null`. That is 54 of the archive's 812 evidence
+  entries (40 `external`, 14 `absence`), down from 742 of 790 that ended on a null `ref` before.
+  Whether those stall, and what changes if they do, is #429.
   `test_verdicts` and the other schemas were left alone, because the archive shows no stall before
   their last fields. The count is how a later archive confirms this, including whether the stall
   simply moved to the new last key.
@@ -779,12 +784,22 @@ The run then died with `codex wrote no structured output … reason: max_output_
 - **A cut-off answer is never repaired into one.** The findings it wrote in full are kept: a
   bracket-aware scan takes each whole element of `findings` that `parseFinding` accepts, and stops
   at the first that is not whole. They go in `codex/<label>.cutoff.json` and in a note at the end
-  of the retry's prompt, as unverified. Nothing closes a bracket or fills in `"ref":null`. That
+  of the retry's prompt, as unverified. Each cut-off keeps its own record: a later one of the same
+  label (the retry, or a resumed run) takes `.cutoff-2.json`, `.cutoff-3.json` and on, never
+  overwriting the one before, and the error for a second cut-off names both. Nothing closes a bracket or fills in `"ref":null`. That
   would be vibe writing the agent's answer, and it would have passed #389's REVISE with one finding
   of three, and #393's review with no `test_verdicts`, as whole. A cut-off turn has no verdict.
 - **What is said.** `codex_cut_off` warns, `turn_retried` is recorded, and the summary prints one
   `Retries:` line when there were any. Codex reports no usage for a cut-off attempt, so none is
-  charged and the warning says so. Reading the figure from the session log is a follow-up.
+  charged and the warning says so. Reading the figure from the session log is a follow-up. The
+  warning comes before the ceiling check, so a run the token ceiling ends still says its last turn
+  was cut off; the escalation and its exit code are unchanged.
+- **Counted only from the final message.** The counts in the error and the warning (characters of
+  JSON, then of blank space) are taken from the last completed `agent_message`, and only when no
+  other item started, moved or completed after it. In both failures the answer did arrive, as the
+  last item. When no message arrived, or the last one was followed by more work, the final message
+  never completed: the counts are null, not zero, nothing is salvaged, and the error and the
+  warning say the turn was cut off before its final message arrived.
 - **Blank runs of 1,000 or more are shortened** to `<… N blank characters …>` in `model_said`,
   in the error and in the `.cutoff.json` text. That is 40 times the longest legitimate blank run
   in the archive (25 characters of indentation inside an `excerpt`), and far below the 122,409 and
