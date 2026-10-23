@@ -347,9 +347,28 @@ export interface Census {
   phase: 'plan' | 'review';
   /** All four, zeros included: where a gate decision is made, an absence is information. */
   counts: Readonly<Record<string, number>>;
-  tolerance: number;
-  pass: boolean;
-  /** Why the loop stopped, or null when it may proceed. Null is an answer. */
+  /**
+   * The `p1Tolerance` the gate judged this round against, or null when the frame
+   * did not say it (#437).
+   *
+   * Null, never `0`. A replayed census (`src/replay.ts`) is rebuilt from the
+   * round's artifact, which holds the report and not the gate's decision, so it
+   * carries the counts alone. This was `num(...) ?? 0`, and `0` is a real
+   * tolerance - the strictest one - so a review that passed at tolerance 1 drew
+   * `tolerance P1≤0`.
+   */
+  tolerance: number | null;
+  /**
+   * Whether the gate let the round through, or null when the frame did not say
+   * (#437). Null is not a block: `data['pass'] === true` made every census that
+   * lacked the field a blocked round, and the card then said *"The gate blocked
+   * this round."* over a review the loop called clean.
+   */
+  pass: boolean | null;
+  /**
+   * Why the loop stopped, or null when it may proceed. Null is an answer - but
+   * only beside a `pass`; with `pass` null it says nothing either way.
+   */
   reason: string | null;
   /** P1s being carried into the next phase rather than fixed. */
   tolerated: readonly string[];
@@ -361,6 +380,21 @@ export interface Census {
    * arrival clock, and two frames read out of one chunk share a millisecond.
    */
   seq: number;
+}
+
+/**
+ * The sentence a round card and the Review pane put under a census's counts, or
+ * null when the census does not say what the gate decided (#437).
+ *
+ * The loop's own `reason` where it blocked, because `gate()` names the exact
+ * arithmetic that stopped the round, and never one composed from the counts.
+ * A census with no `pass` - every replayed one - gets no sentence at all: the
+ * fallback *"The gate blocked this round."* is for a block the loop reported
+ * without a reason, not for a decision nobody reported.
+ */
+export function gateSentence(census: Census): string | null {
+  if (census.pass === null) return null;
+  return census.pass ? 'The gate passed.' : (census.reason ?? 'The gate blocked this round.');
 }
 
 /**
@@ -2057,8 +2091,11 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
             {
               phase,
               counts,
-              tolerance: num(data['tolerance']) ?? 0,
-              pass: data['pass'] === true,
+              // Absent stays absent (#437): a census without them is drawn
+              // with no tolerance badge and no gate sentence, never as `0` and
+              // never as a block.
+              tolerance: num(data['tolerance']),
+              pass: typeof data['pass'] === 'boolean' ? data['pass'] : null,
               reason: str(data['reason']),
               tolerated: strings(data['tolerated']),
               findings: readFindings(data['findings']),
