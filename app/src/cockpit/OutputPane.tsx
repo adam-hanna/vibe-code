@@ -10,6 +10,7 @@ import { groups, readTranscript } from './outgroups';
 import { noText, useArtifact } from './useArtifacts';
 import type { OutGroup } from './outgroups';
 import type { OutputLine, Staleness, Turn } from './model';
+import { turnRound } from './rounds';
 
 /**
  * The file a finished run's narration is in.
@@ -109,7 +110,7 @@ function TurnStrip({ turn, staleness }: { turn: Turn; staleness: Staleness }) {
       <span className="text-body-sm text-emphasis">
         {turn.role} · {turn.kind}
       </span>
-      {turn.round !== null && <Badge className="font-mono normal-case tracking-normal">round {turn.round}</Badge>}
+      {turnRound(turn) !== null && <Badge className="font-mono normal-case tracking-normal">round {turnRound(turn)}</Badge>}
       {/* Not the config's role table. See above. */}
       <Badge className="normal-case tracking-normal">model, effort and permission mode — no turn frame carries them</Badge>
       {/* The design's `working · last activity 8s ago`, drawn from `7c`'s two

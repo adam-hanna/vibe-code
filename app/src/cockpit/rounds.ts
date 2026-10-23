@@ -414,3 +414,87 @@ export function title(phase: string): string {
 export function roundTitle(card: RoundCard): string {
   return title(card.phase);
 }
+
+/**
+ * The turn kinds that make an `implementing` group a fix round, not the first
+ * implementation: `announceFixRound` opens a group for each, with the review
+ * round the fix produces (#280). `verify-fix` is not one, because it repairs a
+ * gate inside the group that ran it and opens nothing.
+ */
+const FIX_KINDS: ReadonlySet<string> = new Set(['review-fix', 'final-fix']);
+
+/** What the pass helpers read off a group: a `PhaseGroup` and a `RoundCard` are both one. */
+type Pass = { phase: string; round: number | null; turns: readonly Pick<Turn, 'kind'>[] };
+
+/**
+ * Is this `implementing` group the run's first implementation, rather than a fix
+ * round (#428)?
+ *
+ * **It is not a round, and it has no number of its own.** Fix rounds count from
+ * 1 - the loop increments `reviewRound` before `announceFixRound` - and the first
+ * implementation comes before any of them. The live heading carries no round at
+ * all; a replay files the `implement` charge under the review round its
+ * checkpoint held, which is 0. So the round alone cannot say which it is, and
+ * the turns are asked first: an `implement` turn is the first implementation and
+ * a fix kind is a fix round. A group with neither yet - the instant between the
+ * heading and its turn - falls back to what the heading said, and only the first
+ * implementation's heading carries no round.
+ */
+export function isFirstImplementation(group: Pass): boolean {
+  if (group.phase !== 'implementing') return false;
+  if (group.turns.some((t) => FIX_KINDS.has(t.kind))) return false;
+  if (group.turns.some((t) => t.kind === 'implement')) return true;
+  return group.round === null;
+}
+
+/**
+ * The phase's own name, which is what a pass with no round reads as. Never
+ * "unnumbered pass": that was an internal fallback showing through (#428).
+ */
+const PASS_NAMES: Readonly<Record<string, string>> = {
+  planning: 'planning',
+  critique: 'critique',
+  implementing: 'implementation',
+  review: 'review',
+};
+
+/**
+ * What one pass is called in the run rail's expanded stage (#428), numbered the
+ * way the terminal's headings number it.
+ *
+ * - **Plan, critique and review count from one**, as `Plan critique (round N)`
+ *   and `Code review (round N)` do. The frame's `round` is the archive's,
+ *   0-based - `plan-critique-0.json` is the heading's round 1 - so the rail adds
+ *   the one the heading adds. It drew the raw number before, so the first
+ *   critique read `round 0` beside a heading saying round 1.
+ * - **A fix round is `fix round N`**, with the frame's round as it is: that is
+ *   the number `Implementing (fix round N)` prints, already counted from one.
+ * - **The first implementation is `implementation`**, never a round
+ *   (`isFirstImplementation`). The core is not asked to put `round: 0` on it to
+ *   make a label work; that would be a number nothing counted.
+ *
+ * A pass whose frame carried no round reads as its phase's own name. The links
+ * off the row keep the raw round, which is what the panes are keyed by.
+ */
+export function passLabel(group: Pass): string {
+  const name = PASS_NAMES[group.phase] ?? group.phase;
+  if (group.phase === 'implementing') {
+    return isFirstImplementation(group) || group.round === null ? name : `fix round ${String(group.round)}`;
+  }
+  if (group.round === null || PASS_NAMES[group.phase] === undefined) return name;
+  return `round ${String(group.round + 1)}`;
+}
+
+/**
+ * The round a turn's chip shows, or null for none (#428).
+ *
+ * The `implement` turn carries `round: state.reviewRound`, which is 0 for the
+ * whole of the first implementation: it is there so the reducer can tell one
+ * pass through Code from the next, not because the first implementation is round
+ * 0 of anything. Drawn, it read `round 0` beside a rail calling the same pass
+ * `implementation`, so the chip is left off and the kind - `implement` - names
+ * the pass. Every other turn's chip is the archive's round, as before.
+ */
+export function turnRound(turn: Pick<Turn, 'kind' | 'round'>): number | null {
+  return turn.kind === 'implement' ? null : turn.round;
+}

@@ -4,7 +4,7 @@ import { DiffPane } from './DiffPane';
 import { Section } from './Disclosure';
 import { work as describeWork } from './format';
 import { EMPTY, FILE, NOTE, PANE } from './pane';
-import { committed } from './rounds';
+import { committed, isFirstImplementation } from './rounds';
 import type { Run } from './model';
 
 /**
@@ -121,9 +121,13 @@ export function CodePane({
             setOpen((cur) => (cur === card.commit.sha ? '' : card.commit.sha));
           }}
           title={
-            card.round === null
-              ? (card.commit.message ?? 'a round')
-              : `code · round ${String(card.round)}`
+            // The first implementation by name, as the rail calls it (#428): a
+            // replay files it under review round 0, which read `code · round 0`.
+            isFirstImplementation(card)
+              ? 'code · implementation'
+              : card.round === null
+                ? (card.commit.message ?? 'a round')
+                : `code · round ${String(card.round)}`
           }
           meta={
             <>

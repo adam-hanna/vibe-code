@@ -7,7 +7,7 @@ import { cn } from '@/lib/utils';
 import { Counts } from './Counts';
 import { Caret } from './Disclosure';
 import { clock, elapsed } from './format';
-import { censusByPhase, questionsByPhase, title, unplacedQuestions } from './rounds';
+import { censusByPhase, isFirstImplementation, passLabel, questionsByPhase, title, turnRound, unplacedQuestions } from './rounds';
 import type { BottomTab, Tab } from './where';
 import { findTurn, nowStatus, RAIL_TITLE, runningGate, turnGroup, verifyRow, verifyRowText } from './rail';
 import type { RailState, VerifyRow } from './rail';
@@ -132,7 +132,7 @@ function Version({
       <span className="text-primary">
         {turn.role} · {turn.kind}
       </span>
-      {turn.round !== null && <Badge>round {turn.round}</Badge>}
+      {turnRound(turn) !== null && <Badge>round {turnRound(turn)}</Badge>}
       {turn.endedAt !== null && (
         <span className={cn(FIGURE, 'ml-auto')}>{elapsed(turn.endedAt - turn.startedAt)}</span>
       )}
@@ -215,8 +215,10 @@ function Round({
             behind it. The heading in the terminal says "round 1"; the file is
             `plan-critique-0.json`, and a row has to agree with the file — and
             since the groups became peers it is also what pairs this row with
-            its other half one group up or down. */}
-        {phase.round !== null && <Badge className="font-mono normal-case tracking-normal">round {phase.round}</Badge>}
+            its other half one group up or down. The first implementation has
+            no round of its own (#428): a replay files it under review round 0,
+            and that chip read `round 0` beside a rail saying `implementation`. */}
+        {phase.round !== null && !isFirstImplementation(phase) && <Badge className="font-mono normal-case tracking-normal">round {phase.round}</Badge>}
       </button>
 
       {open && (
@@ -1031,7 +1033,9 @@ function RailStage({
         <div className="divide-y divide-dashed divide-rule-inner bg-active py-px pr-3.5 pb-2.75 pl-10">
           {cycle.phases.map((phase) => {
             const census = censusOf.get(phase.id);
-            const round = phase.round === null ? 'unnumbered pass' : `round ${phase.round}`;
+            // Numbered as the terminal's headings number it, and the first
+            // implementation by name rather than as a pass with no number (#428).
+            const round = passLabel(phase);
             const turnCount = phase.turns.length;
             return (
               <div

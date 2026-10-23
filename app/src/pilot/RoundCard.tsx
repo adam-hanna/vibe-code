@@ -5,7 +5,7 @@ import { Counts } from '../cockpit/Counts';
 import { elapsed, work as describeWork } from '../cockpit/format';
 import { SEVERITIES } from '../cockpit/model';
 import { STAGE_TAB } from '../cockpit/rail';
-import { roundTitle } from '../cockpit/rounds';
+import { isFirstImplementation, roundTitle } from '../cockpit/rounds';
 import type { Severity } from '../design';
 import type { RoundCard as Round } from '../cockpit/rounds';
 import type { GateRun } from '../cockpit/model';
@@ -138,8 +138,9 @@ export function RoundCard({
         {/* The archive's round, which is the number that names the artifact
             behind it — the file is `plan-critique-0.json`, and a card has to
             agree with the file. It is also what the link above carries, so the
-            pane opens at this round rather than at the newest one. */}
-        {card.round !== null && <Badge className="font-mono normal-case tracking-normal">round {card.round}</Badge>}
+            pane opens at this round rather than at the newest one. Not on the
+            first implementation, which has no round of its own (#428). */}
+        {card.round !== null && !isFirstImplementation(card) && <Badge className="font-mono normal-case tracking-normal">round {card.round}</Badge>}
         {card.endedAt !== null && (
           <span className={cn(TOOK, 'ml-auto')}>{elapsed(card.endedAt - card.startedAt)}</span>
         )}
