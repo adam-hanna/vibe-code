@@ -384,9 +384,11 @@ A few things learned the expensive way:
   were preserved this way by hand. There is no command for this and there is not meant to be:
   for an ordinary user `.vibe/runs/` already persists in their repo across runs.
 - **What the past-run index reaches.** The planner is the only role *given* the index, but
-  Claude has one conversation — the implementer resumes `main` and inherits the planner's
-  history, that section included, exactly as it already inherits the plan prompt. The
-  Codex-seated roles (critic, answerer, reviewer) never see it.
+  Claude has one conversation — under the default table the implementer resumes `main` and
+  inherits the planner's history, that section included, exactly as it already inherits the
+  plan prompt. A role on another conversation never sees it: under the default table that is
+  the Codex-seated critic, answerer and reviewer, but any role can be seated on either
+  provider (`roles` in `src/roles.ts`), so it is the slot that decides, not the vendor.
 - **Prune when done**, after archiving the run above:
   `git worktree remove .worktrees/issue-22`.
 

@@ -255,8 +255,8 @@ export const DEFAULTS: Config = {
   prompts: {},
   // Empty: nobody's instructions until somebody writes some (#273).
   instructions: { text: '' },
-  // More review seats and a vote (#388), accepted and validated and not yet
-  // read by a run. Empty lists, so a default run is byte-identical to one from
+  // More review seats and a vote (#388), read by `runReview` when either list
+  // is non-empty. Empty lists, so a default run is byte-identical to one from
   // before the key existed. `block` is the owner's decision (2026-10-20): an
   // unconfirmed P0 still blocks unless somebody chooses otherwise. No
   // recommended set of seats ships until #388's measurement has been made.

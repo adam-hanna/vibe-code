@@ -2,7 +2,9 @@
 
 **vibe runs the plan → critique → implement → review loop between Claude Code and Codex, so you don't have to pass messages between them yourself.**
 
-Claude plans and Codex critiques, until the plan has no blocking findings. Then Claude implements, vibe runs your tests, and Codex reviews the diff, until that is clean too. vibe stops only when it actually needs you.
+A planner writes a plan and a critic attacks it, until the plan has no blocking findings. Then an implementer writes the code, vibe runs your tests, and a reviewer reviews the diff, until that is clean too. vibe stops only when it actually needs you.
+
+By default Claude plans and implements, and Codex critiques, reviews and answers the planner's questions. Each of those roles can be seated on either Claude or Codex, with its own model and effort: see [`roles`](https://adam-hanna.github.io/vibe-code/configuration.html#roles).
 
 **Documentation:** https://adam-hanna.github.io/vibe-code/
 
@@ -93,7 +95,7 @@ Put a `vibe.config.json` in the repository. Flags override it. `vibe.config.exam
 |---|---|
 | `verify.command` | The test command vibe runs after implementing. It is detected from `package.json` if not set. |
 | `verify.testPaths` | Which changed files count as tests when a review checks whether the run edited its own judge. Replaces the built-in list (`**/*.test.*`, `**/tests/**`, `**/test_*.py` and similar). `vibe.config.json` always counts. |
-| `roles` | Which agent, model and effort plans, implements, critiques and reviews. |
+| `roles` | Which agent (Claude or Codex), model and effort holds each job: planner, critic, answerer, implementer and reviewer. |
 | `budget.maxTokens` | A ceiling for the whole run, across both agents. |
 | `loop.maxPlanRounds`, `loop.maxReviewRounds` | How many rounds before vibe stops and asks. |
 | `gates` | Where the loop pauses for you: `auto`, `step` (the app only) or `stop`. |
@@ -127,7 +129,7 @@ When a round changes a test file or `vibe.config.json`, the reviewer is shown ea
 - **Codex cost isn't reported.** Codex runs on a subscription and no output mode returns a price, so vibe reports tokens and never a guessed dollar figure. `budget.maxTokens` covers both agents.
 - **Tested with claude 2.1.303 and codex 0.163.0.** vibe uses whatever versions you have installed. `vibe doctor` and every run's preflight compare them with the tested ones. A different version is a warning that names the command to move to the tested one, and the run continues. vibe refuses to start only when the installed CLI's `--help` no longer declares a flag vibe passes; `--skip-probe` skips that check.
 - **It checks npm for a newer vibe, once a day.** At the end of `vibe run`, `vibe plan` and `vibe doctor` in a terminal, vibe asks `https://registry.npmjs.org/@adam-hanna/vibe-code/latest` for the newest version and prints one line if yours is older. The request carries nothing about you: no identifier, no cookie, no credential. It is the only network request vibe itself makes. Turn it off with `"updates": { "check": false }` in a config file or `VIBE_NO_UPDATE_CHECK=1`. It is already off under `CI`, when stdout is not a terminal, and in the desktop app.
-- **Agreement isn't proof.** A clean run means two different models agreed and your tests passed. Both can still be wrong in the same way.
+- **Agreement isn't proof.** A clean run means the critic and the reviewer found nothing blocking and your tests passed. Under the default roles that is two different models agreeing, and both can still be wrong in the same way.
 - **The full documentation is at [adam-hanna.github.io/vibe-code](https://adam-hanna.github.io/vibe-code/)**: every config key, every command, and how the loop works.
 
 ## Contributing
