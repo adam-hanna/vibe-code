@@ -476,6 +476,48 @@ it"*. Three things are worth keeping:
   session. `Conversation.session` names its backend and is saved with the chat. A
   turn on another backend retires it, because that session never saw the turn.
 
+**The pilot's fixed prose is a setting, edited where the core's blocks are** (#420). #356
+decided a project's branch-naming standard is something the person *tells* the pilot, which
+proposes `--branch <name>` on its `start_run` card, and nothing the pilot was told could be
+edited: standing instructions reach it, but they reach every run agent too. The owner chose the
+core's shape over a separate "extra pilot instructions" box, knowing its cost: an edited block
+replaces the built-in one whole and stops receiving the product's improvements to it, and
+*use the default* (which clears the key) is how it starts receiving them again.
+
+- **Three blocks, and the rest is code on purpose.** `WHO`, `INTAKE` and `HOW_TO_READ` in
+  `app/src/pilot/brief.ts` are the only parts of `systemPrompt()` that are prose and nothing
+  else; they are `pilot: who`, `pilot: intake` and `pilot: how to read`. What is assembled per
+  turn - `whatWasAsked`, `whereTheWorkIs`, the run JSON from `describeRun`, `ownTools` or the
+  API road's one-line note, `accessNote`, `howToCall` and the standing instructions - stays
+  built by code: an edited copy of any of them is a description of a run, a sandbox or a tool
+  table that has since moved on. `ownTools` and the API note are prose, but each states what
+  *this* backend's sandbox enforces, and one edited text sent to both roads would be false on
+  one of them. `howToCall` is `emit.ts`'s contract with the model.
+- **The constants are untouched; only how they are sourced changed.** `systemPrompt` reads each
+  through `resolvePilotBlock(name, prompts)`, so a PR that edits a constant's prose (#356 adds a
+  paragraph about branch names to `INTAKE`) and this one rebase cleanly. With nothing stored the
+  prompt is byte-identical to before.
+- **Same table, same keys, texts in the app.** The entries are `prompts."pilot: …"` in
+  `vibe.config.json` or the global file, beside the core's blocks, so one validator refuses a
+  typo in either and `configDiff` names a change to either. The `pilot: ` prefix means a name can
+  never collide with a core block's and a config file says whose it is. The **texts** stay in the
+  webview, which is where the prompt is built and sent; the core holds only the names
+  (`PILOT_PROMPT_BLOCKS` in `src/prompts.ts`), because the validator needs them and a copy of the
+  text in the core would be the core owning a fact about the pilot. They are not in
+  `promptBlocks()`, which answers what a *run's* turns are told. `tests/pilot-prompt-names.test.ts`
+  reads `brief.ts` as source and keeps the two lists of names equal.
+- **Read off the config the pilot already reads.** The cockpit takes `effective.prompts` from the
+  same `config` read that gives it the access list and the standing instructions, and passes it to
+  `PilotPane`; a save in Settings bumps that read, so the next message of an open conversation is
+  sent the edited block.
+- **Fails closed to the built-in, never to empty.** A blank entry is the built-in (the core's
+  `block()` rule: clearing the box means *give me the default back*). A value that is not text, or
+  a `prompts` that is not a table, is the built-in too, and Settings says so on the block with a
+  *not used* badge rather than swallowing it. A config read that fails leaves the built-ins in
+  force. The pilot itself is never told that a block was replaced.
+- **A team's branch-naming standard goes in `pilot: intake`**, after the built-in text, which is
+  the block that tells the pilot how to write a brief and propose `start_run`.
+
 **The pilot runs in the repository the window named, and that path is a
 permission boundary.** `--restricted` confines `Read`, `Glob` and `Grep` to the
 child's working directory, so `cwd` is not incidental the way it is for a process

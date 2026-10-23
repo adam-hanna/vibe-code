@@ -858,6 +858,12 @@ export interface PilotPaneProps {
   /** The person's standing instructions (#273), from their settings. Null until read. */
   standing?: string | null | undefined;
   /**
+   * The settings' `prompts` table (#420), where a `pilot: <block>` entry
+   * replaces one of the pilot's fixed prose blocks. Null until read, which is
+   * every block's built-in.
+   */
+  pilotPrompts?: unknown;
+  /**
    * The launch this window sent, or null if it sent none (#191).
    *
    * The brief is the one thing about a run that no frame carries, so it cannot
@@ -910,6 +916,7 @@ export function PilotPane({
   ask,
   onAsked,
   standing,
+  pilotPrompts,
   onOpen,
   background = false,
   onBusy,
@@ -1530,7 +1537,7 @@ ${frame.text}`, turn, origin.current))) {
             // A new session after a compaction opens with the summary, which is
             // the whole of how the compaction reaches the next conversation.
             prompt: withCarry(id === null ? held.current.carry : null, said ?? trailingResults(messages) ?? ''),
-            system: systemPrompt(run, launched, 'emitted', access, agentOf(provider), standing ?? null),
+            system: systemPrompt(run, launched, 'emitted', access, agentOf(provider), standing ?? null, pilotPrompts ?? null),
             model,
             ...withEffort(effortToSend(provider, effort)),
             dir,
@@ -1578,7 +1585,7 @@ ${frame.text}`, turn, origin.current))) {
           model,
           messages,
           tools: declare(),
-          system: systemPrompt(run, launched, 'native', access, null, standing ?? null),
+          system: systemPrompt(run, launched, 'native', access, null, standing ?? null, pilotPrompts ?? null),
           // Named, so every other client draws it as it streams (#371).
           ...(chat.current === null ? {} : { announce: { chat: chat.current, asked: said ?? '', asker: origin.current } }),
         })
@@ -1604,7 +1611,7 @@ ${frame.text}`, turn, origin.current))) {
         )
         .finally(() => setOpening((n) => n - 1));
     },
-    [model, provider, run, launched, dir, access, standing],
+    [model, provider, run, launched, dir, access, standing, pilotPrompts],
   );
 
   const owed = unanswered(conversation);

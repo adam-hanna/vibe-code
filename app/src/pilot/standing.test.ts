@@ -30,10 +30,12 @@ describe('the pilot is told them', () => {
   });
 
   test('on both roads, from the settings the window already reads', () => {
-    expect(pane).toMatch(/systemPrompt\(run, launched, 'emitted', access, agentOf\(provider\), standing \?\? null\)/);
-    expect(pane).toMatch(/systemPrompt\(run, launched, 'native', access, null, standing \?\? null\)/);
+    // Case 2 (#420): the call gained the pilot's edited blocks after `standing`,
+    // so the argument is matched up to its comma rather than to the call's end.
+    expect(pane).toMatch(/systemPrompt\(run, launched, 'emitted', access, agentOf\(provider\), standing \?\? null,/);
+    expect(pane).toMatch(/systemPrompt\(run, launched, 'native', access, null, standing \?\? null,/);
     // A change in Settings has to reach a conversation already open.
-    expect(pane).toContain('[model, provider, run, launched, dir, access, standing]');
+    expect(pane).toMatch(/\[model, provider, run, launched, dir, access, standing\b/);
     expect(cockpit).toContain('setStanding(typeof text === \'string\' ? text : null)');
     expect(cockpit).toContain('standing={standing}');
   });

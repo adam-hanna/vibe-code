@@ -18,7 +18,7 @@ import { setOwn } from '@src/runtime.js';
 import type { AgentProvider, ToolchainContract, ToolRequirement, Phase } from '@src/runtime.js';
 import { DEFAULT_GATES, validateGates } from '@src/gates.js';
 import { DEFAULT_TEST_PATHS } from '@src/judge.js';
-import { promptBlockNames } from '@src/prompts.js';
+import { PILOT_PROMPT_BLOCKS, promptBlockNames } from '@src/prompts.js';
 import { readPilotAccess, refuseProjectPilot } from '@src/pilotaccess.js';
 import { readCliPaths, refuseProjectCli } from '@src/clipaths.js';
 import { readRoutes, refuseProjectAuth } from '@src/auth.js';
@@ -1607,7 +1607,9 @@ function validateVerify(verify: VerifyConfig): void {
  * would be a number with nothing behind it.
  */
 function validatePrompts(prompts: PromptOverrides): void {
-  const known = new Set(promptBlockNames());
+  // The pilot's blocks share the table (#420): no run renders them, but a name
+  // refused here would be a pilot instruction nobody could adopt.
+  const known = new Set([...promptBlockNames(), ...PILOT_PROMPT_BLOCKS]);
   for (const [name, text] of Object.entries(prompts)) {
     if (!known.has(name)) {
       throw new Error(
