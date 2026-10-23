@@ -3,6 +3,7 @@ import type {
   Commit,
   CycleKind,
   FinderMerge,
+  Gate,
   PhaseGroup,
   QuestionRound,
   Run,
@@ -529,4 +530,38 @@ export function passLabel(group: Pass): string {
 export function turnRound(turn: Pick<Turn, 'kind' | 'round'>): number | null {
   if (turn.kind === 'implement' || turn.round === null) return null;
   return ARCHIVE_KINDS.has(turn.kind) ? shownRound(turn.round) : turn.round;
+}
+
+/**
+ * Where in the run a held gate is, in words, or null when its boundary has no
+ * round to name (#428). It goes into the pilot's wake sentence, which the model
+ * answers and the reader sees, so it names the counter it read.
+ *
+ * Each boundary reports **its own** counter. The sentence used to take
+ * `reviewRound ?? planRound ?? verifyRound`, and `reviewRound` is always a
+ * number, so a plan gate was described by the review count - `round 0` at
+ * `plan-approved`, which is no round of the plan loop at all.
+ *
+ * - `plan-approved`, `plan-round` and `question-round`: the plan round, counted
+ *   from one as `Plan critique (round N)` counts it (`shownRound`).
+ * - `review-round` holds after a review fix, and `reviewRound` is that fix's
+ *   number, already from one: the fix answering `Code review (round N)`.
+ * - `verify-round` holds after a verification fix, and `verifyRound` is that
+ *   fix's number, already from one.
+ * - `implemented`, `complete` and a boundary this build does not know: null.
+ *   Nothing is guessed for a boundary whose counter is not stated.
+ */
+export function wakeRound(gate: Pick<Gate, 'boundary' | 'planRound' | 'reviewRound' | 'verifyRound'>): string | null {
+  switch (gate.boundary) {
+    case 'plan-approved':
+    case 'plan-round':
+    case 'question-round':
+      return `in plan round ${String(shownRound(gate.planRound))}`;
+    case 'review-round':
+      return `after fix round ${String(gate.reviewRound)}, which answered code review round ${String(gate.reviewRound)}`;
+    case 'verify-round':
+      return `after verification fix ${String(gate.verifyRound)}`;
+    default:
+      return null;
+  }
 }

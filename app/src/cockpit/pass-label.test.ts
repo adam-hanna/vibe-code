@@ -2,7 +2,7 @@ import { describe, expect, test } from 'vitest';
 import { emptyRun, reduce } from './model';
 import type { PhaseGroup, Run } from './model';
 import { classify } from './artifacts';
-import { isFirstImplementation, passLabel, phaseRound, rounds, shownRound, turnRound } from './rounds';
+import { isFirstImplementation, passLabel, phaseRound, rounds, shownRound, turnRound, wakeRound } from './rounds';
 import loopColumn from './LoopColumn.tsx?raw';
 import runningRow from './RunningRow.tsx?raw';
 import outputPane from './OutputPane.tsx?raw';
@@ -11,6 +11,7 @@ import plansPane from './PlansPane.tsx?raw';
 import reportPane from './ReportPane.tsx?raw';
 import footer from './Footer.tsx?raw';
 import roundCard from '../pilot/RoundCard.tsx?raw';
+import pilotPane from '../pilot/PilotPane.tsx?raw';
 import type { Frame } from '../host';
 
 /**
@@ -242,5 +243,44 @@ describe('every display site counts from one through `rounds.ts`', () => {
       expect(source).not.toMatch(raw);
     }
     expect(footer).not.toContain('plan {gate.planRound}');
+  });
+});
+
+/**
+ * The pilot's wake sentence names the counter of the gate it is held at (#428).
+ * It took `reviewRound ?? planRound ?? verifyRound`, and `reviewRound` is always
+ * a number, so every plan gate was described by the review count.
+ */
+describe('the wake sentence reports the gate\'s own counter', () => {
+  const at = (boundary: string) => ({ boundary, planRound: 1, reviewRound: 0, verifyRound: 0 });
+
+  test('a plan gate reports the plan round, from one, never the review count', () => {
+    expect(wakeRound(at('plan-approved'))).toBe('in plan round 2');
+    expect(wakeRound(at('plan-round'))).toBe('in plan round 2');
+    expect(wakeRound(at('question-round'))).toBe('in plan round 2');
+    expect(wakeRound({ boundary: 'plan-approved', planRound: 0, reviewRound: 3, verifyRound: 2 })).toBe('in plan round 1');
+  });
+
+  test('a review gate reports the fix that just ran and the review it answered', () => {
+    expect(wakeRound({ boundary: 'review-round', planRound: 4, reviewRound: 2, verifyRound: 0 })).toBe(
+      'after fix round 2, which answered code review round 2',
+    );
+  });
+
+  test('a verify gate reports the verification fix', () => {
+    expect(wakeRound({ boundary: 'verify-round', planRound: 4, reviewRound: 2, verifyRound: 1 })).toBe(
+      'after verification fix 1',
+    );
+  });
+
+  test('a gate with no round of its own, or an unknown one, says none', () => {
+    expect(wakeRound(at('implemented'))).toBeNull();
+    expect(wakeRound(at('complete'))).toBeNull();
+    expect(wakeRound(at('a-boundary-from-a-newer-core'))).toBeNull();
+  });
+
+  test('the pilot pane builds its sentence from `wakeRound` and no longer picks a counter itself', () => {
+    expect(pilotPane).toContain('const where = wakeRound(gate);');
+    expect(pilotPane).not.toContain('gate.reviewRound ?? gate.planRound');
   });
 });

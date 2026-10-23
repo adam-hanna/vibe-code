@@ -855,6 +855,10 @@ they are waiting on. Four things in it are worth carrying:
   verify figures are counts of fix rounds done and are drawn as they arrive. The core's
   revision lines (`Plan round N`, `revising the plan (round N)`) and the replay's census line
   now count from one as well.
+  The pilot's wake sentence names the counter of the gate it is held at (`wakeRound`): the plan
+  round from one at a plan gate, the fix that just ran at `review-round` and `verify-round`,
+  and nothing at a boundary with no round. It took `reviewRound ?? planRound`, and
+  `reviewRound` is never null, so every plan gate was described by the review count.
 - **A resume is pointed at the repository, and `dir` is not it.** `run_started`
   carries both and they are not interchangeable: `identity.dir` is the run's
   **own** directory — `<repo>/.vibe/runs/<id>` — and `identity.repo` is the
