@@ -36,6 +36,7 @@ The brakes are independent, and any one of them can stop a run:
 | **Question rounds** | `loop.maxQuestionRounds` (3) bounds how many times the planner may answer its own questions. A question round does not use up a plan round. A planner still asking after the cap stops the run for you to answer them directly: exit 2, not 3, because what is missing is a decision rather than agreement. |
 | **Oscillation** | The set of blocking finding ids is fingerprinted every round. The same set `loop.oscillationThreshold` rounds running (3) means nothing new is being produced. Exit 3. |
 | **Convergence trend** | Late in the round budget, over the last `loop.convergenceWindow` rounds, a blocking count that is not falling stops the run. A flat count whose findings keep changing is work being done, and is allowed one more window. Exit 3. |
+| **Plan stall** | In the plan loop, from `loop.stallAfter` (3) critiques on: when the number of blocking findings is not falling and most of them are new, the critic is finding new problems faster than old ones go away. The first time, the run does not stop: the planner is told the counts and asked to step back and reconsider its approach. The next time, the run stops and asks you (exit 2). See [A plan loop that stops converging](#a-plan-loop-that-stops-converging). |
 | **Persistent finding** | A single finding that keeps coming back while the rest change is **reported, not stopped on**. Persistence is not evidence that it cannot be fixed. |
 | **Plan share** | Planning may use at most `budget.planShare` (40%) of the token ceiling. Planning that will not converge is the most expensive way to fail, because it produces nothing. Exit 4. |
 | **Token ceiling** | `budget.maxTokens` (25M), counted across both agents. Checked as each turn is charged (exit 4), and also during a turn: a single runaway turn that crosses it is stopped, and the run ends as a stopped turn does (exit 2). |
@@ -44,6 +45,20 @@ The brakes are independent, and any one of them can stop a run:
 | **Rate limits** | When Claude's window is reached, the run waits for the reset, up to `budget.maxWaitMinutes`. Before each Codex turn vibe reads Codex's window, waits if it is reached, and stops resumably at `budget.codexLimitPercent` (95%) rather than start a turn the window would cut off. Exit 5. |
 
 Every one of these exits resumably. Raise the cap or ceiling (in `vibe.config.json`, or with a flag) and `vibe resume`.
+
+### A plan loop that stops converging
+
+Two long plan loops in vibe's own history went this way. The critic found new blocking problems almost every round. Each time the run stopped, the only lever offered was "raise the limit". That changes nothing about what the planner does, so they stopped again.
+
+vibe now notices this shape, a blocking count that is not falling and is mostly new, and responds in two steps:
+
+1. **It asks the planner to step back.** The next revision is told how many blocking findings each of the last three critiques found and how many were new. It is asked to say what they have in common and to reconsider the approach rather than patch each one. If the brief itself is the problem, the planner is asked to say so in its open questions. The instruction is the `stall` prompt block, and you can replace it; the counts are always kept.
+2. **If that changes nothing, it asks you.** The run stops with exit 2, and `NEEDS-INPUT.md` gives the counts since the step-back, lists the outstanding findings, and asks one question with three answers:
+   - **Narrow the brief**: write what to narrow it to. The planner receives it.
+   - **Continue**: write that, with any steer. The planner receives it.
+   - **Accept the remaining P1s**: demote each finding under *Change a severity* and leave the answer empty, then `vibe resume`. The plan is approved when the demoted findings pass the gate, with no further revision or critique (see [Moving a severity](#moving-a-severity)).
+
+Whatever you answer, the round after the resume is not judged, so your steer gets a full round to work. The next stall after that asks the planner to step back again. `loop.stallAfter: 0` turns all of this off. On the round where `loop.maxPlanRounds` is reached, the cap still stops the run (exit 3), and the file still asks the question.
 
 One failed turn is not a brake, and is tried again once. A Codex critique, answer, review or vote whose answer was cut off at its output limit, before it was whole, runs again on the same conversation. The retry is told which findings the cut-off attempt had written, as unverified. The run log warns when this happens, and the summary counts it. A turn that writes code is never retried, because it may already have edited files. A second cut-off fails the turn, as one did before. A cut-off answer is never used as the turn's verdict.
 
@@ -158,6 +173,8 @@ A block left partly filled in stops the resume and says what is missing. Nothing
 The same file lists the findings the next round will act on, each with a `*Move to:*` line. Write `P0`, `P1`, `P2` or `P3`, and why, and the severity moves.
 
 This is how you overrule a guard. Both guards are deliberately blunt, so a finding that was right but cited a file from memory is downgraded for the same reason a wrong one is, and only you can tell them apart. The guard's own record is never rewritten, and the fixer is told both: that the severity is deliberate, and why the guard fired. A restored P0 blocks whatever `loop.p1Tolerance` says.
+
+**On a plan stop, demoting is accepting.** If the findings you leave after demoting pass the gate (no P0, and no more P1s than `loop.p1Tolerance`), `vibe resume` approves the plan straight away. It does not revise and critique it again. Any P1s within the tolerance are carried into implementation, as on any approval. The answer blocks can stay empty. If you also write an answer, the answer wins: the plan is revised against it and critiqued as usual, and nothing is approved on the strength of the demotion. A plain resume, with nothing moved, revises and critiques as before. On a review or verification stop, a move changes the severity the next round acts on, as before.
 
 ## Questions
 

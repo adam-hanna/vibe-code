@@ -245,6 +245,32 @@ artifact; both hold `downgraded` and `severityChanges` together, so the issue's 
 transitions and names who made each one"* is satisfied on the artifact that holds the finding
 after the change rather than on the one that predates it.
 
+**On a plan stop, a demotion that passes the gate approves the plan** (#394). Until #394 a move on
+a plan stop bought one more revise-and-critique round: the consume branch sent every pending
+finding, P2s included, to the planner, and nothing applied the gate to the stored findings again.
+That round is where the stalled runs' critics found new P1s, so the stall question's "accept the
+remaining P1s" could not have done what it says. Now, at the top of `planPhase`'s consume branch:
+
+- **It needs a person's move since the last critique, read from state.** A pending plan finding
+  with a `severityChanges` entry `by: 'human'` is exactly that, because every critique replaces
+  `pendingFindings`. `takeRequestedMoves` discards what `acceptMoves` returns, and a flag held in
+  memory would not survive a death between the move's save and the approval. A plain resume moves
+  nothing and revises as before.
+- **The real gate decides**: `gate(pending, loop.p1Tolerance)`, not "no P0 or P1 remains". So
+  demoting all but a tolerated number of P1s also passes, and those are carried.
+- **One approval path.** The gate-pass branch was moved, unchanged, into `approvePlan`, and both
+  call it. The accepted approval's `plan_approved` adds one field, `byPerson: true`. There is no
+  second approval event.
+- **An answer wins.** If the same resume carries a free-text answer, the answer revises, the
+  demoted findings travel to the findings revision, and a critic reads the result. The answers
+  revision clears `pendingAnswers` on its plan write, so a death after that write would look
+  answer-free. `state.planRevisedByAnswer` is set on that same write, whenever plan findings are
+  pending, and cleared by the findings revision. While it is set, nothing is accepted.
+- **An empty answer with moves resumes.** The stall question says to demote and leave the answer
+  empty, so `resumeRun` takes a plan-phase `NEEDS-INPUT.md` with at least one move and no
+  answers (`resumesOnMovesAlone`). Every other unanswered file is refused as before.
+- **Plan phase only.** A move on a review or verify stop is unchanged.
+
 **A gate that fails has more than one sample, and a flaky suite is told apart from a broken
 one** (#135). `verify.runs` has defaulted to 3 since the gate existed and `config.ts` argues
 it as a coin flip — but that reasoning is about *catching* a flake, and the loop returned on
@@ -819,9 +845,8 @@ The run then died with `codex wrote no structured output … reason: max_output_
 
 ## Noticing a plan loop that stops converging (#394)
 
-`planStall` in `src/run.ts`, beside `assessConvergence`. **It is groundwork: nothing calls it
-yet.** A second PR adds `loop.stallAfter`, the step-back prompt block, the escalation and the
-`plan_stalled` event. Two archived plan loops ran long, #246-b (19 critiques) and #346 (15), with
+`planStall` in `src/run.ts`, beside `assessConvergence`, called by `guardProgress` for the plan
+loop only. Two archived plan loops ran long, #246-b (19 critiques) and #346 (15), with
 the critic finding new blocking problems almost every round. `assessConvergence` stopped each of
 them. Each time the person raised the limit and resumed, #246-b six more times, because a stop
 whose only lever is "raise the limit" changes nothing about what the planner does. And
@@ -851,3 +876,42 @@ of those runs.
   Only #246 part A (five critiques) ran long enough to be a real negative, so the evidence against
   false alarms is thin. That is why the first stall only asks the planner to step back.
   `tests/plan-stall.test.ts` asserts the same numbers from fixtures copied out of those critiques.
+
+What calls it, and what a stall does:
+
+- **Where it runs.** In `guardProgress`, after `recordRound` and before `assessConvergence`. The
+  plan caller passes `GuardArgs.stall` (the state and the human ids), and that field being present
+  is the whole gate. The review and verify callers pass nothing and never consult it. `human` is
+  built from this critique's findings and the run's pending ones; it is empty in the plan loop
+  today.
+- **The order.** The stall check runs first. A round that stalls skips `assessConvergence`, so
+  when both would fire the stall wins. `maxPlanRounds` stays the hard ceiling: the cap round exits
+  3 whether or not it stalled. A step-back on that round is already saved, so a resume with a
+  raised cap sends its block. An escalation on that round rides along: the cap's message gains the
+  stall's sentences and the stop carries the stall's question.
+- **`lastStall` and the action are one function**, `stallAction(state.planStalls)`. `lastStall` is
+  the position of the latest entry of any kind, so an escalation windows the next round exactly as
+  a step-back does, and no stall can fire on the round right after a resume from one. A stall
+  escalates only if a step-back sits after the latest escalation. So the first stall steps back,
+  the second asks a person, and the first stall after a person has steered steps back again.
+- **The record.** Each stall appends `{position, action, counts, fresh}` to `state.planStalls` and
+  is narrated as `plan_stalled`. Both are on the same `saveState`, which also persists the round
+  just recorded. `planStalls` is removed with `p1Rounds` when implementation starts, because its
+  positions point into it. `counts` and `fresh` are kept because re-running the rule after a
+  resume would find that stall in its own window and return null. A fork copies both fields with
+  the rest of the state.
+- **A step-back** does not stop the run. The next *findings* revision reads
+  `pendingStepBack(state.planStalls)` and carries a `## Stepping back` section after the findings.
+  The section is a counts line written by code, then the `stall` prompt block, which is overridable
+  as `prompts.stall`. The counts line is outside `block()`, so an override cannot drop it. The
+  entry's `sent` is set on the write that persists that revision's plan, so a stop before that
+  write sends the block again and a stop after it does not. An answers-only revision neither
+  carries it nor marks it sent.
+- **An escalation** stops with `EXIT.NEEDS_HUMAN` and is the first `OpenQuestion` vibe writes
+  itself. The message gives the per-record counts since the step-back, counted the way `planStall`
+  counts. The one product question, with no recommended default, offers to narrow the brief,
+  accept the remaining P1s, or continue. Its blockers fill *Outstanding P1 findings* and *Change a
+  severity*. There is no answer interpreter. Free text goes to the planner through
+  `pendingAnswers`, and "accept" is a demotion, which approves the plan (see #142's section).
+- **`loop.stallAfter`**, default 3, `0` turns it off, and it has no CLI flag. The end-of-run
+  summary prints how many step-backs a run took, and only when there were any.

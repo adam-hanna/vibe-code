@@ -82,7 +82,9 @@ import {
   listRuns,
   measuredRatio,
   p1Signature,
+  pendingStepBack,
   persistenceNotice,
+  planStall,
   readArtifact,
   recordAndSay,
   recordEvent,
@@ -93,6 +95,7 @@ import {
   stageEvent,
   resumePhase,
   saveState,
+  stallAction,
   takePendingFindings,
   tryRecordEvent,
   verificationCaveat,
@@ -121,6 +124,7 @@ import {
   reproducerOutcomesOf,
   reproductionAt,
   SEVERITY_RANK,
+  severityChangesOf,
 } from '@src/validate.js';
 import type { FixOutput } from '@src/validate.js';
 import {
@@ -176,6 +180,7 @@ import type {
   ReproducerOutcome,
   RoundRecord,
   Plan,
+  PlanStallEntry,
   RunStart,
   RunState,
   RunSummary,
@@ -844,6 +849,10 @@ async function runPhases(
     // on and a stalled loop reads as a healthy one.
     state.p1Rounds = [];
     state.verifyRounds = [];
+    // With `p1Rounds`, because its positions point into it (#394); and the
+    // answer marker with them, because it only ever describes the plan loop.
+    delete state.planStalls;
+    delete state.planRevisedByAnswer;
     // Below the resets, and deliberately: a snapshot taken above them carries
     // the PLANNING critique history into a state whose phase is already
     // `reviewing`, so a fork resuming there would feed planning rounds to the
@@ -964,6 +973,73 @@ function sayFindings(
   );
 }
 
+/**
+ * Approve the plan of record, on the gate's decision over `findings`.
+ *
+ * The one approval path (#394): the critique that passes the gate and the
+ * resume on which a person demoted enough findings to pass it both come here,
+ * so an accepted plan carries, declines and freezes its bar exactly as a passed
+ * one does. Moved out of `planPhase` unchanged; `extra` is spread last into the
+ * `plan_approved` data and the gate pass passes none.
+ */
+function approvePlan(
+  state: RunState,
+  plan: Plan,
+  findings: readonly Finding[],
+  decision: ReturnType<typeof gate>,
+  extra: Record<string, unknown> = {},
+): void {
+  // Carried, not forgiven. The implementation is told about these so the
+  // phase that can actually settle them does.
+  if (decision.tolerated.length > 0) state.carried = decision.tolerated;
+  // The sentence, chosen before it is said, because since #223 saying it and
+  // recording it are one call and the call sits below the two assignments
+  // its data reads. The two branches and their wording are unchanged, and so
+  // is the order they reach a terminal in: this line, then the `~` list.
+  const approved =
+    decision.tolerated.length > 0
+      ? `Plan accepted with ${decision.tolerated.length} P1(s) carried into implementation - ` +
+        decision.tolerated.map((f) => f.id).join(', ')
+      : `Plan approved - ${findings.length} non-blocking finding(s)`;
+  // The one round whose findings reach nobody otherwise: a revising round
+  // hands its deferrals to the planner through `pendingFindings`, and this
+  // one is about to clear them. Recorded, not acted on - `defer` decides
+  // what a later prompt is told, never whether a turn happens. Assigned
+  // unconditionally so an approving round that declined nothing cannot
+  // leave an earlier round's value standing, and written on the same state
+  // save that clears the pending findings below.
+  state.declined = findings.filter(isDeferrable);
+  // The bar, frozen at the instant it was approved. A copy, not a view:
+  // replacing `state.plan` is not the only way its criteria can move - the
+  // array and each criterion are mutable, and anything later holding the
+  // same objects would edit an approved bar in place. Every field of a
+  // criterion is a primitive, so a spread per entry is a full clone.
+  //
+  // `undefined` is preserved rather than collapsed to `[]`: a plan stored
+  // before this field existed never stated a bar, and inventing an empty
+  // one would put a claim in its mouth. Assigned unconditionally for the
+  // reason `declined` is - an approving round must not leave an earlier
+  // round's bar standing - and on the same state save.
+  state.acceptanceCriteria = plan.acceptance_criteria?.map((c) => ({ ...c }));
+  recordAndSay(state, 'ok', 'plan_approved', approved, {
+    findings: findings.length,
+    carried: decision.tolerated.map((f) => f.id),
+    declined: state.declined.map((f) => f.id),
+    // Present only when a bar was recorded. `?? []` here would log an
+    // explicit empty bar for a legacy plan that never claimed one, which is
+    // the absent-as-empty collapse the rest of this field refuses.
+    ...(state.acceptanceCriteria === undefined
+      ? {}
+      : { criteria: state.acceptanceCriteria.map((c) => c.id) }),
+    ...extra,
+  });
+  for (const f of decision.tolerated) log.info(`  ~ ${f.title}`);
+  // An approved plan has nothing outstanding: what the gate tolerated
+  // travels on `state.carried` into implementation, and leaving these set
+  // would have a resume revise a plan the critic just passed.
+  clearPendingFindings(state);
+}
+
 /** Plan, resolve questions, and critique until the critic raises no P1s. */
 async function planPhase(
   state: RunState,
@@ -1042,6 +1118,36 @@ async function planPhase(
     // at the critique instead is what cost 7.5M tokens to learn nothing.
     const carried = takePendingFindings(state, 'plan');
     if (carried !== null) {
+      // Accepting on a person's demotion (#394). A pending plan finding whose
+      // severity a person moved means a move since the last critique - each
+      // critique replaces these - and the real gate over what is now pending
+      // decides, so a tolerated P1 is carried exactly as on any approval. Read
+      // from state, never from what this process remembers, so a death between
+      // the move and here changes nothing. A plain resume moves nothing and
+      // revises as it always did.
+      const moved = carried.some((f) => severityChangesOf(f).some((c) => c.by === 'human'));
+      if (moved && state.planRevisedByAnswer === true) {
+        // An answer wins: approving now would approve a plan revised against
+        // it that no critic has read. Said whether or not the gate would have
+        // passed, because the person who demoted and also answered is owed the
+        // sentence either way - a partial demotion with an answer is the same
+        // combination, and staying silent there left them guessing (review of
+        // #394 part 2).
+        log.info(
+          'Your severity changes were not taken as accepting the plan, because an answer was ' +
+            'also given - revising against the answer and the findings, then critiquing.',
+        );
+      } else if (moved) {
+        const accepted = gate(carried, cfg.loop.p1Tolerance);
+        if (accepted.pass) {
+          log.info(
+            'A person changed a severity since the last critique and the gate now passes - ' +
+              'approving the plan without another critique.',
+          );
+          approvePlan(state, plan, carried, accepted, { byPerson: true });
+          break;
+        }
+      }
       if (firstPass) {
         log.info(
           `Revising against ${carried.length} finding(s) carried across the stop - not re-critiquing.`,
@@ -1230,54 +1336,7 @@ async function planPhase(
     // the news was bad and nothing while it was good.
     sayFindings('plan', critique.findings, decision, cfg.loop.p1Tolerance);
     if (decision.pass) {
-      // Carried, not forgiven. The implementation is told about these so the
-      // phase that can actually settle them does.
-      if (decision.tolerated.length > 0) state.carried = decision.tolerated;
-      // The sentence, chosen before it is said, because since #223 saying it and
-      // recording it are one call and the call sits below the two assignments
-      // its data reads. The two branches and their wording are unchanged, and so
-      // is the order they reach a terminal in: this line, then the `~` list.
-      const approved =
-        decision.tolerated.length > 0
-          ? `Plan accepted with ${decision.tolerated.length} P1(s) carried into implementation - ` +
-            decision.tolerated.map((f) => f.id).join(', ')
-          : `Plan approved - ${critique.findings.length} non-blocking finding(s)`;
-      // The one round whose findings reach nobody otherwise: a revising round
-      // hands its deferrals to the planner through `pendingFindings`, and this
-      // one is about to clear them. Recorded, not acted on - `defer` decides
-      // what a later prompt is told, never whether a turn happens. Assigned
-      // unconditionally so an approving round that declined nothing cannot
-      // leave an earlier round's value standing, and written on the same state
-      // save that clears the pending findings below.
-      state.declined = critique.findings.filter(isDeferrable);
-      // The bar, frozen at the instant it was approved. A copy, not a view:
-      // replacing `state.plan` is not the only way its criteria can move - the
-      // array and each criterion are mutable, and anything later holding the
-      // same objects would edit an approved bar in place. Every field of a
-      // criterion is a primitive, so a spread per entry is a full clone.
-      //
-      // `undefined` is preserved rather than collapsed to `[]`: a plan stored
-      // before this field existed never stated a bar, and inventing an empty
-      // one would put a claim in its mouth. Assigned unconditionally for the
-      // reason `declined` is - an approving round must not leave an earlier
-      // round's bar standing - and on the same state save.
-      state.acceptanceCriteria = plan.acceptance_criteria?.map((c) => ({ ...c }));
-      recordAndSay(state, 'ok', 'plan_approved', approved, {
-        findings: critique.findings.length,
-        carried: decision.tolerated.map((f) => f.id),
-        declined: state.declined.map((f) => f.id),
-        // Present only when a bar was recorded. `?? []` here would log an
-        // explicit empty bar for a legacy plan that never claimed one, which is
-        // the absent-as-empty collapse the rest of this field refuses.
-        ...(state.acceptanceCriteria === undefined
-          ? {}
-          : { criteria: state.acceptanceCriteria.map((c) => c.id) }),
-      });
-      for (const f of decision.tolerated) log.info(`  ~ ${f.title}`);
-      // An approved plan has nothing outstanding: what the gate tolerated
-      // travels on `state.carried` into implementation, and leaving these set
-      // would have a resume revise a plan the critic just passed.
-      clearPendingFindings(state);
+      approvePlan(state, plan, critique.findings, decision);
       break;
     }
 
@@ -1285,11 +1344,20 @@ async function planPhase(
     for (const f of stoppers) log.info(`  - [${f.severity}] ${f.title}`);
 
     guardPlanBudget(state, cfg, stoppers);
+    // Ids a person raised, from this critique and from what the run carries.
+    // Empty in the plan loop today (`raise.ts`, decision 4); passed anyway so
+    // the stall rule's exclusion holds where it is stated (#394).
+    const human = new Set(
+      [...critique.findings, ...(takePendingFindings(state, 'plan') ?? [])]
+        .filter((f) => authorOf(f) === 'human')
+        .map((f) => f.id),
+    );
     guardProgress(cfg, state.p1Rounds, critique.findings, stoppers, {
       cap: cfg.loop.maxPlanRounds,
       round: state.planRound + 1,
       capName: 'maxPlanRounds',
       deadlockMsg: 'the planner and reviewer are deadlocked',
+      stall: { state, human },
     });
 
     // Back to the top rather than revising here: the findings this round bought
@@ -2206,6 +2274,12 @@ interface GuardArgs {
   round: number;
   capName: string;
   deadlockMsg: string;
+  /**
+   * What the plan loop's stall check needs (#394). Passed by the plan caller
+   * only, and its presence is the whole gate: the review and verify loops pass
+   * nothing and never consult `planStall`.
+   */
+  stall?: { state: RunState; human: ReadonlySet<string> };
 }
 
 /** Both brakes that stop a loop from running forever on the same disagreement. */
@@ -2272,13 +2346,69 @@ export function persistenceWarning(
   });
 }
 
+/** The `plan_stalled` sentence: what was counted, and what happens next. */
+function stallSentence(entry: PlanStallEntry): string {
+  const blocking = entry.counts.reduce((a, b) => a + b, 0);
+  const fresh = entry.fresh.reduce((a, b) => a + b, 0);
+  const head =
+    `The last ${entry.counts.length} critiques kept finding new blocking problems ` +
+    `(${entry.counts.join(', ')} blocking; ${fresh} of ${blocking} new)`;
+  return entry.action === 'step-back'
+    ? `${head}. Asking the planner to step back.`
+    : `${head} - still not converging after a step-back. Asking you.`;
+}
+
+/** The question a second stall asks. The first `OpenQuestion` vibe writes itself. */
+export const STALL_QUESTION: OpenQuestion = {
+  question:
+    'The plan has stopped converging even after the planner was asked to step back. ' +
+    'Narrow the brief, accept the plan with its remaining P1s, or continue? ' +
+    "To accept them, demote each under 'Change a severity' below and leave this answer empty, then resume.",
+  options: ['narrow the brief', 'accept the remaining P1s', 'continue'],
+  // No default, deliberately: which of the three is right is the person's call,
+  // and `writeEscalation` prints no default line for an empty one.
+  recommended: '',
+  kind: 'product',
+  blocking: true,
+};
+
+/**
+ * The stop a second stall makes (#394): exit 2, one question, the blockers.
+ *
+ * The counts are per critique record from the step-back it followed, counted
+ * the way `planStall` counts - each record's distinct ids, minus any a person
+ * raised - so the message and the detector cannot disagree.
+ */
+function stallEscalation(
+  state: RunState,
+  history: readonly RoundRecord[],
+  blockers: readonly Finding[],
+  human: ReadonlySet<string>,
+): Escalation {
+  const stalls = state.planStalls ?? [];
+  // The latest step-back before the entry just recorded, which is this one.
+  const steppedBack = stalls
+    .slice(0, -1)
+    .filter((s) => s.action === 'step-back')
+    .pop();
+  const from = steppedBack?.position ?? Math.max(0, history.length - 3);
+  const counts = history
+    .slice(from)
+    .map((r) => [...new Set(r.ids ?? [])].filter((id) => !human.has(id)).length);
+  const message =
+    `The plan loop stopped converging again after the planner was asked to step back at ` +
+    `critique record ${from}. Blocking findings per critique record since then ` +
+    `(excluding any a person raised): ${counts.join(', ')}.`;
+  return new Escalation(EXIT.NEEDS_HUMAN, message, [{ ...STALL_QUESTION }], [...blockers]);
+}
+
 /** Exported for tests: appends to `history`, may log, and may throw `Escalation`. */
 export function guardProgress(
   cfg: Config,
   history: RoundRecord[],
   all: readonly Finding[],
   blockers: readonly Finding[],
-  { cap, round, capName, deadlockMsg }: GuardArgs,
+  { cap, round, capName, deadlockMsg, stall }: GuardArgs,
 ): void {
   recordRound(
     history,
@@ -2291,28 +2421,64 @@ export function guardProgress(
     blockers.map((f) => ({ id: f.id, title: f.title })),
   );
 
-  const stall = assessConvergence(history, {
-    repeatThreshold: cfg.loop.oscillationThreshold,
-    window: cfg.loop.convergenceWindow,
-    cap,
-    round,
-  });
-  if (stall !== null) {
-    throw new Escalation(
-      EXIT.NO_CONVERGENCE,
-      `Stopping early: ${stall} - ${deadlockMsg}.`,
-      null,
-      [...blockers],
-    );
+  // The plan loop's stall check, before `assessConvergence` so a stall wins
+  // when both would fire on the same round (#394). Recorded through
+  // `recordAndSay`, whose save is also the one that persists the round just
+  // appended and the new `planStalls` entry - so the three land together.
+  let stalled: PlanStallEntry | null = null;
+  if (stall !== undefined) {
+    const { lastStall, action } = stallAction(stall.state.planStalls ?? []);
+    const found = planStall(history, {
+      stallAfter: cfg.loop.stallAfter,
+      lastStall,
+      human: stall.human,
+    });
+    if (found !== null) {
+      stalled = { position: history.length - 1, action, counts: found.counts, fresh: found.fresh };
+      (stall.state.planStalls ??= []).push(stalled);
+      recordAndSay(stall.state, 'warn', 'plan_stalled', stallSentence(stalled), {
+        position: stalled.position,
+        counts: stalled.counts,
+        fresh: stalled.fresh,
+        action,
+      });
+    }
   }
+  const escalation =
+    stall !== undefined && stalled?.action === 'escalated'
+      ? stallEscalation(stall.state, history, blockers, stall.human)
+      : null;
+
+  if (stalled === null) {
+    const trend = assessConvergence(history, {
+      repeatThreshold: cfg.loop.oscillationThreshold,
+      window: cfg.loop.convergenceWindow,
+      cap,
+      round,
+    });
+    if (trend !== null) {
+      throw new Escalation(
+        EXIT.NO_CONVERGENCE,
+        `Stopping early: ${trend} - ${deadlockMsg}.`,
+        null,
+        [...blockers],
+      );
+    }
+  }
+  // The cap stays the hard ceiling, stall or no stall (#394). A step-back on the
+  // cap round is already saved, so a resume with a raised cap sends its block;
+  // an escalation on it rides along, question and all, so the person who has to
+  // raise the cap is also asked the question the stall would have asked.
   if (round >= cap) {
     throw new Escalation(
       EXIT.NO_CONVERGENCE,
-      `Hit ${capName} (${cap}) with ${blockers.length} blocking finding(s) outstanding.`,
-      null,
+      `Hit ${capName} (${cap}) with ${blockers.length} blocking finding(s) outstanding.` +
+        (escalation === null ? '' : ` ${escalation.message}`),
+      escalation?.questions ?? null,
       [...blockers],
     );
   }
+  if (escalation !== null) throw escalation;
 
   // Beside the persistence notice and for the same reason - the run is
   // continuing, and every stop above has declined to fire. This one reports a
@@ -4068,6 +4234,10 @@ async function revisePlan(
     },
   );
 
+  // The step-back a stall left for this revision, read from state so a resume
+  // re-entering here sends it too (#394). A findings revision only: answers are
+  // the person's steer, not the critic's churn.
+  const stepBack = args.findings !== undefined ? pendingStepBack(state.planStalls ?? []) : null;
   const outcome = await runTurn(
     state,
     cfg,
@@ -4087,6 +4257,7 @@ async function revisePlan(
         // so a bar it is not shown is a bar it re-derives or drops.
         acceptanceCriteria: state.plan?.acceptance_criteria,
         round: state.planRound,
+        stall: stepBack === null ? undefined : { counts: stepBack.counts, fresh: stepBack.fresh },
       }),
       planInPrompt: state.plan !== null,
       cwd,
@@ -4112,8 +4283,23 @@ async function revisePlan(
   // in `pendingAnswers` from the moment the answerer's turn is recorded, so
   // clearing them anywhere later leaves a window in which the plan answering
   // them is on disk and a resume revises against them again.
-  if (args.findings !== undefined) state.pendingFindings = null;
+  // The answer-wins marker (#394), on this same write for the reason the two
+  // consumptions below are on it: a revision against answers that leaves plan
+  // findings pending is followed by a findings revision and a critique, and a
+  // process that died between them must not come back and approve a plan no
+  // critic has read on the strength of a demotion. Read before the findings are
+  // consumed, and cleared by the findings revision that follows.
+  if (args.findings === undefined && args.answers !== undefined && takePendingFindings(state, 'plan') !== null) {
+    state.planRevisedByAnswer = true;
+  }
+  if (args.findings !== undefined) {
+    state.pendingFindings = null;
+    delete state.planRevisedByAnswer;
+  }
   if (args.answers !== undefined) state.pendingAnswers = null;
+  // Marked sent on the write that persists the plan it shaped, so a stop before
+  // it sends the block again and a stop after it does not (#394).
+  if (stepBack !== null) stepBack.sent = true;
   // Folded in by this revision whenever it took them, on the same write (#277).
   if (withAdvisory(args, state.advisoryAnswers) !== args.answers) delete state.advisoryAnswers;
   saveState(state);
@@ -5741,7 +5927,9 @@ export function writeEscalation(state: RunState, escalation: Escalation): string
       lines.push(`### ${i + 1}. ${q.question}`);
       lines.push(`*Kind:* ${q.kind}`);
       if (q.options.length > 0) lines.push(`*Options:* ${q.options.join(' | ')}`);
-      lines.push(`*Claude would default to:* ${q.recommended}`);
+      // No line for no default (#394): the stall question has none on purpose,
+      // and an empty default line would read as one.
+      if (q.recommended.trim() !== '') lines.push(`*Claude would default to:* ${q.recommended}`);
       lines.push('\n**Your answer:**\n\n> \n');
     });
   }

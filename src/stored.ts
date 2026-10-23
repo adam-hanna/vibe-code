@@ -26,6 +26,7 @@ import type {
   OutOfScopeItem,
   PendingFindings,
   Plan,
+  PlanStallEntry,
   QuestionKind,
   ResolvedQuestion,
   ReviewCoverage,
@@ -810,6 +811,32 @@ const roundReader =
     });
     return { signature, count, ids, ...claims };
   };
+
+/**
+ * One stall of the plan loop (#394).
+ *
+ * All or nothing, unlike a round's `ids`: `position` decides which rounds a
+ * later stall may judge and `action` decides whether the next one asks a
+ * person, so an entry with either unreadable is not something to half-keep.
+ * Dropped, and the drop is reported, by `repairedArray`.
+ */
+function readPlanStall(entry: unknown): PlanStallEntry | null {
+  if (!isRecord(entry)) return null;
+  const { position, action, counts, fresh, sent } = entry;
+  if (!isCounter(position)) return null;
+  if (action !== 'step-back' && action !== 'escalated') return null;
+  if (!Array.isArray(counts) || !counts.every(isCounter)) return null;
+  if (!Array.isArray(fresh) || !fresh.every(isCounter)) return null;
+  if (counts.length !== fresh.length) return null;
+  if (sent !== undefined && typeof sent !== 'boolean') return null;
+  return {
+    position,
+    action,
+    counts: [...counts],
+    fresh: [...fresh],
+    ...(sent === undefined ? {} : { sent }),
+  };
+}
 
 /**
  * The claims of one round, on the same terms as its ids.
@@ -1944,6 +1971,11 @@ const READERS = {
   // Records: repaired to the empty value their type implies.
   events: (raw, ctx) => repairedArray('events', raw, ctx, readEvent),
   p1Rounds: (raw, ctx) => repairedArray('p1Rounds', raw, ctx, roundReader(ctx)),
+  // Optional, unlike its neighbours: absent is what a run that never stalled
+  // looks like, so nothing is repaired into existence (#394).
+  planStalls: (raw, ctx) =>
+    raw === undefined ? undefined : repairedArray('planStalls', raw, ctx, readPlanStall),
+  planRevisedByAnswer: (raw, ctx) => optionalBool('planRevisedByAnswer', raw, ctx),
   verifyRounds: (raw, ctx) => repairedArray('verifyRounds', raw, ctx, roundReader(ctx)),
   answeredQuestions: (raw, ctx) => repairedArray('answeredQuestions', raw, ctx, readString),
   deferredQuestions: (raw, ctx) =>

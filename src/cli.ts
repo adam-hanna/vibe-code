@@ -87,6 +87,7 @@ import type {
   Effort,
   Finding,
   LoadedConfig,
+  RunEvent,
   RunState,
   RunSummary,
 } from '@src/types.js';
@@ -1129,7 +1130,15 @@ async function resumeRun(
     }
 
     const answers = parseHumanAnswers(raw);
-    if (answers.length === 0) {
+    if (answers.length === 0 && resumesOnMovesAlone(moves.moves.length, raisePhase(resumePhase(state)))) {
+      // A plan stop answered by severity moves alone (#394). The stall's own
+      // question says "demote each ... and leave this answer empty", and on any
+      // plan stop a demotion that passes the gate approves the plan - so an
+      // empty answer beside a move is an answer, not a file left unfilled.
+      applyEdits();
+      log.info('No answers given - taking your severity changes and continuing.');
+      renameSync(answersFile, path.join(state.dir, `stalled-${state.planRound}.md`));
+    } else if (answers.length === 0) {
       log.fail(`No answers found in ${answersFile}`);
       log.info('Fill in the "**Your answer:**" blocks (replace the empty "> " line), then resume.');
       const pending = raised.findings.length + moves.moves.length;
@@ -1140,30 +1149,31 @@ async function resumeRun(
         );
       }
       return EXIT.NEEDS_HUMAN;
+    } else {
+      applyEdits();
+      log.ok(`Picked up ${answers.length} answer(s) from NEEDS-INPUT.md`);
+      // Merged, never overwritten (#169): the answerer's usable answers are
+      // already durable in `pendingAnswers` when a run stops after its turn, and
+      // a `question-round` stop hands every question back - answered or not. The
+      // person wins where both answered one question; the answerer's answer
+      // stands where the person left it blank.
+      state.pendingAnswers = mergeHumanAnswers(state.pendingAnswers, answers);
+      // On the same write that stores them, so there is no window where the run
+      // is holding answers it has no durable record of having been given (#65).
+      // `pendingAnswers` is consumed by the loop and cannot be that record - and
+      // only the human answers go here, because `humanAnswered` means a person
+      // answered and the merged list includes the answerer's.
+      recordHumanAnswers(state, answers);
+      saveState(state);
+      // Immediately, and before preflight: `ASSUMED.md` is authored at the end of
+      // a successful run, but this resume may exit at the preflight gate or stop
+      // for input again, and a file left claiming an answered question was a
+      // guess outlives every one of those paths.
+      reconcileQuestionRecords(state);
+      // Retire the file so a later escalation writes a fresh one and these
+      // answers are not silently replayed.
+      renameSync(answersFile, path.join(state.dir, `answered-${state.planRound}.md`));
     }
-    applyEdits();
-    log.ok(`Picked up ${answers.length} answer(s) from NEEDS-INPUT.md`);
-    // Merged, never overwritten (#169): the answerer's usable answers are
-    // already durable in `pendingAnswers` when a run stops after its turn, and
-    // a `question-round` stop hands every question back - answered or not. The
-    // person wins where both answered one question; the answerer's answer
-    // stands where the person left it blank.
-    state.pendingAnswers = mergeHumanAnswers(state.pendingAnswers, answers);
-    // On the same write that stores them, so there is no window where the run
-    // is holding answers it has no durable record of having been given (#65).
-    // `pendingAnswers` is consumed by the loop and cannot be that record - and
-    // only the human answers go here, because `humanAnswered` means a person
-    // answered and the merged list includes the answerer's.
-    recordHumanAnswers(state, answers);
-    saveState(state);
-    // Immediately, and before preflight: `ASSUMED.md` is authored at the end of
-    // a successful run, but this resume may exit at the preflight gate or stop
-    // for input again, and a file left claiming an answered question was a
-    // guess outlives every one of those paths.
-    reconcileQuestionRecords(state);
-    // Retire the file so a later escalation writes a fresh one and these
-    // answers are not silently replayed.
-    renameSync(answersFile, path.join(state.dir, `answered-${state.planRound}.md`));
   }
 
   // Both resume paths carry it, and both are `run_started` rather than a
@@ -1445,6 +1455,22 @@ function parseRequestedMoves(state: RunState, raw: string): RequestedMoves {
   const carry = raisePhase(resumePhase(state));
   const carried = carry === null ? [] : (takePendingFindings(state, carry) ?? []);
   return parseMoves(raw, carried);
+}
+
+/** How many times a run asked its planner to step back (#394). */
+export function stepBackCount(events: readonly RunEvent[]): number {
+  return events.filter((e) => e.type === 'plan_stalled' && e['action'] === 'step-back').length;
+}
+
+/**
+ * Whether an unanswered NEEDS-INPUT.md still resumes, on its moves alone (#394).
+ *
+ * Plan phase only, and only with at least one move: there a demotion that
+ * passes the gate approves the plan, which is the stall question's "accept"
+ * answer. Every other unanswered file is refused as it always was.
+ */
+export function resumesOnMovesAlone(moves: number, phase: ReturnType<typeof raisePhase>): boolean {
+  return moves > 0 && phase === 'plan';
 }
 
 /** Apply them, and say what moved. Nothing at all when nobody asked for one. */
@@ -3007,6 +3033,13 @@ function summary(state: RunState, started: number, recovery?: RecoveryReport): v
   const cutOffRetries = state.events.filter((e) => e.type === 'turn_retried').length;
   if (cutOffRetries > 0) {
     log.info(`Retries:  ${cutOffRetries} turn(s) retried after Codex's answer was cut off at its output limit`);
+  }
+  // Only when there were any (#394). An event's data sits at its top level.
+  const stepBacks = stepBackCount(state.events);
+  if (stepBacks > 0) {
+    log.info(
+      `Step-backs: ${stepBacks} time(s) the planner was asked to step back after the plan stopped converging`,
+    );
   }
   // Question rounds sit beside the other two rather than being folded into the
   // plan count, and they are the reason #139 exists: three revisions the critic

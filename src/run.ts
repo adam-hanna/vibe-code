@@ -46,6 +46,7 @@ import type {
   GateOutcome,
   InFlightTurn,
   PendingFindings,
+  PlanStallEntry,
   RoundClaim,
   RoundRecord,
   RunCheckpointMeta,
@@ -2622,8 +2623,8 @@ export interface PlanStall {
  * #346 at 4 and 6; no other run stalls at all, and `stallAfter` 2, 3 and 4 give
  * the same result.
  *
- * Pure and exported. Shipped ahead of its caller as groundwork: until
- * `guardProgress` calls it, only `plan-stall.test.ts` and the replay script do.
+ * Pure and exported. `guardProgress` calls it for the plan loop only, before
+ * `assessConvergence`; `stallAction` below decides what a stall does.
  */
 export function planStall(history: readonly RoundRecord[], args: PlanStallArgs): PlanStall | null {
   const { stallAfter, lastStall, human } = args;
@@ -2651,6 +2652,40 @@ export function planStall(history: readonly RoundRecord[], args: PlanStallArgs):
   const mostlyNew = 2 * (at(fresh, r - 1) + at(fresh, r)) > at(counts, r - 1) + now;
   if (!notFalling || !mostlyNew) return null;
   return { counts: counts.slice(r - 2), fresh: fresh.slice(r - 2) };
+}
+
+/**
+ * What the plan loop's stall history allows, as one decision (#394).
+ *
+ * - **`lastStall`** is the position of the latest entry *of any kind*. An
+ *   escalation counts, so whatever a person steered with gets one full round to
+ *   work before it is judged, the same as a step-back.
+ * - **`action`** escalates only when a step-back already sits after the latest
+ *   escalation. So the first stall steps back, the second asks a person, and the
+ *   first stall after a person has steered is a step-back again.
+ */
+export function stallAction(stalls: readonly PlanStallEntry[]): {
+  lastStall: number | null;
+  action: PlanStallEntry['action'];
+} {
+  const last = stalls[stalls.length - 1];
+  let escalated = -1;
+  stalls.forEach((s, i) => {
+    if (s.action === 'escalated') escalated = i;
+  });
+  const steppedBack = stalls.some((s, i) => i > escalated && s.action === 'step-back');
+  return { lastStall: last?.position ?? null, action: steppedBack ? 'escalated' : 'step-back' };
+}
+
+/**
+ * The step-back the next findings revision must carry, or null.
+ *
+ * Read from state rather than handed down in a local, because a resume
+ * re-enters at the consume branch with nothing in hand but `state.json`.
+ */
+export function pendingStepBack(stalls: readonly PlanStallEntry[]): PlanStallEntry | null {
+  const last = stalls[stalls.length - 1];
+  return last !== undefined && last.action === 'step-back' && last.sent !== true ? last : null;
 }
 
 /**

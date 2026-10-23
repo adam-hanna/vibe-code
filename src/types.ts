@@ -240,6 +240,35 @@ export interface LoopConfig {
    * normal and is left alone.
    */
   convergenceWindow: number;
+  /**
+   * Plan critiques before `planStall` may call the loop stalled (#394): the
+   * blocking count is not falling and most of it is new. The first stall asks
+   * the planner to step back, the next asks a person. Zero turns detection off.
+   *
+   * Not a cap: reaching it never stops a run by itself.
+   */
+  stallAfter: number;
+}
+
+/**
+ * One stall the plan loop recorded (#394), in `RunState.planStalls`.
+ *
+ * `position` is the record position in `p1Rounds` the stall was judged at, not
+ * `planRound`. `counts` and `fresh` are what `planStall` measured, kept so a
+ * revision built after a resume can still state them: re-running the rule there
+ * would find this very stall inside its own window and return null.
+ */
+export interface PlanStallEntry {
+  position: number;
+  action: 'step-back' | 'escalated';
+  counts: number[];
+  fresh: number[];
+  /**
+   * A step-back whose block a findings revision has carried. Set on the write
+   * that persists that revision's plan, so a stop before it re-sends the block
+   * and a stop after it does not.
+   */
+  sent?: boolean;
 }
 
 export interface BudgetConfig {
@@ -1951,6 +1980,22 @@ export interface RunState {
   cliVersions?: CliVersions;
   /** One entry per code-review round, driving the convergence assessment. */
   p1Rounds: RoundRecord[];
+  /**
+   * The plan loop's stalls (#394), oldest first. Positions point into
+   * `p1Rounds`, so this is reset with it when implementation starts. Absent on
+   * every run that never stalled, and on every run from before this existed.
+   */
+  planStalls?: PlanStallEntry[];
+  /**
+   * An answers revision ran while plan findings were still pending (#394).
+   *
+   * The durable half of "an answer wins over an accept": the answers revision
+   * clears `pendingAnswers` on its plan write and leaves the findings pending,
+   * so without this a process that died after that write would come back
+   * looking answer-free and approve a plan no critic has read. Cleared by the
+   * findings revision that follows it.
+   */
+  planRevisedByAnswer?: boolean;
   /** The same, for verification-fix rounds, which converge independently. */
   verifyRounds: RoundRecord[];
   /** Verification-fix rounds spent so far. */

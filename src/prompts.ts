@@ -40,6 +40,36 @@ against them too: a plan can drift. An approved plan and its acceptance criteria
 guide the work, but a demonstrated correctness or safety defect must still be
 reported. Explain a necessary departure; never silently enlarge or lower the bar.`;
 
+/**
+ * What a findings revision is told after the plan loop stops converging (#394).
+ *
+ * The overridable half of the step-back. The counts line that precedes it is
+ * written by `stallCountsLine` and sits outside the block, so an override
+ * replaces this instruction and can never drop what was measured.
+ */
+const STALL_STEP_BACK =
+  'Patching each finding has not converged. Before revising, list what these findings have in ' +
+  'common, and reconsider the approach rather than fixing each one in place. If the brief itself ' +
+  'is the problem (too broad, contradictory, or missing a decision only a person can make), say so ' +
+  "plainly in the plan's open questions.";
+
+/** The step-back's measured line, from `planStall`'s `{counts, fresh}`. Not overridable. */
+function stallCountsLine({ counts, fresh }: StallMeasure): string {
+  const rounds = counts.map((c, i) =>
+    i === 0 ? `${c} blocking (${fresh[i] ?? 0} new)` : `${c} (${fresh[i] ?? 0} new)`,
+  );
+  return (
+    `The last ${counts.length} critiques kept finding new blocking problems instead of fewer: ` +
+    `${rounds.join(', ')}.`
+  );
+}
+
+/** What `planStall` measured, as a revision is handed it. */
+export interface StallMeasure {
+  counts: readonly number[];
+  fresh: readonly number[];
+}
+
 /** The user's brief survives every stage without being rewritten by an agent. */
 export function taskContext(task: string, extraContext: string | null): string {
   return `## Original task
@@ -879,6 +909,12 @@ export interface RevisePlanArgs {
    */
   acceptanceCriteria?: readonly AcceptanceCriterion[] | undefined;
   round: number;
+  /**
+   * The step-back after the plan loop stopped converging (#394), or absent.
+   * Optional so every revision that is not the one after a stall builds the
+   * prompt it always did, byte for byte.
+   */
+  stall?: StallMeasure | undefined;
 }
 
 export function revisePlanPrompt({
@@ -888,6 +924,7 @@ export function revisePlanPrompt({
   outOfScope,
   acceptanceCriteria,
   round,
+  stall,
 }: RevisePlanArgs): string {
   const parts: string[] = [`Revise your plan. This is revision round ${round}.`];
 
@@ -907,6 +944,17 @@ ${findings.map(formatFinding).join('\n\n')}${deferralNote(findings, 'planner')}
 For each P1: fix the plan, or, if you believe the finding is wrong, say so explicitly in the plan with your reasoning. Do not silently ignore one.
 
 ${block(BLOCK.fix, FIX_BREADTH)}`);
+  }
+
+  // After the findings it is about and before the answers (#394). The counts
+  // line is its own string, outside `block()`, so `prompts.stall` replaces the
+  // instruction and keeps the measurement.
+  if (stall !== undefined) {
+    parts.push(`## Stepping back
+
+${stallCountsLine(stall)}
+
+${block(BLOCK.stall, STALL_STEP_BACK)}`);
   }
 
   if (answers && answers.length > 0) {
@@ -1834,6 +1882,7 @@ const BLOCK = {
   fix: 'fix breadth',
   deferred: 'a deferred finding',
   simple: 'simple solution',
+  stall: 'stall',
 } as const;
 
 let installed: Readonly<Record<string, string>> = {};
@@ -1963,6 +2012,8 @@ export function promptBlocks(): readonly PromptBlock[] {
     // is never shown a deferral mark, which is what the test caught when this
     // line claimed otherwise.
     of(BLOCK.deferred, ['planner', 'implementer'], DEFERRED_MARK),
+    // Only the findings revision after a stall carries it (#394).
+    of(BLOCK.stall, ['planner'], STALL_STEP_BACK),
   ];
 }
 

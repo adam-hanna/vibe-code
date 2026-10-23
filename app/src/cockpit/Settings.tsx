@@ -381,9 +381,11 @@ const MODE_NOTE: Readonly<Record<string, string>> = {
 /**
  * The loop's caps, in the order a run reaches them.
  *
- * Every key here is a `loop.*` the config validator already knows and a
- * `--max-*` `parseArgs` already takes, so this is a form over settings that
- * existed rather than new configuration. The notes say what **reaching** one
+ * Every key here is a `loop.*` the config validator already knows, and every
+ * one but `stallAfter` is a `--max-*` `parseArgs` already takes, so this is a
+ * form over settings that existed rather than new configuration. `stallAfter`
+ * (#394) has no flag, and it is not a cap: reaching it asks the planner to step
+ * back and never stops a run by itself. The notes say what **reaching** one
  * costs, because that is the decision somebody is making when they raise it.
  */
 const LIMITS: readonly { key: string; note: string }[] = [
@@ -394,6 +396,10 @@ const LIMITS: readonly { key: string; note: string }[] = [
   {
     key: 'maxPlanRounds',
     note: 'how many times the plan may be sent back by the critique. A question round no longer spends one of these',
+  },
+  {
+    key: 'stallAfter',
+    note: 'not a cap: after this many critiques, if each keeps finding new blocking problems, the planner is asked to step back, and on the next stall you are asked. 0 turns it off. No command-line flag',
   },
   { key: 'maxReviewRounds', note: 'how many fix-and-re-review cycles the code gets' },
   { key: 'maxVerifyRounds', note: 'how many times a failing verification gate may be fixed' },
@@ -2117,7 +2123,9 @@ export function Settings({
         <p className={S.note}>
           A cap is where the loop gives up and hands back, not where it is aiming. Reaching one
           stops the run <em>resumably</em> and writes what it was stuck on — nothing is lost, and
-          a resume with a raised cap picks up from the same checkpoint.
+          a resume with a raised cap picks up from the same checkpoint. <code>stallAfter</code> is
+          the exception: it is a threshold, not a cap, and reaching it never stops a run by
+          itself.
         </p>
         <table className={S.matrix}>
           <tbody>

@@ -124,6 +124,11 @@ export const DEFAULTS: Config = {
     // have converged.
     oscillationThreshold: 3,
     convergenceWindow: 3,
+    // Picked from part 1's replay of the plan archive (#394,
+    // `scripts/replay-plan-stall.mjs`): 2, 3 and 4 gave the same result - #246-b
+    // first stalls at record 4, #346 at 4, and no other run stalls at all - so 3
+    // is the issue's number, unrefuted rather than tuned. 0 turns it off.
+    stallAfter: 3,
   },
   budget: {
     // NOT a spend limit on a Claude subscription - the CLI derives this from
@@ -817,6 +822,10 @@ function validate(cfg: Config): void {
   // Zero is meaningful here, unlike the round caps: it demands a spotless verdict.
   if (!Number.isInteger(cfg.loop.p1Tolerance) || cfg.loop.p1Tolerance < 0) {
     throw new Error('loop.p1Tolerance must be zero or a positive integer');
+  }
+  // Zero is meaningful here too: it turns stall detection off (#394).
+  if (!Number.isInteger(cfg.loop.stallAfter) || cfg.loop.stallAfter < 0) {
+    throw new Error('loop.stallAfter must be zero (off) or a positive integer');
   }
   if (!Number.isFinite(cfg.budget.maxCostUsd) || cfg.budget.maxCostUsd <= 0) {
     throw new Error('budget.maxCostUsd must be a positive number');
