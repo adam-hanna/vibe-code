@@ -9,6 +9,7 @@ update it in the same PR when that code changes.
 src/main.ts          bin entry point — the thing package.json points at
 src/cli.ts           argument parsing, the six commands, run summary
 src/hostmain.ts      bin entry point for the app's sidecar — the second front end
+src/updatecheck.ts   the update notice (#323) — the one network request in src/, called only by main.ts
 src/serve.ts         the host session: NDJSON over stdio, gates as awaits
 src/protocol.ts      the frames those two processes agree on
 src/host.ts          what a host may be told at a boundary, and may answer

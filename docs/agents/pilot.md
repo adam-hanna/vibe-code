@@ -561,8 +561,9 @@ coming, and it is the first **inbound** one: the iroh endpoint a phone dials
 (`src-tauri/src/remote/endpoint.rs`, #342). It starts only while the switch in `remote.json`
 is on (#344), and only once a device key exists; with it off, or with a file that cannot be
 read, nothing binds and nothing is published. Its rules are in the phone section above. The core keeps
-*"every external call is a child process"* exactly, and the published package gains no HTTP
-dependency and no credential handling. If this ever moves into `src/` "because the CLI might
+*"every external call is a child process"* with one exception, the update check in
+`src/updatecheck.ts` (#323, see `processes.md`): one unauthenticated GET through Node's own
+`fetch`, so the published package still gains no HTTP dependency and no credential handling. If this ever moves into `src/` "because the CLI might
 want it too", that sentence stops being true of everything shipped — and it is a sentence
 people choose this tool for. `keys.test.ts` checks both halves: `dependencies` is `{}` *and*
 the lockfile installs nothing outside `devDependencies`, because a manifest cannot prove what

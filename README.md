@@ -126,6 +126,7 @@ When a round changes a test file or `vibe.config.json`, the reviewer is shown ea
 
 - **Codex cost isn't reported.** Codex runs on a subscription and no output mode returns a price, so vibe reports tokens and never a guessed dollar figure. `budget.maxTokens` covers both agents.
 - **Tested with claude 2.1.303 and codex 0.163.0.** vibe uses whatever versions you have installed. `vibe doctor` and every run's preflight compare them with the tested ones. A different version is a warning that names the command to move to the tested one, and the run continues. vibe refuses to start only when the installed CLI's `--help` no longer declares a flag vibe passes; `--skip-probe` skips that check.
+- **It checks npm for a newer vibe, once a day.** At the end of `vibe run`, `vibe plan` and `vibe doctor` in a terminal, vibe asks `https://registry.npmjs.org/@adam-hanna/vibe-code/latest` for the newest version and prints one line if yours is older. The request carries nothing about you: no identifier, no cookie, no credential. It is the only network request vibe itself makes. Turn it off with `"updates": { "check": false }` in a config file or `VIBE_NO_UPDATE_CHECK=1`. It is already off under `CI`, when stdout is not a terminal, and in the desktop app.
 - **Agreement isn't proof.** A clean run means two different models agreed and your tests passed. Both can still be wrong in the same way.
 - **The full documentation is at [adam-hanna.github.io/vibe-code](https://adam-hanna.github.io/vibe-code/)**: every config key, every command, and how the loop works.
 

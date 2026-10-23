@@ -806,6 +806,18 @@ export interface Config {
    * repository builds, so it is not in `PROJECT_ONLY`.
    */
   review: ReviewConfig;
+  /**
+   * Whether a terminal `vibe run`, `vibe plan` or `vibe doctor` ends by saying
+   * that npm has a newer vibe (#323). The only setting that reaches the
+   * network; `src/updatecheck.ts` says what is sent. Read only by the terminal
+   * entry, never by the loop and never by the host.
+   */
+  updates: UpdatesConfig;
+}
+
+/** The `updates` section (#323). See `Config.updates`. */
+export interface UpdatesConfig {
+  check: boolean;
 }
 
 /** What a P0 that the vote did not confirm does (#388). The owner's three, 2026-10-20. */

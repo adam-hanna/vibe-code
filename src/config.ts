@@ -261,6 +261,11 @@ export const DEFAULTS: Config = {
   // unconfirmed P0 still blocks unless somebody chooses otherwise. No
   // recommended set of seats ships until #388's measurement has been made.
   review: { finders: [], verifiers: [], quorum: null, unconfirmedP0: 'block' },
+  // On, by the owner's decision on #323: a terminal user is told once, at the
+  // end of `vibe run`, `vibe plan` or `vibe doctor`, when npm has a newer vibe.
+  // It is the one network request in `src/` - see `src/updatecheck.ts` for what
+  // is sent and every other switch that turns it off.
+  updates: { check: true },
   toolchain: {
     // Deliberately minimal. `git` is needed in every phase because vibe commits
     // per round; node and npm only matter once something is being built or
@@ -386,6 +391,7 @@ export function mergeConfig(base: Config, override: unknown): Config {
     prompts: mergePrompts(base.prompts, override['prompts']),
     instructions: mergeInstructions(base.instructions, override['instructions']),
     review: mergeReview(base.review, override['review']),
+    updates: mergeSection(base.updates, override['updates']),
   };
 }
 
@@ -554,6 +560,7 @@ const SECTIONS = [
   'prompts',
   'instructions',
   'review',
+  'updates',
 ] as const;
 
 /**
@@ -756,6 +763,12 @@ function validate(cfg: Config): void {
   }
   if (!SANDBOXES.includes(cfg.codex.sandbox)) {
     throw new Error(`codex.sandbox must be one of ${SANDBOXES.join(', ')}`);
+  }
+  // Refused by name rather than read as truthy (#323): `"false"` in a config
+  // file would otherwise be a string, truthy, and leave the check on for
+  // somebody who believes they turned it off.
+  if (typeof cfg.updates.check !== 'boolean') {
+    throw new Error('updates.check must be true or false');
   }
   for (const key of [
     'maxPlanRounds',
