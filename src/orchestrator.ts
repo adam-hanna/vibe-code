@@ -4038,10 +4038,14 @@ async function revisePlan(
    * every revision, and this is a frame for a host, not a new section for a
    * person. `phase_started` has never required a heading beside it.
    */
+  // Counted from one in the sentence, as `Plan critique (round N)` counts the
+  // same round, and raw in the frame, which names `plan-${planRound}.json`
+  // (#428). The sentence printed the raw round, so `Plan round 1` was followed
+  // by `Plan critique (round 2)` for one and the same round.
   log.info(
     advancing
-      ? `Plan round ${state.planRound}`
-      : `Revising plan ${state.planRound} against the answers`,
+      ? `Plan round ${state.planRound + 1}`
+      : `Revising plan ${state.planRound + 1} against the answers`,
     {
       id: 'phase_started',
       data: { phase: 'planning', round: state.planRound },
@@ -4056,7 +4060,7 @@ async function revisePlan(
     : `revise-q${state.questionRound}`;
   log.step(
     advancing
-      ? `${holderLabel('planner', roles)} is revising the plan (round ${state.planRound})`
+      ? `${holderLabel('planner', roles)} is revising the plan (round ${state.planRound + 1})`
       : `${holderLabel('planner', roles)} is revising the plan against the answers`,
     {
       id: 'turn_started',

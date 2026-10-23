@@ -78,6 +78,7 @@ import type { Elsewhere } from './elsewhere';
 import type { Pick } from './pick';
 import { Markdown } from './Markdown';
 import { splitBrief } from '../cockpit/argv';
+import { wakeRound } from '../cockpit/rounds';
 import { CopyText } from './CopyText';
 import { copyOf } from './copy';
 import type { Command, Commands } from '../cockpit/commands';
@@ -226,11 +227,12 @@ function readWatch(): boolean {
  * a question nobody put.
  */
 function wakeReason(gate: NonNullable<Run['gate']>): string {
-  const round =
-    gate.reviewRound ?? gate.planRound ?? gate.verifyRound ?? null;
+  // The counter of the gate it is held at, never the review count at a plan
+  // gate, and counted as the headings count (#428). See `wakeRound`.
+  const where = wakeRound(gate);
   return [
     `[the app woke you — nobody typed this] The loop has stopped at the "${gate.boundary}" gate` +
-      (round === null ? '' : `, round ${String(round)}`) +
+      (where === null ? '' : `, ${where},`) +
       ' and is waiting for a decision.',
     '',
     'The run block above is current as of this message. Read the narration with',

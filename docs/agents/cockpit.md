@@ -825,6 +825,40 @@ they are waiting on. Four things in it are worth carrying:
   `fix-N` under `implementing`, so the live column and the archived run disagreed about one
   run. `announceFixRound` opens `implementing` with the review round; `verify-fix` does not,
   because a failed gate's repair belongs in the code group that ran the gate.
+- **The first implementation is not a round, and the rail calls it `implementation`** (#428).
+  Its heading carries no round, and the rail's expanded Code stage drew that as *"unnumbered
+  pass"* while the implement turn's chip said `round 0` (the turn carries `reviewRound`, 0, so
+  the reducer can tell one pass through Code from the next). Fix rounds count from 1 and come
+  after it. `passLabel` (`rounds.ts`) names each row: **`implementation`**, **`fix round N`**
+  (the number `Implementing (fix round N)` prints), and **`round N` counted from one** for plan,
+  critique and review, as `Plan critique (round N)` and `Code review (round N)` count. It drew
+  the raw archive round before, so the first critique read `round 0` beside a heading saying
+  round 1. A row whose frame carried no round reads as its phase's name (`planning`,
+  `critique`, `review`). `isFirstImplementation` asks the group's turns first, an `implement`
+  turn or a fix kind, because a replay files the first implementation under review round 0
+  and the round alone cannot tell it apart. The core is not asked for `round: 0`, which would be
+  a number nothing counted. The same answer takes `round 0` off the implement turn's chip
+  (`turnRound`), the replayed group's chip and the Code pane's title (`code · implementation`).
+- **Every round a person reads counts from one; every file, link and key counts from zero**
+  (#428, the owner's decision on #433). The chips used to show the archive's round, on the
+  reasoning that a row has to agree with the file, so the first critique read `round 0` under a
+  heading saying `Plan critique (round 1)`. A person reads the chip and the heading and never
+  the file name, so the display agrees with the heading. `shownRound` in `rounds.ts` is the one
+  `+ 1`, and `phaseRound` and `turnRound` apply it to plan, critique and review groups and to
+  `plan`, `revise`, `critique`, `review` and `vote` turns. Fix and verify-fix rounds are already
+  counted from one by the core (each is incremented before its turn) and are drawn as they
+  arrive. The loop column's round heads, turn rows, the live card, the Output strip, the pilot's
+  round cards and the Plans, Critique, Review and Code pane titles all ask it, and
+  `pass-label.test.ts` fails on a site that draws a raw round. Links, pane ids and `reveal` keep
+  the raw round, so a `round 1` chip still opens `plan-critique-0.json`. The footer's `plan N of
+  M` counts from one too, because the cap is checked against `planRound + 1`; its review and
+  verify figures are counts of fix rounds done and are drawn as they arrive. The core's
+  revision lines (`Plan round N`, `revising the plan (round N)`) and the replay's census line
+  now count from one as well.
+  The pilot's wake sentence names the counter of the gate it is held at (`wakeRound`): the plan
+  round from one at a plan gate, the fix that just ran at `review-round` and `verify-round`,
+  and nothing at a boundary with no round. It took `reviewRound ?? planRound`, and
+  `reviewRound` is never null, so every plan gate was described by the review count.
 - **A resume is pointed at the repository, and `dir` is not it.** `run_started`
   carries both and they are not interchangeable: `identity.dir` is the run's
   **own** directory — `<repo>/.vibe/runs/<id>` — and `identity.repo` is the
