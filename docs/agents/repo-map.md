@@ -98,6 +98,7 @@ app/src/cockpit/PlansPane.tsx  every version of the plan, one section per round
 app/src/cockpit/ReportPane.tsx a judge's own report - the critique and the review, one screen
 app/src/cockpit/CodePane.tsx   what each round changed, from the range its commit carries
 app/src/pilot/log.ts       rounds and conversation in one scroll, and who may reorder whom
+app/src/pilot/bound.ts     which run a conversation reads, by id (#438), and what the read says when there is none
 app/src/shell/       the editor-shaped frame: activity bar, status bar, palette, and their pure tables
 app/src/shell/update.ts      what the window decides about an update: the skip, the setting, the bar
 app/src/shell/UpdatePopover.tsx  the ⬆ tool above ⚙, and what it opens

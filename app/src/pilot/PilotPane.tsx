@@ -22,6 +22,7 @@ import { useFollow } from '../follow';
 import { JumpToEnd } from '../JumpToEnd';
 import { autoRun, NO_ACCESS } from './access';
 import { archiveContent, declare, settleCall } from './tools';
+import type { Binding } from './bound';
 import { chatKey, readChat, replyKey, sameExchange, worthSaving, writable } from './saved';
 import { getChat, putChat, useChatRevision, useChats } from './chatstore';
 import {
@@ -749,8 +750,13 @@ export interface Handover {
 }
 
 export interface PilotPaneProps {
-  /** The run as the cockpit holds it. What `read_run` and `read_output` see. */
+  /** The bound run's `Run` (`boundRun`), or an empty one. What the tools and the prompt read. */
   run: Run;
+  /**
+   * Which run this conversation reads (#438), from `bindingOf`: its own run,
+   * the run it started, or none - by id, never by what the column is drawing.
+   */
+  binding: Binding;
   /**
    * The run the conversation on screen is about, whose rounds its log carries
    * (#247). Not `run`: that is the live one, and its cards belong in its own
@@ -904,6 +910,7 @@ export interface PilotPaneProps {
 
 export function PilotPane({
   run,
+  binding,
   logRun,
   launched,
   dir,
@@ -1289,7 +1296,10 @@ export function PilotPane({
     for (const reply of conversation.replies) {
       for (const call of reply.calls) {
         if (call.settlement !== null || reading.current.has(call.id)) continue;
-        const out = settleCall(call, { run, commands, dir, access: granted });
+        const out = settleCall(call, { run, bound: binding, commands, dir, access: granted });
+        // The bound run's record is still being read (#438). Left owed, and
+        // settled on the render its replay arrives on: `binding` is in the deps.
+        if (out.kind === 'waits') continue;
         if (out.kind === 'reads') {
           reading.current.add(call.id);
           const id = call.id;
@@ -1330,7 +1340,7 @@ export function PilotPane({
     // `commands` in the deps for the reason `run` is: `read_command` is
     // answered from it, and a call settled against a stale copy would report a
     // dev server as having produced nothing (#211).
-  }, [conversation.replies, run, commands, dir, granted, onEffect]);
+  }, [conversation.replies, run, binding, commands, dir, granted, onEffect]);
 
   // Each finished turn into the pilot's books, once (#145).
   //
@@ -1539,7 +1549,7 @@ ${frame.text}`, turn, origin.current))) {
             // A new session after a compaction opens with the summary, which is
             // the whole of how the compaction reaches the next conversation.
             prompt: withCarry(id === null ? held.current.carry : null, said ?? trailingResults(messages) ?? ''),
-            system: systemPrompt(run, launched, 'emitted', access, agentOf(provider), standing ?? null, pilotPrompts ?? null),
+            system: systemPrompt(run, launched, 'emitted', access, agentOf(provider), standing ?? null, pilotPrompts ?? null, binding),
             model,
             ...withEffort(effortToSend(provider, effort)),
             dir,
@@ -1587,7 +1597,7 @@ ${frame.text}`, turn, origin.current))) {
           model,
           messages,
           tools: declare(),
-          system: systemPrompt(run, launched, 'native', access, null, standing ?? null, pilotPrompts ?? null),
+          system: systemPrompt(run, launched, 'native', access, null, standing ?? null, pilotPrompts ?? null, binding),
           // Named, so every other client draws it as it streams (#371).
           ...(chat.current === null ? {} : { announce: { chat: chat.current, asked: said ?? '', asker: origin.current } }),
         })
@@ -1613,7 +1623,7 @@ ${frame.text}`, turn, origin.current))) {
         )
         .finally(() => setOpening((n) => n - 1));
     },
-    [model, provider, run, launched, dir, access, standing, pilotPrompts],
+    [model, provider, run, launched, dir, access, standing, pilotPrompts, binding],
   );
 
   const owed = unanswered(conversation);

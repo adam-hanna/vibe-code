@@ -435,6 +435,22 @@ launch sets it. When the proposer was a *run's* own chat, that chat keeps its re
 and gives up its CLI session, because two chats resuming one session would each
 answer from the other's messages.
 
+**A conversation reads the run it is bound to, by id** (#438). The read tools used to answer
+from the column's run, which is blank on a draft, before `run_started`, and while an opened
+run's replay is still being read. The report was a chat restored onto a run that had just
+finished. A `read_output` asked a second after the launch was still owed, and it was settled
+on restore against the blank column. The pilot was told the run had no narration and no
+cycles, beside that run's own round cards, and guessed that setup was still running.
+`pilot/bound.ts` is the rule, in `chatRun`'s order: a launch this conversation made that is
+still holding it, then the run whose key the conversation is under (live, ended or
+archived), then the run its draft became, and otherwise none. The run is found by id and
+repository in `lives` or the opened replay, so two live runs in one window never cross and
+no second copy of the narration is kept. Every run read carries a `run` header with the id,
+the state (`starting`, `live`, `ended` or `lost`) and how it ended. With no run, the header
+says so and names the last run this conversation started. While the record is still being
+read, `read_run` and `read_output` **wait**: the call stays owed and settles when the replay
+arrives, because an answer then would be the blank one.
+
 **A stop pressed during preflight ends the run there** (#223). The probes were not
 interruptible and nothing checked the latch after them or after the worktree
 script. So a stop pressed in the minutes between launching and the first turn

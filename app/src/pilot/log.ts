@@ -94,8 +94,9 @@ export interface ChatRunArgs {
  *   draws - and nothing while that is still loading, rather than another run's
  *   cards in the meantime.
  *
- * Only the log moves. What the pilot's tools act on stays the live run, because
- * a proposal from any chat still addresses the loop that is running.
+ * The tools read the run `bindingOf` names (#438), which follows the same
+ * order, so the cards and the reads are about one run. A gate answer still goes
+ * to the live run on screen, which `answer` checks with `mayAnswer`.
  */
 export function chatRun(args: ChatRunArgs): Run | null {
   if (args.holding) return args.live;
