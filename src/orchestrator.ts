@@ -109,7 +109,14 @@ import {
   reconcileQuestionRecords,
   recordSuppressed,
 } from '@src/questions.js';
-import { hasFindingShape, isReportBasename } from '@src/stored.js';
+import {
+  hasFindingShape,
+  isDeferrable,
+  isReportBasename,
+  isToAddress,
+  isUnaddressed,
+  movedByVote,
+} from '@src/stored.js';
 import {
   authorOf,
   blockers as blockingFindings,
@@ -174,7 +181,9 @@ import type {
   Finding,
   FindingsReport,
   FileChange,
+  FixDispositions,
   TestChanges,
+  UnaddressedFinding,
   GateOutcome,
   OpenQuestion,
   ReproducerOutcome,
@@ -345,13 +354,16 @@ function readFixOutput(outcome: TurnOutcome): FixRead {
  * Unreadable is never `not-addressed`. That would turn "this run could not read
  * the answer" into "the fixer ignored every finding", which is a number nobody
  * observed. It records its own event so the scorecard can count it.
+ *
+ * Returns what it recorded, or null for an unreadable round, so the final round
+ * can say what it left of the non-blocking findings it carried (#425).
  */
 function recordDispositions(
   state: RunState,
   read: FixRead,
   findings: readonly Finding[],
   label: string,
-): void {
+): FixDispositions | null {
   const round = state.reviewRound;
   const answers = round - 1;
   if (read.parsed === null) {
@@ -366,7 +378,7 @@ function recordDispositions(
     // A retried round whose earlier attempt was readable must not keep that
     // attempt's file beside this attempt's warning.
     removeArtifact(state, `fix-dispositions-${round}.json`);
-    return;
+    return null;
   }
   const settled = settleDispositions(findings, read.parsed.dispositions, {
     round,
@@ -382,6 +394,7 @@ function recordDispositions(
     dispositionSummary(settled),
     { ...settled },
   );
+  return settled;
 }
 
 /**
@@ -825,6 +838,11 @@ async function runPhases(
           // critic never saw is not an approved criterion.
           state.acceptanceCriteria,
           plan.out_of_scope,
+          // Re-filtered for the reason `declined` is, and gated on the effective
+          // config rather than on what was stored (#425): a resume layers the
+          // project file over the run's settings, so a run approved with the
+          // setting on and resumed with it off must get the old prompt.
+          toAddress(cfg, state.planNonBlocking ?? []),
           // An approved plan can predate the answers to its advisory questions
           // (#277); the implementer is told them, and that they win.
         ) + P.advisoryAnswers(state.advisoryAnswers, 'implementer'),
@@ -980,10 +998,13 @@ function sayFindings(
  * resume on which a person demoted enough findings to pass it both come here,
  * so an accepted plan carries, declines and freezes its bar exactly as a passed
  * one does. Moved out of `planPhase` unchanged; `extra` is spread last into the
- * `plan_approved` data and the gate pass passes none.
+ * `plan_approved` data and the gate pass passes none. #425's hand-off of the
+ * non-blocking findings to the implementer lives here for the same reason, so
+ * an acceptance hands them on exactly as a pass does.
  */
 function approvePlan(
   state: RunState,
+  cfg: Config,
   plan: Plan,
   findings: readonly Finding[],
   decision: ReturnType<typeof gate>,
@@ -992,15 +1013,30 @@ function approvePlan(
   // Carried, not forgiven. The implementation is told about these so the
   // phase that can actually settle them does.
   if (decision.tolerated.length > 0) state.carried = decision.tolerated;
+  // The rest of what the critic raised that is still work (#425): every P2
+  // and P3 that is not deferrable, handed to the implementer rather than to
+  // a further revision - the owner's decision, so the plan loop's round count
+  // does not move. No turn is bought here, so P3s ride along with P2s.
+  //
+  // On a person's acceptance (#394) this includes the P1s they demoted: each
+  // is now a P2 with a `by: 'human'` move and no guard's `downgraded`, so it is
+  // treated as any approved P2 is. Accepting a plan says the finding need not
+  // block it, not that it is no longer work.
+  const nonBlocking = toAddress(cfg, findings);
   // The sentence, chosen before it is said, because since #223 saying it and
   // recording it are one call and the call sits below the two assignments
   // its data reads. The two branches and their wording are unchanged, and so
   // is the order they reach a terminal in: this line, then the `~` list.
+  // With findings to hand on, each says how many go to the implementer.
   const approved =
     decision.tolerated.length > 0
       ? `Plan accepted with ${decision.tolerated.length} P1(s) carried into implementation - ` +
-        decision.tolerated.map((f) => f.id).join(', ')
-      : `Plan approved - ${findings.length} non-blocking finding(s)`;
+        decision.tolerated.map((f) => f.id).join(', ') +
+        (nonBlocking.length > 0
+          ? `; ${nonBlocking.length} non-blocking finding(s) go to the implementer`
+          : '')
+      : `Plan approved - ${findings.length} non-blocking finding(s)` +
+        (nonBlocking.length > 0 ? `; ${nonBlocking.length} go to the implementer` : '');
   // The one round whose findings reach nobody otherwise: a revising round
   // hands its deferrals to the planner through `pendingFindings`, and this
   // one is about to clear them. Recorded, not acted on - `defer` decides
@@ -1009,6 +1045,12 @@ function approvePlan(
   // leave an earlier round's value standing, and written on the same state
   // save that clears the pending findings below.
   state.declined = findings.filter(isDeferrable);
+  // For the same reason and on the same save (#425): an approving round with
+  // nothing to hand on removes the field rather than leaving an earlier
+  // round's standing - and removes rather than empties it, so a run with
+  // `loop.fixNonBlocking` off writes the state.json it always did.
+  if (nonBlocking.length > 0) state.planNonBlocking = nonBlocking;
+  else delete state.planNonBlocking;
   // The bar, frozen at the instant it was approved. A copy, not a view:
   // replacing `state.plan` is not the only way its criteria can move - the
   // array and each criterion are mutable, and anything later holding the
@@ -1025,6 +1067,9 @@ function approvePlan(
     findings: findings.length,
     carried: decision.tolerated.map((f) => f.id),
     declined: state.declined.map((f) => f.id),
+    // Present only when there is something to hand on, so a plan approved
+    // with nothing to address records the data it always did (#425).
+    ...(nonBlocking.length === 0 ? {} : { nonBlocking: nonBlocking.map((f) => f.id) }),
     // Present only when a bar was recorded. `?? []` here would log an
     // explicit empty bar for a legacy plan that never claimed one, which is
     // the absent-as-empty collapse the rest of this field refuses.
@@ -1144,7 +1189,7 @@ async function planPhase(
             'A person changed a severity since the last critique and the gate now passes - ' +
               'approving the plan without another critique.',
           );
-          approvePlan(state, plan, carried, accepted, { byPerson: true });
+          approvePlan(state, cfg, plan, carried, accepted, { byPerson: true });
           break;
         }
       }
@@ -1336,7 +1381,7 @@ async function planPhase(
     // the news was bad and nothing while it was good.
     sayFindings('plan', critique.findings, decision, cfg.loop.p1Tolerance);
     if (decision.pass) {
-      approvePlan(state, plan, critique.findings, decision);
+      approvePlan(state, cfg, plan, critique.findings, decision);
       break;
     }
 
@@ -1404,7 +1449,11 @@ async function reviewPhase(
       const inFlight = state.fixInFlight;
       if (inFlight?.final === true && inFlight.round === state.reviewRound) {
         const tolerated = Array.isArray(state.outstanding) ? state.outstanding.filter(hasFindingShape) : [];
-        await runFinalFix(state, cfg, cwd, plan, carried, tolerated, roles, turns, true);
+        // From the ids the attempt persisted, not from today's config: this is
+        // that round, already started and paid for, resumed as itself (#425).
+        const ids = new Set(Array.isArray(state.finalFixNonBlocking) ? state.finalFixNonBlocking : []);
+        const nonBlocking = carried.filter((f) => ids.has(f.id));
+        await runFinalFix(state, cfg, cwd, plan, carried, tolerated, nonBlocking, roles, turns, true);
         continue;
       }
       await runFixRound(state, cfg, cwd, carried, roles, turns, host);
@@ -1495,8 +1544,20 @@ async function reviewPhase(
       // instead: the run may still finish, but not while asserting a pass
       // nobody observed (#47).
       const caveat = verificationCaveat(state);
-      if (caveat === null) log.ok('Carried findings addressed and verification still passes.');
-      else log.warn(`Carried findings addressed, but ${caveat}.`);
+      // Says what the round worked on when it carried non-blocking findings
+      // (#425); a round for tolerated P1s alone keeps its sentence.
+      const nb = Array.isArray(state.finalFixNonBlocking) ? state.finalFixNonBlocking : [];
+      if (nb.length === 0) {
+        if (caveat === null) log.ok('Carried findings addressed and verification still passes.');
+        else log.warn(`Carried findings addressed, but ${caveat}.`);
+      } else {
+        const p1s = Array.isArray(state.outstanding) ? state.outstanding.filter(hasFindingShape).length : 0;
+        const what =
+          `The final fix round worked on ${p1s > 0 ? `${p1s} carried P1(s) and ` : ''}` +
+          `${nb.length} non-blocking finding(s)`;
+        if (caveat === null) log.ok(`${what}, and verification still passes.`);
+        else log.warn(`${what}, but ${caveat}.`);
+      }
       break;
     }
 
@@ -1557,15 +1618,47 @@ async function reviewPhase(
       );
     }
     if (decision.pass) {
-      if (decision.tolerated.length === 0) {
-        recordAndSay(
-          state,
-          'ok',
-          'review_approved',
-          `Review clean - ${review.findings.length} non-blocking finding(s)`,
-          { findings: review.findings.length },
-        );
+      // What the gate let through that is still work (#425). Run 20261022-224848
+      // said "Review clean" over a REVISE verdict naming two P2s in the task's
+      // own files, and nothing ever read them again.
+      const nonBlocking = toAddress(cfg, review.findings);
+      if (decision.tolerated.length === 0 && !nonBlocking.some((f) => f.severity === 'P2')) {
+        if (nonBlocking.length === 0) {
+          recordAndSay(
+            state,
+            'ok',
+            'review_approved',
+            `Review clean - ${review.findings.length} non-blocking finding(s)`,
+            { findings: review.findings.length },
+          );
+        } else {
+          // P3s only. No turn is bought for them: the fix prompt tells the fixer
+          // to skip P3s unless incidental to required work, and there is none.
+          // So they are recorded, and the sentence no longer says clean.
+          //
+          // The findings are consumed on the SAME write that records them, and
+          // before the approval is said: a stop between the approval and a later
+          // clear would leave them pending, and the resume would hand them to
+          // `runFixRound` - a write turn this branch exists not to buy.
+          state.unaddressed = nonBlocking.map((f) => ({
+            finding: f,
+            outcome: 'not-attempted',
+            reason: '',
+          }));
+          state.pendingFindings = null;
+          saveState(state);
+          writeFollowUps(state, plan);
+          recordAndSay(
+            state,
+            'ok',
+            'review_approved',
+            `Review approved - ${nonBlocking.length} P3 finding(s) recorded in FOLLOW-UPS.md, ` +
+              'no fix round run',
+            { findings: review.findings.length, followUps: nonBlocking.map((f) => f.id) },
+          );
+        }
         // Nothing blocking came back, so there is nothing for a resume to fix.
+        // (Already cleared above on the P3-only road; clearing again is a no-op.)
         clearPendingFindings(state);
         break;
       }
@@ -1575,10 +1668,26 @@ async function reviewPhase(
       // reviewer found - the alternative was to finish with a known defect
       // untouched, which is not what "move on" should buy.
       //
+      // Since #425 a P2 to address buys the same round, and tolerated P1s plus
+      // P2s are still one round, not two. The fixer judges each finding under
+      // #228's scope rule in `fixPrompt`, unchanged; what it leaves goes to
+      // FOLLOW-UPS.md rather than being forced.
+      //
       // The result is deliberately not re-reviewed: that is what bounds this.
       // Another review round could raise something new and the loop would never
       // end, which is the situation the tolerance exists to escape.
-      await runFinalFix(state, cfg, cwd, plan, review.findings, decision.tolerated, roles, turns, false);
+      await runFinalFix(
+        state,
+        cfg,
+        cwd,
+        plan,
+        review.findings,
+        decision.tolerated,
+        nonBlocking,
+        roles,
+        turns,
+        false,
+      );
       // Back to the top once, so the gate proves the final fix broke nothing.
       continue;
     }
@@ -1651,6 +1760,7 @@ async function runFinalFix(
   plan: Plan,
   findings: readonly Finding[],
   tolerated: readonly Finding[],
+  nonBlocking: readonly Finding[],
   roles: RoleTable,
   turns: AgentTurns,
   resumed: boolean,
@@ -1659,6 +1769,10 @@ async function runFinalFix(
     state.reviewRound += 1;
     state.finalFixDone = true;
     state.outstanding = [...tolerated];
+    // The second witness, persisted with the first (#425). Absent for a round
+    // carried for P1s alone, so that round's state is what it always was.
+    if (nonBlocking.length > 0) state.finalFixNonBlocking = nonBlocking.map((f) => f.id);
+    else delete state.finalFixNonBlocking;
   }
   // Before the turn, so a process that dies inside it resumes this round as
   // itself rather than as the next ordinary fix (#393). See `fixInFlight`.
@@ -1667,19 +1781,26 @@ async function runFinalFix(
   beginReport(state);
 
   announceFixRound(state);
+  // Says what it carries and counts each (#425). `carried` keeps meaning the
+  // P1s; a round for P1s alone keeps its line and data byte for byte.
   log.step(
-    `Incorporating ${tolerated.length} carried P1(s), then finishing: ` +
-      tolerated.map((f) => f.id).join(', '),
+    nonBlocking.length === 0
+      ? `Incorporating ${tolerated.length} carried P1(s), then finishing: ` +
+          tolerated.map((f) => f.id).join(', ')
+      : `Incorporating ${tolerated.length > 0 ? `${tolerated.length} carried P1(s) and ` : ''}` +
+          `${nonBlocking.length} non-blocking finding(s), then finishing: ` +
+          [...tolerated, ...nonBlocking].map((f) => f.id).join(', '),
     {
       id: 'turn_started',
       data: {
         role: 'implementer',
         kind: 'final-fix',
         carried: tolerated.map((f) => f.id),
+        ...(nonBlocking.length === 0 ? {} : { nonBlocking: nonBlocking.map((f) => f.id) }),
       },
     },
   );
-  for (const f of tolerated) log.info(`  ~ ${f.title}`);
+  for (const f of [...tolerated, ...nonBlocking]) log.info(`  ~ ${f.title}`);
 
   const finalFix = await writeTurn(
     state,
@@ -1707,7 +1828,19 @@ async function runFinalFix(
   // Before the findings are consumed, as in `runFixRound`, and before
   // `confirmFixed`, so the carried P1s' `at: 'final-fix'` verdict lands on
   // `state.outstanding` beside a record that already exists.
-  recordDispositions(state, finalRead, findings, `final-fix-${state.reviewRound}`);
+  const dispositions = recordDispositions(state, finalRead, findings, `final-fix-${state.reviewRound}`);
+  // What the round left of the non-blocking findings it carried, recorded
+  // beside the dispositions and before the findings are consumed, so a stop
+  // after the turn still leaves it and a resumed round writes it again (#425).
+  // Everything the fixer did not mark `fixed` goes in, with its reason, so a
+  // rebuttal can be judged by a person; an unreadable answer puts every one in
+  // as unreadable, never as not addressed.
+  const left = leftBy(nonBlocking, dispositions);
+  if (nonBlocking.length > 0) {
+    state.unaddressed = left;
+    saveState(state);
+    writeFollowUps(state, plan);
+  }
   delete state.fixInFlight;
   clearPendingFindings(state);
 
@@ -1717,6 +1850,8 @@ async function runFinalFix(
   // they are gone" - and for a finding that carried a reproducer, running it
   // once more is the only thing that has ever been able to replace that
   // sentence with a fact (#113).
+  // Over the tolerated P1s only: the non-blocking findings are recorded through
+  // `recordDispositions` above, and with no P1s this runs nothing (#425).
   const settled = await confirmFixed(state, cfg, cwd, roles, tolerated);
   state.outstanding = settled;
   saveState(state);
@@ -1724,8 +1859,15 @@ async function runFinalFix(
   // Written `pending`: the gate has not run yet at this point in the loop,
   // so the file cannot say how it went. `finaliseOutstanding` rewrites it
   // from the completion branch once it has.
-  const file = artifact(state, 'OUTSTANDING.md', renderOutstanding(state, settled, 'pending'));
-  log.info(`Carried findings and what was done about them: ${path.relative(cwd, file)}`);
+  //
+  // Only when P1s were carried (#425): the document says the review raised P1s
+  // within `loop.p1Tolerance`, and a round run for P2s alone would have it say
+  // "raised 0 P1 finding(s)". The gate-time rewrites already do nothing on an
+  // empty `outstanding`.
+  if (tolerated.length > 0) {
+    const file = artifact(state, 'OUTSTANDING.md', renderOutstanding(state, settled, 'pending'));
+    log.info(`Carried findings and what was done about them: ${path.relative(cwd, file)}`);
+  }
 
   writeCheckpoint(
     state,
@@ -1742,17 +1884,73 @@ async function runFinalFix(
   // itself since #133 and this one never did, so the two ways a review can
   // approve looked different to a window for no reason anybody chose: one
   // arrived as `review_approved`, the other as silence.
+  if (nonBlocking.length === 0) {
+    recordAndSay(
+      state,
+      'ok',
+      'review_approved',
+      `Review approved with ${tolerated.length} carried finding(s) fixed - ` +
+        tolerated.map((f) => f.id).join(', '),
+      {
+        findings: findings.length,
+        carriedAndFixed: tolerated.map((f) => f.id),
+      },
+    );
+    return;
+  }
+  // The one `review_approved` of a round that also carried non-blocking
+  // findings (#425): the pass branch did not say one, because the cockpit reads
+  // it as the run ending. Counted from the dispositions record, and it names
+  // FOLLOW-UPS.md only when something was put there.
+  const fixed = dispositions === null ? [] : nonBlocking.filter((f) => !left.some((l) => l.finding.id === f.id));
+  const parts = [
+    ...(tolerated.length > 0
+      ? [`${tolerated.length} carried P1(s) fixed - ${tolerated.map((f) => f.id).join(', ')}`]
+      : []),
+    dispositions === null
+      ? `the fixer's answer about ${nonBlocking.length} non-blocking finding(s) could not be read`
+      : `${fixed.length} of ${nonBlocking.length} non-blocking finding(s) fixed`,
+    ...(left.length > 0 ? [`${left.length} recorded in FOLLOW-UPS.md`] : []),
+  ];
   recordAndSay(
     state,
     'ok',
     'review_approved',
-    `Review approved with ${tolerated.length} carried finding(s) fixed - ` +
-      tolerated.map((f) => f.id).join(', '),
+    `Review approved after a final fix round - ${parts.join(', ')}`,
     {
       findings: findings.length,
       carriedAndFixed: tolerated.map((f) => f.id),
+      nonBlocking: nonBlocking.map((f) => f.id),
+      nonBlockingFixed: fixed.map((f) => f.id),
+      followUps: left.map((l) => l.finding.id),
     },
   );
+}
+
+/**
+ * What a final round left of the non-blocking findings it carried (#425).
+ *
+ * Every one the fixer did not mark `fixed`, with its disposition and reason. A
+ * round whose dispositions could not be read (`null`) leaves every one, marked
+ * unreadable: that fails closed without claiming the fixer ignored them, which
+ * `recordDispositions` forbids. A finding the readable answer left out is
+ * already `not-addressed` there, which is a fact rather than a guess.
+ */
+function leftBy(
+  nonBlocking: readonly Finding[],
+  dispositions: FixDispositions | null,
+): UnaddressedFinding[] {
+  if (dispositions === null) {
+    return nonBlocking.map((f) => ({ finding: f, outcome: 'unreadable', reason: '' }));
+  }
+  const left: UnaddressedFinding[] = [];
+  for (const f of nonBlocking) {
+    const d = dispositions.dispositions.find((x) => x.id === f.id);
+    const disposition = d?.disposition ?? 'not-addressed';
+    if (disposition === 'fixed') continue;
+    left.push({ finding: f, outcome: disposition, reason: d?.reason ?? '' });
+  }
+  return left;
 }
 
 /**
@@ -2068,45 +2266,22 @@ function renderOutstanding(
 }
 
 /**
- * What may appear in FOLLOW-UPS.md.
- *
- * Written against `unknown` on purpose. `validateStoredState` now owns this
- * invariant on the way in; the check remains as defence in depth, since the
- * field is also appended to mid-run from parsed model output.
- * Severity is checked as well as `defer`, even though `parseFindings` already
- * normalises, because the artifact this feeds asserts in prose that everything
- * in it was non-blocking - and an invariant a boundary states should be one the
- * boundary keeps. The string fields are checked - by `hasFindingShape`, which
- * the carried findings read through too, so the codebase holds one answer to
- * "is this stored object a finding" - because an entry missing one renders
- * `undefined` into a human-facing document.
+ * The findings a passing round still has work for (#425), or none when
+ * `loop.fixNonBlocking` is off - the one switch every new decision reads, so
+ * `false` takes the paths that existed before it.
  */
-function isDeferrable(f: unknown): f is Finding {
-  return (
-    hasFindingShape(f) &&
-    (f.defer === true || movedByVote(f)) &&
-    (f.severity === 'P2' || f.severity === 'P3')
-  );
+function toAddress(cfg: Config, findings: readonly unknown[]): Finding[] {
+  return cfg.loop.fixNonBlocking ? findings.filter(isToAddress) : [];
 }
 
-/**
- * A finding the review vote moved to P2 (#388 Part C).
- *
- * It goes to FOLLOW-UPS.md like a deferral, but is never marked `defer: true`:
- * the fixer's prompt reads a deferral as *real, and agreed to belong in
- * separate work*, and an unconfirmed claim is neither. The record says which of
- * the two it is instead (`*Unconfirmed by vote:*`). Read tolerantly, because
- * `votes` rides through stored state unvalidated.
- */
-function movedByVote(f: Finding): boolean {
-  const votes: unknown = f.votes;
-  return (
-    typeof votes === 'object' &&
-    votes !== null &&
-    (votes as Record<string, unknown>)['outcome'] === 'unconfirmed' &&
-    f.downgraded !== undefined
-  );
-}
+/** How FOLLOW-UPS.md names each `UnaddressedFinding` outcome (#425). */
+const UNADDRESSED_LABEL: Record<UnaddressedFinding['outcome'], string> = {
+  'not-addressed': 'not addressed',
+  deferred: 'deferred by the fixer',
+  rebutted: 'rebutted',
+  unreadable: "the fixer's answer could not be read",
+  'not-attempted': 'not attempted: P3s only',
+};
 
 /**
  * The stored list, or null when the field is genuinely absent. Never throws.
@@ -2196,8 +2371,15 @@ export function writeFollowUps(state: RunState, plan: Plan): string | null {
   // The one place absent and empty are treated alike: neither has anything to
   // report, so neither gets a section.
   const scope = plan.out_of_scope ?? [];
+  // What a passing review left of its non-blocking findings (#425). Guarded and
+  // deduped here for the reason `deferred` is; `isUnaddressed` refuses a P1 and
+  // a deferrable finding, so the header's non-blocking claim stays true and
+  // nothing is listed under two headings.
+  const left = Array.isArray(state.unaddressed)
+    ? [...new Map(state.unaddressed.filter(isUnaddressed).map((u) => [u.finding.id, u])).values()]
+    : [];
 
-  if (deferred.length === 0 && scope.length === 0) {
+  if (deferred.length === 0 && scope.length === 0 && left.length === 0) {
     removeArtifact(state, 'FOLLOW-UPS.md');
     return null;
   }
@@ -2219,6 +2401,19 @@ export function writeFollowUps(state: RunState, plan: Plan): string | null {
               (movedByVote(f) && f.downgraded !== undefined
                 ? `*Unconfirmed by vote:* ${f.downgraded.reason}\n\n`
                 : '') +
+              `${f.detail}\n\n*Suggested fix:* ${f.suggested_fix}\n`,
+          )
+          .join('\n'),
+    );
+  }
+  if (left.length > 0) {
+    sections.push(
+      '## Left by the final fix round\n\n' +
+        left
+          .map(
+            ({ finding: f, outcome, reason }) =>
+              `### ${f.title} \`${f.id}\`\n\n*Severity:* ${f.severity}\n\n` +
+              `*Fixer's disposition:* ${UNADDRESSED_LABEL[outcome]}${reason === '' ? '' : ` - ${reason}`}\n\n` +
               `${f.detail}\n\n*Suggested fix:* ${f.suggested_fix}\n`,
           )
           .join('\n'),
@@ -2264,6 +2459,17 @@ export function reconcileFollowUps(state: RunState): string | null {
   const plan = state.plan;
   if (plan === null || plan === undefined) return null;
   collectDeferred(state, []);
+  // A repaired `unaddressed` is not a record to render from (#425): the loader
+  // replaced or dropped what it could not read, and re-rendering would delete
+  // or shorten the one place a passing review's leftovers were written down.
+  // So an existing file is kept as it is - unknown beats a false "nothing
+  // left". Only this resume-time pass needs it: `unaddressed` is written at the
+  // end of a review, after which the only other writer is a resumed final
+  // round, whose fresh record is trustworthy and is rendered as usual.
+  const repaired = state.events.some(
+    (e) => e.type === 'state_repaired' && e['field'] === 'unaddressed',
+  );
+  if (repaired && hasArtifact(state, 'FOLLOW-UPS.md')) return path.join(state.dir, 'FOLLOW-UPS.md');
   return writeFollowUps(state, plan);
 }
 

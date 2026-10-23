@@ -34,6 +34,7 @@ import type {
   FileChangeStatus,
   JudgeFile,
   TestChanges,
+  UnaddressedFinding,
   RoundClaim,
   RoundRecord,
   RunCheckpointMeta,
@@ -761,6 +762,98 @@ export function hasFindingShape(f: unknown): f is Finding {
     isString(f['detail']) &&
     isString(f['suggested_fix'])
   );
+}
+
+/**
+ * What may appear in FOLLOW-UPS.md.
+ *
+ * Written against `unknown` on purpose. `validateStoredState` now owns this
+ * invariant on the way in; the check remains as defence in depth, since the
+ * field is also appended to mid-run from parsed model output.
+ * Severity is checked as well as `defer`, even though `parseFindings` already
+ * normalises, because the artifact this feeds asserts in prose that everything
+ * in it was non-blocking - and an invariant a boundary states should be one the
+ * boundary keeps. The string fields are checked - by `hasFindingShape`, which
+ * the carried findings read through too, so the codebase holds one answer to
+ * "is this stored object a finding" - because an entry missing one renders
+ * `undefined` into a human-facing document.
+ *
+ * Here rather than in the orchestrator since #425, unchanged: the reader for
+ * `unaddressed` below has to refuse a deferrable finding, and this module
+ * imports nothing from the loop.
+ */
+export function isDeferrable(f: unknown): f is Finding {
+  return (
+    hasFindingShape(f) &&
+    (f.defer === true || movedByVote(f)) &&
+    (f.severity === 'P2' || f.severity === 'P3')
+  );
+}
+
+/**
+ * A finding the review vote moved to P2 (#388 Part C).
+ *
+ * It goes to FOLLOW-UPS.md like a deferral, but is never marked `defer: true`:
+ * the fixer's prompt reads a deferral as *real, and agreed to belong in
+ * separate work*, and an unconfirmed claim is neither. The record says which of
+ * the two it is instead (`*Unconfirmed by vote:*`). Read tolerantly, because
+ * `votes` rides through stored state unvalidated.
+ */
+export function movedByVote(f: Finding): boolean {
+  const votes: unknown = f.votes;
+  return (
+    typeof votes === 'object' &&
+    votes !== null &&
+    (votes as Record<string, unknown>)['outcome'] === 'unconfirmed' &&
+    f.downgraded !== undefined
+  );
+}
+
+/**
+ * A finding a passing round still has work for (#425): a P2 or P3 that is not
+ * deferrable. Deferrable ones already go to FOLLOW-UPS.md and never trigger
+ * anything on their own; P0s and P1s are the gate's business.
+ *
+ * A finding a guard downgraded (`downgraded`, #44/#66) is one: Decision 2 of
+ * #425 makes every non-deferrable P2 and P3 work, and the guard's reason stays
+ * on the finding, in the round's artifact and in its `finding_downgraded`
+ * event. The fixer judges it under #228's scope rule like any other, and a
+ * claim it rebuts goes to FOLLOW-UPS.md with the rebuttal.
+ */
+export function isToAddress(f: unknown): f is Finding {
+  return (
+    hasFindingShape(f) &&
+    (f.severity === 'P2' || f.severity === 'P3') &&
+    !isDeferrable(f)
+  );
+}
+
+const UNADDRESSED_OUTCOMES: ReadonlySet<string> = new Set([
+  'not-addressed',
+  'deferred',
+  'rebutted',
+  'unreadable',
+  'not-attempted',
+]);
+
+/**
+ * One entry of `unaddressed`, checked rather than asserted (#425). Its finding
+ * must be one to address, because the section it renders into sits under a
+ * header claiming everything in the file was non-blocking, and a deferrable
+ * finding is already listed under "Deferred by review".
+ */
+export function isUnaddressed(entry: unknown): entry is UnaddressedFinding {
+  return (
+    isRecord(entry) &&
+    isToAddress(entry['finding']) &&
+    isString(entry['outcome']) &&
+    UNADDRESSED_OUTCOMES.has(entry['outcome']) &&
+    isString(entry['reason'])
+  );
+}
+
+function readUnaddressed(entry: unknown): UnaddressedFinding | null {
+  return isUnaddressed(entry) ? entry : null;
 }
 
 function readFinding(entry: unknown): Finding | null {
@@ -2101,6 +2194,14 @@ const READERS = {
       : repairedArray('acceptanceCriteria', raw, ctx, readAcceptanceCriterion),
   outstanding: (raw, ctx) =>
     raw === undefined ? undefined : repairedArray('outstanding', raw, ctx, readFinding),
+  // The three #425 fields. Absent stays absent, with no repair recorded: every
+  // run from before #425, and every run with `loop.fixNonBlocking` off, has none.
+  planNonBlocking: (raw, ctx) =>
+    raw === undefined ? undefined : repairedArray('planNonBlocking', raw, ctx, readFinding),
+  finalFixNonBlocking: (raw, ctx) =>
+    raw === undefined ? undefined : repairedArray('finalFixNonBlocking', raw, ctx, readString),
+  unaddressed: (raw, ctx) =>
+    raw === undefined ? undefined : repairedArray('unaddressed', raw, ctx, readUnaddressed),
   deferred: (raw, ctx) =>
     raw === undefined ? undefined : repairedArray('deferred', raw, ctx, readFinding),
   config: unvalidated<'config'>('config'),

@@ -129,6 +129,13 @@ export const DEFAULTS: Config = {
     // first stalls at record 4, #346 at 4, and no other run stalls at all - so 3
     // is the issue's number, unrefuted rather than tuned. 0 turns it off.
     stallAfter: 3,
+    // On (#425). Run 20261022-224848 passed a review whose verdict was REVISE
+    // with two P2s in the task's own files, said "Review clean", and ran no fix;
+    // a person found both in code-review-0.json and fixed them by hand. A pass
+    // still does not block on them - it buys the one final round the carried-P1
+    // path already has, never re-reviewed, and the fixer still judges each under
+    // #228's scope rule. What it leaves goes to FOLLOW-UPS.md.
+    fixNonBlocking: true,
   },
   budget: {
     // NOT a spend limit on a Claude subscription - the CLI derives this from
@@ -774,6 +781,9 @@ function validate(cfg: Config): void {
   // somebody who believes they turned it off.
   if (typeof cfg.updates.check !== 'boolean') {
     throw new Error('updates.check must be true or false');
+  }
+  if (typeof cfg.loop.fixNonBlocking !== 'boolean') {
+    throw new Error('loop.fixNonBlocking must be true or false');
   }
   for (const key of [
     'maxPlanRounds',

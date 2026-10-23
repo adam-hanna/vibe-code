@@ -78,7 +78,10 @@ test('a review round whose only P1 is uncited buys no fix round', async () => {
 
   await orchestrate(
     state,
-    config(),
+    // Off: the claim here is that an uncited P1 does not block (#48). Since #425
+    // the P2 it becomes buys one final round when the setting is on, which
+    // `non-blocking-findings.test.ts` pins.
+    config({ fixNonBlocking: false }),
     true,
     agents(
       {

@@ -718,6 +718,73 @@ read it. Now it is data, and it is recorded per round.
   The second case covers a run from before #393. The decision is `outcomeFor`, a pure function. The finding row, the round
   card and the stats view are unchanged.
 
+## Non-blocking findings on a passing round (#425)
+
+Run `20261022-224848` passed its review with the verdict REVISE and two P2s in the task's own
+files, said `Review clean - 2 non-blocking finding(s)`, and ended `complete`. No fix turn ran and
+neither finding reached `FOLLOW-UPS.md`; a person found both in `code-review-0.json`. The gate was
+right that P2s do not block. Nothing after the gate read them. `loop.fixNonBlocking` (default on)
+is what does now; `false` restores the earlier loop exactly, on both sides.
+
+- **To address** is `isToAddress` (`src/stored.ts`): a P2 or P3 that is not `isDeferrable`.
+  Deferred and vote-moved findings keep going to FOLLOW-UPS.md as before and trigger nothing. A
+  P1 a guard downgraded (uncited, or from a review turn that ran nothing, #48/#66) is a P2 like any
+  other here: the guard still decides it is never carried as a P1, and its reason stays in the
+  round's artifact and `finding_downgraded` event, but a passing review with one now buys the
+  final round, where the fixer can rebut it. With `loop.fixNonBlocking` off it buys nothing, as
+  before - `final-fix-round.test.ts` pins both.
+- **Review: one final round, never two, never re-reviewed.** A pass with tolerated P1s, *or* with
+  at least one P2 to address, buys the carried-P1 final round. The turn gets every finding of the
+  review, as it always did. It is not reviewed again for the reason the carried-P1 round is not:
+  another review could raise something new, and the loop would never end. The gates run after it.
+- **#228's scope rule still governs it.** Nothing was added to `fixPrompt` or `FIX_BREADTH`. The
+  fixer judges each finding, fixes what belongs to the task, and gives a disposition for the rest.
+  What changes is where the rest goes: everything it did not mark `fixed` is put on
+  `state.unaddressed` with its disposition and reason, and rendered as **Left by the final fix
+  round** in FOLLOW-UPS.md, so a rebuttal can be judged by a person. An unreadable answer puts
+  every non-blocking finding there as *the fixer's answer could not be read*, never as not
+  addressed, which `recordDispositions` forbids. It is written after `recordDispositions` and
+  before the findings are consumed, so a stop after the turn keeps it and a resumed round writes it
+  again.
+- **P3s alone buy no turn.** The fix prompt tells the fixer to skip P3s unless they are incidental
+  to required work, so a turn for P3s only would buy nothing. They go straight to the new section,
+  marked *not attempted: P3s only*, and the `review_approved` sentence no longer says clean.
+  The findings are consumed on the same state write that records them, before the approval is
+  said, so a stop in between cannot leave them pending for a resume to hand to `runFixRound`.
+- **`confirmFixed` stays over the tolerated P1s.** The non-blocking findings are recorded by
+  `recordDispositions`, which already says what the fixer did with each. **OUTSTANDING.md is only
+  written when P1s were carried**: it says the review raised P1s within `loop.p1Tolerance`, and the
+  gate-time rewrites already do nothing on an empty `outstanding`.
+- **Exactly one `review_approved` per approving review**, because the cockpit reads it as the run
+  ending. When the round runs it is the one at the end of `runFinalFix`, counted from the
+  dispositions record, and it names FOLLOW-UPS.md only when something was put there. A round for
+  tolerated P1s alone, and a review with nothing to address, say and record exactly what they did
+  before.
+- **Plan: no extra revision.** The owner's decision, so the plan loop's round count does not move.
+  The approving round's findings to address (P2s and P3s alike, since no turn is bought) are stored
+  on `state.planNonBlocking`, on the same save as `declined`, and `implementPrompt` renders them as
+  **Non-blocking findings from the plan critique**, between the report request and the carried
+  section, which stays where `declined-findings.test.ts` pins it. What the implementer leaves gets
+  no follow-up entry: the review sees the code and raises it again if it still matters.
+- **An acceptance hands them on too.** The hand-off is in `approvePlan`, so a person's acceptance
+  on demotion (#394) stores `planNonBlocking` exactly as a gate pass does. A P1 the person demoted
+  is a P2 or P3 with a `by: 'human'` move and no guard's `downgraded`, so it is not deferrable and
+  goes to the implementer: accepting says the finding need not block the plan, not that it is no
+  longer work. `loop.fixNonBlocking: false` hands nothing on here either.
+- **`state.finalFixNonBlocking` is the second witness.** A round for P2s alone leaves `outstanding`
+  empty on purpose, so the resumed round, the completion line and the CLI summary
+  (`finalFixSummary` in `src/cli.ts`) read these ids to tell it from a repaired state. The summary
+  fails closed on `unaddressed`: absent, or repaired on load, is said to be unknown rather than
+  read as "every one fixed". For the same reason `reconcileFollowUps` keeps an existing FOLLOW-UPS.md as it
+  is when `unaddressed` was repaired, rather than deleting or shortening it from what survived.
+- **The setting and a resume.** Every new decision reads the effective config, so a plan approved
+  with the setting on and resumed with it off gets the old implement prompt. A final round already
+  in flight resumes as itself, from the ids it persisted (#393's `fixInFlight`), and
+  `unaddressed` is a record of what happened, rendered whatever the setting now says.
+- **Forks copy all three fields**, as they copy `carried`: `fork.ts` copies the checkpoint's state
+  whole. `unaddressed` is only present in a checkpoint at or after the final fix, whose tree and
+  dispositions the fork shares.
+
 ## The repository's REVIEW.md (#389)
 
 `src/review-md.ts`. A repository's owners add their own review standards in a root

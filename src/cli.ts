@@ -1928,6 +1928,80 @@ export function recordRunOrigin(state: RunState, origin: string | null): void {
   recordAndSay(state, 'info', 'run_origin', `Asked for by ${origin}`, { origin });
 }
 
+/**
+ * The end-of-run sentence for a run that had a final fix round, or null when
+ * it had none and the plain summary applies.
+ *
+ * Never claim a spotless finish when a P1 was carried. The tolerance lets a run
+ * complete with findings outstanding; reporting that as "zero P1s" would
+ * contradict the OUTSTANDING.md written moments earlier, and a summary a user
+ * cannot trust is worse than no summary.
+ *
+ * Two witnesses say what the round carried: `outstanding` (the P1s) and, since
+ * #425, `finalFixNonBlocking` (the non-blocking findings). A round run for P2s
+ * alone leaves `outstanding` empty on purpose, so only both empty means the
+ * record is damaged. What it left is read from `unaddressed`, and that read
+ * fails closed: an absent record, or one `state.json` had repaired, is said to
+ * be unknown rather than read as "every one fixed".
+ */
+export function finalFixSummary(state: RunState, caveat: string | null): string | null {
+  const p1s = state.outstanding ?? [];
+  const nb = Array.isArray(state.finalFixNonBlocking) ? state.finalFixNonBlocking : [];
+  const verified = `${caveat === null ? 'Verification passed' : `But ${caveat}`}`;
+
+  let leftClause = '';
+  if (nb.length > 0) {
+    const repaired = state.events.some(
+      (e) => e.type === 'state_repaired' && e['field'] === 'unaddressed',
+    );
+    const record = state.unaddressed;
+    if (!Array.isArray(record) || repaired) {
+      leftClause =
+        'the record of which of them it left could not be read back - state.json was repaired ' +
+        'on load - so this run cannot say which of them it fixed';
+    } else {
+      const ids = new Set(nb);
+      const left = record.filter((u) => ids.has(u.finding.id));
+      leftClause =
+        left.length > 0
+          ? `${left.length} of them ${left.length === 1 ? 'is' : 'are'} in FOLLOW-UPS.md with the fixer's reason`
+          : 'the fixer marked every one of them fixed';
+    }
+  }
+
+  if (p1s.length > 0) {
+    return (
+      `Finished after a final fix round for ${p1s.length} carried P1(s): ` +
+      `${p1s.map((f) => f.id).join(', ')}. ` +
+      `${verified}, and that round was not ` +
+      're-reviewed - see OUTSTANDING.md.' +
+      (nb.length > 0 ? ` It also worked on ${nb.length} non-blocking finding(s); ${leftClause}.` : '')
+    );
+  }
+  if (state.finalFixDone === true && nb.length > 0) {
+    return (
+      `Finished after a final fix round for ${nb.length} non-blocking finding(s): ${nb.join(', ')}. ` +
+      `${verified}, and that round was not re-reviewed; ${leftClause}.`
+    );
+  }
+  if (state.finalFixDone === true && state.outstanding !== undefined) {
+    // The same shape of problem as the gate record, found while checking for
+    // its twins: `outstanding` is also repaired to an empty list on a state
+    // that could not be read, and an empty one here prints "zero P1s" over a
+    // run that carried some. `finalFixDone` is an independent witness - a
+    // healthy run sets it in the same breath as a NON-empty `outstanding` or
+    // `finalFixNonBlocking` (src/orchestrator.ts) - so all three disagreeing
+    // means the record is damaged, not that the review was spotless. Absent
+    // `outstanding` is left alone: that is a state written before the field
+    // existed.
+    return (
+      'Finished after a final fix round, but the record of what it carried is empty - ' +
+      'state.json was repaired on load. See OUTSTANDING.md for what was actually carried.'
+    );
+  }
+  return null;
+}
+
 export async function execute(
   state: RunState,
   cfg: Config,
@@ -2045,32 +2119,14 @@ export async function execute(
     // run complete with findings outstanding; reporting that as "zero P1s"
     // would contradict the OUTSTANDING.md written moments earlier, and a
     // summary a user cannot trust is worse than no summary.
-    const left = state.outstanding ?? [];
     const caveat = verificationCaveat(state);
     // The exit rule, not the list of named gates: a record that says nothing at
     // all names nothing, and "no unavailable gates" is the wrong answer to give
     // for it. See `verificationIncomplete`.
     const incomplete = verificationIncomplete(state);
-    if (left.length > 0) {
-      log.warn(
-        `Finished after a final fix round for ${left.length} carried P1(s): ` +
-          `${left.map((f) => f.id).join(', ')}. ` +
-          `${caveat === null ? 'Verification passed' : `But ${caveat}`}, and that round was not ` +
-          're-reviewed - see OUTSTANDING.md.',
-      );
-    } else if (state.finalFixDone === true && state.outstanding !== undefined) {
-      // The same shape of problem as the gate record, found while checking for
-      // its twins: `outstanding` is also repaired to an empty list on a state
-      // that could not be read, and an empty one here prints "zero P1s" over a
-      // run that carried some. `finalFixDone` is an independent witness - a
-      // healthy run sets it in the same breath as a NON-empty `outstanding`
-      // (src/orchestrator.ts) - so the two disagreeing means the record is
-      // damaged, not that the review was spotless. Absent `outstanding` is left
-      // alone: that is a state written before the field existed.
-      log.warn(
-        'Finished after a final fix round, but the record of what it carried is empty - ' +
-          'state.json was repaired on load. See OUTSTANDING.md for what was actually carried.',
-      );
+    const finalFix = finalFixSummary(state, caveat);
+    if (finalFix !== null) {
+      log.warn(finalFix);
     } else if (incomplete === null) {
       // **A plan-only run carries its P1s in `carried`, not in `outstanding`.**
       // The guard above is the implementation-side one: `outstanding` is written
