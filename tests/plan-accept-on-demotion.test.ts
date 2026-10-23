@@ -124,6 +124,36 @@ test('with p1Tolerance 1, demoting all but one P1 approves and carries the one l
   assert.equal(approval(state)['byPerson'], true);
 });
 
+test('an acceptance hands the P1s a person demoted to the implementer, as any approved P2 (#425)', async () => {
+  // Demoted by a person, each is a P2 with a `by: 'human'` move and no guard's
+  // `downgraded`: not deferrable, so it is work the implementer is told about,
+  // exactly as a P2 the critic raised on a passing round would be.
+  const { state } = await escalated();
+  moveInNeedsInput(state, [
+    { id: 'r5-a', to: 'P2', why: DEMOTE },
+    { id: 'r5-b', to: 'P3', why: DEMOTE },
+    { id: 'r5-c', to: 'P2', why: DEMOTE },
+  ]);
+
+  await resumeSpendingNothing(state, loop());
+  assert.deepEqual(state.planNonBlocking?.map((f) => f.id), ['r5-a', 'r5-b', 'r5-c']);
+  assert.deepEqual(approval(state)['nonBlocking'], ['r5-a', 'r5-b', 'r5-c']);
+  assert.equal(approval(state)['byPerson'], true);
+});
+
+test('with loop.fixNonBlocking off, an acceptance hands nothing on and records what #394 recorded', async () => {
+  const { state } = await escalated();
+  moveInNeedsInput(
+    state,
+    ['r5-a', 'r5-b', 'r5-c'].map((id) => ({ id, to: 'P2' as const, why: DEMOTE })),
+  );
+
+  await resumeSpendingNothing(state, loop({ fixNonBlocking: false }));
+  assert.equal('planNonBlocking' in state, false);
+  assert.equal('nonBlocking' in approval(state), false);
+  assert.equal(approval(state)['byPerson'], true);
+});
+
 test('demoting too few to pass the gate revises and critiques as before', async () => {
   const { state } = await escalated();
   moveInNeedsInput(state, [{ id: 'r5-a', to: 'P2', why: DEMOTE }]);

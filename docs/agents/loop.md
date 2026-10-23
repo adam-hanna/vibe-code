@@ -750,6 +750,11 @@ is what does now; `false` restores the earlier loop exactly, on both sides.
   **Non-blocking findings from the plan critique**, between the report request and the carried
   section, which stays where `declined-findings.test.ts` pins it. What the implementer leaves gets
   no follow-up entry: the review sees the code and raises it again if it still matters.
+- **An acceptance hands them on too.** The hand-off is in `approvePlan`, so a person's acceptance
+  on demotion (#394) stores `planNonBlocking` exactly as a gate pass does. A P1 the person demoted
+  is a P2 or P3 with a `by: 'human'` move and no guard's `downgraded`, so it is not deferrable and
+  goes to the implementer: accepting says the finding need not block the plan, not that it is no
+  longer work. `loop.fixNonBlocking: false` hands nothing on here either.
 - **`state.finalFixNonBlocking` is the second witness.** A round for P2s alone leaves `outstanding`
   empty on purpose, so the resumed round, the completion line and the CLI summary
   (`finalFixSummary` in `src/cli.ts`) read these ids to tell it from a repaired state. The summary
