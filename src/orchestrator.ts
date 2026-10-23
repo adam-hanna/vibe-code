@@ -8,7 +8,8 @@ import {
   RateLimitError,
 } from '@src/claude.js';
 import { Cancelled, cancelRequested, sleepUnlessCancelled } from '@src/cancel.js';
-import { codexTurn } from '@src/codex.js';
+import { codexTurn, OutputCutOffError } from '@src/codex.js';
+import { cutOffNote } from '@src/cutoff.js';
 import type { CodexTurnOptions, CodexTurnResult } from '@src/codex.js';
 import { preserveGateArtifacts, sweepGateArtifacts } from '@src/artifacts.js';
 import {
@@ -3737,6 +3738,11 @@ async function withRateLimitRetry<T>(
   provider: 'claude' | 'codex',
   work: () => Promise<T>,
   onFailure?: (err: unknown) => void,
+  /**
+   * Asked after each failed attempt is charged: the work to run instead, for a
+   * failure the caller retries, or null. Only `cutOffRetry` passes one (#416).
+   */
+  retry?: (err: unknown) => (() => Promise<T>) | null,
 ): Promise<T> {
   for (;;) {
     try {
@@ -3772,6 +3778,12 @@ async function withRateLimitRetry<T>(
       // `err`, which has to reach cli.ts as the type it already is - and the
       // totals it updated are what the check below reads.
       chargeFailure(state, cfg, err, { label, provider });
+
+      const again = retry?.(err) ?? null;
+      if (again !== null) {
+        work = again;
+        continue;
+      }
 
       if (!(err instanceof RateLimitError)) throw err;
 
@@ -4177,11 +4189,15 @@ async function codexDispatch(
   // As on the Claude side: the ordinary `await`, in a `try` so the failure can
   // name where this turn's model came from.
   let outcome: CodexTurnResult;
-  try {
-    outcome = await withRateLimitRetry(state, cfg, req.label, 'codex', async () => {
+  // One attempt, with the prompt it is given: the retry of a cut-off turn adds a
+  // note to the end and changes nothing else - the same thread, the same fork
+  // owed, the same seat (#416).
+  const attempt =
+    (attemptPrompt: string): (() => Promise<CodexTurnResult>) =>
+    async () => {
       await checkCodexLimits(state, cfg, req.cwd, req.label);
       return turn({
-        prompt,
+        prompt: attemptPrompt,
         // The request's, which `runTurn` has already resolved to the role's
         // where the caller named none - so a role turn sends exactly what it
         // always did, and a caller with a per-turn schema reaches Codex as it
@@ -4233,7 +4249,17 @@ async function codexDispatch(
         // existed. Fixed before the numerator, rather than after.
         progress: progressOptions(state, cfg, req.label, model, 'codex'),
       });
-    });
+    };
+  try {
+    outcome = await withRateLimitRetry(
+      state,
+      cfg,
+      req.label,
+      'codex',
+      attempt(prompt),
+      undefined,
+      cutOffRetry(state, cfg, req.label, spec.access, prompt, attempt),
+    );
   } catch (err: unknown) {
     throw noteRoleProvenance(err, req.role, cfg, roles, req.timeoutMs, req.seatPath);
   }
@@ -4313,6 +4339,73 @@ async function codexDispatch(
     text: raw,
     structured,
     ...(activity === undefined ? {} : { activity }),
+  };
+}
+
+/**
+ * The one retry a read-only Codex seat gets when its answer was cut off at its
+ * output limit (#416), as a `withRateLimitRetry` retry: the next attempt's work,
+ * or null for a failure it does not retry.
+ *
+ * Inside that loop rather than around it, because the path that succeeds must
+ * not gain an await (`turn-seam.test.ts`): a wrapper awaiting the loop put one
+ * more microtask between a Codex result and its accounting, which is where a
+ * concurrent rotation can land.
+ *
+ * **Read-only seats only.** A writer may already have edited the tree, and
+ * running it again would edit it again; its cut-off fails the turn as before.
+ * **Once.** The cut-off is a wobble the reordered schema should all but remove,
+ * so a second one says something about this turn, and it ends the turn as a
+ * single cut-off always did, naming both attempts.
+ *
+ * The loop has charged the attempt by the time this is asked, so the ceilings
+ * are checked before spending again: one that is reached escalates instead of
+ * retrying. The retry runs on the same conversation - a resuming seat on its
+ * thread, a fresh one fresh - because the #389 thread kept its cut-off answer
+ * and the next two turns on it still worked, while a fresh thread would cost
+ * the critic its memory of earlier rounds.
+ *
+ * The cut-off answer is never the outcome. What it had written in full goes to
+ * the retry as unverified, and the retry's answer, or its failure, is what the
+ * loop acts on.
+ */
+function cutOffRetry(
+  state: RunState,
+  cfg: Config,
+  label: string,
+  access: RoleSpec['access'],
+  prompt: string,
+  attempt: (prompt: string) => () => Promise<CodexTurnResult>,
+): (err: unknown) => (() => Promise<CodexTurnResult>) | null {
+  let first: OutputCutOffError | null = null;
+  return (err) => {
+    if (!(err instanceof OutputCutOffError) || access === 'write') return null;
+    if (first !== null) {
+      throw new OutputCutOffError(
+        `${label} was cut off at its output limit on both attempts.\n` +
+          `First attempt: ${first.message.split(/\r?\n/)[0] ?? ''}\nRetry: ${err.message}`,
+        err,
+      );
+    }
+    first = err;
+    // Codex turns charge no cost, so only the token ceiling applies here.
+    enforceCeilings(state, cfg, false);
+    const written = err.chars - err.blankChars;
+    const n = err.findings.length;
+    recordAndSay(
+      state,
+      'warn',
+      'codex_cut_off',
+      `Codex's answer to ${label} was cut off at its output limit after ` +
+        `${written.toLocaleString('en-US')} characters, followed by ` +
+        `${err.blankChars.toLocaleString('en-US')} characters of blank space. ` +
+        `Trying the turn again (1 retry).` +
+        (n === 0 ? '' : ` It had written ${n} finding(s) in full; the retry is asked to check them again.`) +
+        (err.reported ? '' : ' Codex did not report what the cut-off attempt used.'),
+      { label, chars: err.chars, blankChars: err.blankChars, findings: n, reported: err.reported },
+    );
+    recordEvent(state, 'turn_retried', { label, reason: 'max_output_tokens', attempt: 2 });
+    return attempt(`${prompt}\n\n${cutOffNote(err.findings)}`);
   };
 }
 

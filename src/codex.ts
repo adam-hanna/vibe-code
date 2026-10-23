@@ -11,7 +11,8 @@ import type { ChildEnding, RunFn } from '@src/proc.js';
 import { detail, warn } from '@src/log.js';
 import { createHeartbeat, parseCodexLine, watchCodexItems, withHeartbeat } from '@src/progress.js';
 import type { ProgressOptions } from '@src/progress.js';
-import type { Effort, Sandbox, TokenUsage, TurnActivity } from '@src/types.js';
+import type { Effort, Finding, Sandbox, TokenUsage, TurnActivity } from '@src/types.js';
+import { collapseBlankRuns, salvageFindings, trailingBlank } from '@src/cutoff.js';
 
 let cachedBin: string | null = null;
 
@@ -143,6 +144,11 @@ interface CodexEvents {
    * would fail turns that completed.
    */
   failed: boolean;
+  /**
+   * The text of the last completed `agent_message`, or null when none arrived.
+   * On a turn cut off at its output limit this is the cut-off answer (#416).
+   */
+  lastMessage: string | null;
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -185,7 +191,13 @@ function extractTokens(usage: Record<string, unknown>): TokenUsage {
  * and losing a token count is not worth losing the work for.
  */
 export function parseEvents(stdout: string): CodexEvents {
-  const out: CodexEvents = { threadId: null, tokens: ZERO_TOKENS, failure: null, failed: false };
+  const out: CodexEvents = {
+    threadId: null,
+    tokens: ZERO_TOKENS,
+    failure: null,
+    failed: false,
+    lastMessage: null,
+  };
 
   for (const line of stdout.split(/\r?\n/)) {
     const trimmed = line.trim();
@@ -208,6 +220,11 @@ export function parseEvents(stdout: string): CodexEvents {
       const message = isRecord(err) ? err['message'] : event['message'];
       if (typeof message === 'string') out.failure = message;
       if (event['type'] === 'turn.failed') out.failed = true;
+    } else if (event['type'] === 'item.completed' && isRecord(event['item'])) {
+      // The last one wins: the answer is the final message, and what a cut-off
+      // turn's error carries (#416).
+      const item = event['item'];
+      if (item['type'] === 'agent_message' && typeof item['text'] === 'string') out.lastMessage = item['text'];
     }
   }
   return out;
@@ -427,6 +444,79 @@ function directForkWorks(options: Set<string> | null, hasSchema: boolean): boole
   if (options === null) return true;
   const needed = hasSchema ? [...FORK_FLAGS, '--output-schema'] : FORK_FLAGS;
   return needed.every((flag) => options.has(flag));
+}
+
+/**
+ * A Codex turn cut off at its output limit before it wrote its answer (#416).
+ *
+ * Typed because it is the one failure the dispatch retries, and only on a
+ * read-only seat. It carries the cut-off answer and what was counted from it -
+ * never a verdict: `findings` are the ones written in full, kept for the
+ * retry's note and for diagnosis, and nothing reads them as a result.
+ */
+export class OutputCutOffError extends Error {
+  /** The last `agent_message`, uncollapsed; empty when the stream carried none. */
+  readonly text: string;
+  readonly chars: number;
+  /** How much of `text` is trailing blank space. */
+  readonly blankChars: number;
+  readonly findings: Finding[];
+  /**
+   * Whether the stream reported any usage for the attempt. Kept here because
+   * `chargeFailure` takes the attached spend before the dispatch can read it,
+   * and the narration must say so when Codex reported nothing.
+   */
+  readonly reported: boolean;
+
+  constructor(
+    message: string,
+    detail: { text: string; findings: readonly Finding[]; reported: boolean; chars?: number; blankChars?: number },
+  ) {
+    super(message);
+    this.name = 'OutputCutOffError';
+    this.text = detail.text;
+    this.chars = detail.chars ?? detail.text.length;
+    this.blankChars = detail.blankChars ?? trailingBlank(detail.text);
+    this.findings = [...detail.findings];
+    this.reported = detail.reported;
+  }
+}
+
+/**
+ * Build the cut-off error, and keep the attempt beside `.superseded.json`.
+ *
+ * The record is best effort, as `supersede` is: failing to write a diagnosis
+ * must not replace the failure it describes.
+ */
+function cutOffError(
+  text: string,
+  at: { ending: string; failure: string; stderr: string; reported: boolean; keepAt: string },
+): OutputCutOffError {
+  const findings = salvageFindings(text);
+  const chars = text.length;
+  const blankChars = trailingBlank(text);
+  try {
+    writeFileSync(
+      at.keepAt,
+      JSON.stringify(
+        { reason: 'max_output_tokens', chars, blankChars, findings, text: collapseBlankRuns(text) },
+        null,
+        2,
+      ),
+      'utf8',
+    );
+  } catch {
+    // See above.
+  }
+  const said = text.trimEnd();
+  const tail = said.length > 400 ? `…${said.slice(-400)}` : said;
+  const message =
+    `Codex's answer was cut off at its output limit after ${(chars - blankChars).toLocaleString('en-US')} ` +
+    `characters of JSON, then ${blankChars.toLocaleString('en-US')} characters of blank space ` +
+    `(${at.ending}).\ncodex reported: ${at.failure}\n` +
+    (said === '' ? 'It wrote no message.' : `It ended: ${collapseBlankRuns(tail)}`) +
+    `\nstderr:\n${at.stderr.slice(-2000)}`;
+  return new OutputCutOffError(message, { text, findings, reported: at.reported, chars, blankChars });
 }
 
 /**
@@ -689,10 +779,27 @@ export async function codexTurn(
       // `turn.failed` states the actual cause (a bad model name, a refused
       // request); the raw streams are the fallback when it does not.
       const cause = events.failure === null ? '' : `\ncodex reported: ${events.failure}`;
+      // Cut off at its output limit (#416): the one failure the dispatch retries,
+      // so it is typed. Classified on Codex's own reason alone - a cut-off whose
+      // stream carried no message is still a cut-off, with nothing to salvage.
+      if (events.failure?.includes('max_output_tokens') === true) {
+        throw attachSpend(
+          cutOffError(events.lastMessage ?? '', {
+            ending: describeEnding({ code, signal }),
+            failure: events.failure,
+            stderr,
+            reported: events.tokens.total > 0,
+            keepAt: path.join(artifactDir, `${schemaName}.cutoff.json`),
+          }),
+          spent,
+        );
+      }
       throw attachSpend(
         new Error(
           `codex wrote no structured output (${describeEnding({ code, signal })}).${cause}\n` +
-            `stderr:\n${stderr.slice(-2000)}\nstdout:\n${stdout.slice(-1000)}`,
+            // Collapsed before the tail is taken: a stream of blank space would
+            // otherwise make the tail nothing but blank space.
+            `stderr:\n${stderr.slice(-2000)}\nstdout:\n${collapseBlankRuns(stdout).slice(-1000)}`,
         ),
         spent,
       );

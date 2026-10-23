@@ -43,6 +43,8 @@ The brakes are independent, and any one of them can stop a run:
 
 Every one of these exits resumably. Raise the cap or ceiling (in `vibe.config.json`, or with a flag) and `vibe resume`.
 
+One failed turn is not a brake, and is tried again once. A Codex critique, answer, review or vote whose answer was cut off at its output limit, before it was whole, runs again on the same conversation. The retry is told which findings the cut-off attempt had written, as unverified. The run log warns when this happens, and the summary counts it. A turn that writes code is never retried, because it may already have edited files. A second cut-off fails the turn, as one did before. A cut-off answer is never used as the turn's verdict.
+
 ## Verification gates
 
 The loop used to finish when the reviewer found nothing, which is a statement about reading, not about working. So vibe runs your project's own commands itself rather than believing a report about them. With no configuration, the gate is `npm test` if `package.json` has a `test` script. Configure more with [`verify.gates`](./configuration#named-gates).

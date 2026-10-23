@@ -1,4 +1,5 @@
 import { requestCancel } from '@src/cancel.js';
+import { collapseBlankRuns } from '@src/cutoff.js';
 // No `fmtTokens` import: this module already has one, and it is the one the
 // heartbeat line renders with - so the ceiling's sentence and the beat that
 // preceded it spell the same number the same way.
@@ -440,7 +441,9 @@ export const parseCodexLine: LineParser = (snapshot, line) => {
       // guess at a shape rather than a reading of one.
       if (itemType === 'agent_message' && isRecord(item)) {
         const text = item['text'];
-        if (typeof text === 'string' && text.trim() !== '') snapshot.said.push(text);
+        // Blank runs shortened (#416): an answer that stalled into blank space
+        // arrived here as one 757 KB message and went into the transcript whole.
+        if (typeof text === 'string' && text.trim() !== '') snapshot.said.push(collapseBlankRuns(text));
       }
     }
     return true;
