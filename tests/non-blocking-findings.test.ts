@@ -249,7 +249,7 @@ test('a review passing with only deferred findings runs no fix turn, and says wh
   assert.equal(d.state.unaddressed, undefined);
 });
 
-test('what counts as to address: not deferred, not vote-moved, not downgraded by a guard', () => {
+test('what counts as to address: a P2 or P3 that is not deferred or vote-moved', () => {
   assert.equal(isToAddress(p2('plain')), true);
   assert.equal(isToAddress(p3('plain-p3')), true);
   assert.equal(isToAddress(p1('a-p1')), false);
@@ -259,9 +259,8 @@ test('what counts as to address: not deferred, not vote-moved, not downgraded by
     downgraded: { from: 'P1', reason: 'the vote did not confirm it' },
   });
   assert.equal(isToAddress(moved), false, 'a vote-moved finding is deferrable');
-  // The #44/#66 case: a P1 from a review turn that ran nothing, or that cited
-  // nothing that resolves. Buying the unreviewed round for one is what #66 removed.
-  assert.equal(isToAddress(p2('guarded', { downgraded: { from: 'P1', reason: 'used no tools' } })), false);
+  // A P1 a guard downgraded is a P2 like any other here (Decision 2 of #425).
+  assert.equal(isToAddress(p2('guarded', { downgraded: { from: 'P1', reason: 'used no tools' } })), true);
 });
 
 test('tolerated P1s plus P2s are one final fix, and OUTSTANDING.md lists only the P1s', async () => {
@@ -575,4 +574,56 @@ test('loop.fixNonBlocking is on by default, a missing key reads as on, and a non
   assert.equal(loadConfig(dir).loop.fixNonBlocking, false);
   writeFileSync(path.join(dir, 'vibe.config.json'), JSON.stringify({ loop: { fixNonBlocking: 'yes' } }));
   assert.throws(() => loadConfig(dir), /loop\.fixNonBlocking must be true or false/);
+});
+
+// ---- across a stop ----------------------------------------------------------
+
+test('a P3-only pass consumes its findings on the write that records them, so a stop cannot buy a fix', async () => {
+  // What a process killed the moment the approval is recorded leaves on disk:
+  // read at the instant `review_approved` is said, which is after its event is
+  // saved and before anything after it runs.
+  const state = reviewingRun(RUN);
+  let onDisk: Record<string, unknown> | null = null;
+  const realLog = console.log;
+  const realError = console.error;
+  console.log = () => undefined;
+  console.error = () => undefined;
+  log.setSink((n) => {
+    if (n.id !== 'review_approved') return;
+    onDisk = JSON.parse(readFileSync(path.join(state.dir, 'state.json'), 'utf8')) as Record<string, unknown>;
+  });
+  try {
+    await orchestrate(state, config({}, committing()), true, agents({ codex: () => report([p3('p3-a')]) }, []));
+  } finally {
+    log.setSink(null);
+    console.log = realLog;
+    console.error = realError;
+  }
+
+  const saved: Record<string, unknown> = onDisk ?? {};
+  assert.ok(onDisk !== null, 'the approval was said');
+  assert.equal(saved['pendingFindings'], null, 'nothing is left pending for a resume to fix');
+  assert.ok(Array.isArray(saved['unaddressed']));
+  assert.ok((saved['events'] as { type: string }[]).some((e) => e.type === 'review_approved'));
+});
+
+test('a resume over a repaired unaddressed record keeps FOLLOW-UPS.md rather than deleting it', async () => {
+  const d = await review([p2('p2-a')], {
+    fixer: [{ id: 'p2-a', disposition: 'rebutted', reason: 'already guarded' }],
+  });
+  const before = followUps(d.state);
+  assert.match(before, /p2-a/);
+
+  const file = path.join(d.state.dir, 'state.json');
+  const raw = JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown>;
+  raw['unaddressed'] = 'not a list';
+  writeFileSync(file, JSON.stringify(raw, null, 2), 'utf8');
+  const loaded = loadRun(d.state.targetDir, d.state.id);
+  assert.deepEqual(loaded.unaddressed, []);
+
+  await drive(loaded, config({}, committing()), {
+    resume: true,
+    codex: () => assert.fail('a completed run is not reviewed again'),
+  });
+  assert.equal(followUps(loaded), before, 'the record is kept, not re-rendered from the repair');
 });

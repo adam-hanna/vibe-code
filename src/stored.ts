@@ -814,20 +814,16 @@ export function movedByVote(f: Finding): boolean {
  * deferrable. Deferrable ones already go to FOLLOW-UPS.md and never trigger
  * anything on their own; P0s and P1s are the gate's business.
  *
- * **Nor one a guard downgraded** (`downgraded`, #44/#66): a P1 that cited
- * nothing that resolves, or came from a review turn that ran nothing, is a
- * claim nobody established - the vote-moved case `isDeferrable` already
- * excludes, reached by another guard. Buying the unreviewed final round for one
- * is exactly what #66 measured and removed: ~1.3M tokens editing working code to
- * satisfy a false premise. It stays where it was before #425, in the round's
- * artifact and its `finding_downgraded` event, and rides in a round something
- * else bought, as it always has.
+ * A finding a guard downgraded (`downgraded`, #44/#66) is one: Decision 2 of
+ * #425 makes every non-deferrable P2 and P3 work, and the guard's reason stays
+ * on the finding, in the round's artifact and in its `finding_downgraded`
+ * event. The fixer judges it under #228's scope rule like any other, and a
+ * claim it rebuts goes to FOLLOW-UPS.md with the rebuttal.
  */
 export function isToAddress(f: unknown): f is Finding {
   return (
     hasFindingShape(f) &&
     (f.severity === 'P2' || f.severity === 'P3') &&
-    f.downgraded === undefined &&
     !isDeferrable(f)
   );
 }

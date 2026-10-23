@@ -710,13 +710,13 @@ neither finding reached `FOLLOW-UPS.md`; a person found both in `code-review-0.j
 right that P2s do not block. Nothing after the gate read them. `loop.fixNonBlocking` (default on)
 is what does now; `false` restores the earlier loop exactly, on both sides.
 
-- **To address** is `isToAddress` (`src/stored.ts`): a P2 or P3 that is not `isDeferrable` and was
-  not downgraded by a guard. Deferred and vote-moved findings keep going to FOLLOW-UPS.md as before
-  and trigger nothing. **A guard-downgraded finding triggers nothing either**: a P1 that cited
-  nothing that resolves, or came from a review turn that ran nothing, is a claim nobody
-  established, and buying the unreviewed round for one is what #66 measured and removed (about
-  1.3M tokens editing working code to satisfy a false premise). `final-fix-round.test.ts`,
-  `inert-review.test.ts` and `uncited-findings.test.ts` pin that it buys no round.
+- **To address** is `isToAddress` (`src/stored.ts`): a P2 or P3 that is not `isDeferrable`.
+  Deferred and vote-moved findings keep going to FOLLOW-UPS.md as before and trigger nothing. A
+  P1 a guard downgraded (uncited, or from a review turn that ran nothing, #48/#66) is a P2 like any
+  other here: the guard still decides it is never carried as a P1, and its reason stays in the
+  round's artifact and `finding_downgraded` event, but a passing review with one now buys the
+  final round, where the fixer can rebut it. With `loop.fixNonBlocking` off it buys nothing, as
+  before - `final-fix-round.test.ts` pins both.
 - **Review: one final round, never two, never re-reviewed.** A pass with tolerated P1s, *or* with
   at least one P2 to address, buys the carried-P1 final round. The turn gets every finding of the
   review, as it always did. It is not reviewed again for the reason the carried-P1 round is not:
@@ -733,6 +733,8 @@ is what does now; `false` restores the earlier loop exactly, on both sides.
 - **P3s alone buy no turn.** The fix prompt tells the fixer to skip P3s unless they are incidental
   to required work, so a turn for P3s only would buy nothing. They go straight to the new section,
   marked *not attempted: P3s only*, and the `review_approved` sentence no longer says clean.
+  The findings are consumed on the same state write that records them, before the approval is
+  said, so a stop in between cannot leave them pending for a resume to hand to `runFixRound`.
 - **`confirmFixed` stays over the tolerated P1s.** The non-blocking findings are recorded by
   `recordDispositions`, which already says what the fixer did with each. **OUTSTANDING.md is only
   written when P1s were carried**: it says the review raised P1s within `loop.p1Tolerance`, and the
@@ -752,7 +754,8 @@ is what does now; `false` restores the earlier loop exactly, on both sides.
   empty on purpose, so the resumed round, the completion line and the CLI summary
   (`finalFixSummary` in `src/cli.ts`) read these ids to tell it from a repaired state. The summary
   fails closed on `unaddressed`: absent, or repaired on load, is said to be unknown rather than
-  read as "every one fixed".
+  read as "every one fixed". For the same reason `reconcileFollowUps` keeps an existing FOLLOW-UPS.md as it
+  is when `unaddressed` was repaired, rather than deleting or shortening it from what survived.
 - **The setting and a resume.** Every new decision reads the effective config, so a plan approved
   with the setting on and resumed with it off gets the old implement prompt. A final round already
   in flight resumes as itself, from the ids it persisted (#393's `fixInFlight`), and

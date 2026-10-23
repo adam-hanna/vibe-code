@@ -1635,11 +1635,17 @@ async function reviewPhase(
           // P3s only. No turn is bought for them: the fix prompt tells the fixer
           // to skip P3s unless incidental to required work, and there is none.
           // So they are recorded, and the sentence no longer says clean.
+          //
+          // The findings are consumed on the SAME write that records them, and
+          // before the approval is said: a stop between the approval and a later
+          // clear would leave them pending, and the resume would hand them to
+          // `runFixRound` - a write turn this branch exists not to buy.
           state.unaddressed = nonBlocking.map((f) => ({
             finding: f,
             outcome: 'not-attempted',
             reason: '',
           }));
+          state.pendingFindings = null;
           saveState(state);
           writeFollowUps(state, plan);
           recordAndSay(
@@ -1652,6 +1658,7 @@ async function reviewPhase(
           );
         }
         // Nothing blocking came back, so there is nothing for a resume to fix.
+        // (Already cleared above on the P3-only road; clearing again is a no-op.)
         clearPendingFindings(state);
         break;
       }
@@ -2452,6 +2459,17 @@ export function reconcileFollowUps(state: RunState): string | null {
   const plan = state.plan;
   if (plan === null || plan === undefined) return null;
   collectDeferred(state, []);
+  // A repaired `unaddressed` is not a record to render from (#425): the loader
+  // replaced or dropped what it could not read, and re-rendering would delete
+  // or shorten the one place a passing review's leftovers were written down.
+  // So an existing file is kept as it is - unknown beats a false "nothing
+  // left". Only this resume-time pass needs it: `unaddressed` is written at the
+  // end of a review, after which the only other writer is a resumed final
+  // round, whose fresh record is trustworthy and is rendered as usual.
+  const repaired = state.events.some(
+    (e) => e.type === 'state_repaired' && e['field'] === 'unaddressed',
+  );
+  if (repaired && hasArtifact(state, 'FOLLOW-UPS.md')) return path.join(state.dir, 'FOLLOW-UPS.md');
   return writeFollowUps(state, plan);
 }
 
