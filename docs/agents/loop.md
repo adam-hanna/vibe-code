@@ -790,3 +790,38 @@ The run then died with `codex wrote no structured output … reason: max_output_
   in the archive (25 characters of indentation inside an `excerpt`), and far below the 122,409 and
   756,893 characters of the two failures. A 757 KB `transcript.log` is what the uncollapsed line
   cost.
+
+## Noticing a plan loop that stops converging (#394)
+
+`planStall` in `src/run.ts`, beside `assessConvergence`. **It is groundwork: nothing calls it
+yet.** A second PR adds `loop.stallAfter`, the step-back prompt block, the escalation and the
+`plan_stalled` event. Two archived plan loops ran long, #246-b (19 critiques) and #346 (15), with
+the critic finding new blocking problems almost every round. `assessConvergence` stopped each of
+them. Each time the person raised the limit and resumed, #246-b six more times, because a stop
+whose only lever is "raise the limit" changes nothing about what the planner does. And
+`windowTurnedOver` lets a flat round through exactly when the ids all changed, which is the shape
+of those runs.
+
+- **The rule.** Stalled at the last record `r` when `stallAfter > 0` and `r >= stallAfter`; the
+  blocking count is not falling (`count[r] >= count[r-2]`, `count[r] > 0`); strictly more than
+  half of the last two rounds' blockers are new (`fresh[r-1] + fresh[r]`, where new means not
+  blocking at any earlier position); and `r >= lastStall + 2`, so a step-back gets a full round
+  before it is judged.
+- **Record positions, not critique numbers.** `guardPlanBudget` throws before a round is recorded,
+  and the consume branch after a resume revises without recording one, so `p1Rounds` can hold
+  fewer entries than there are `plan-critique-<n>.json` files. The function judges the last record
+  it is given and takes no round number. The archive cannot show how often the two differ,
+  because `p1Rounds` is reset when implementation starts.
+- **Counted from `ids`, never `count`.** The ids are de-duplicated, and the ids in the `human`
+  argument are taken out of both counts, because a `RoundRecord` has no `raisedBy`. A record
+  without `ids` fails closed. There is no deferral filter, because a P0 or P1 can never be
+  deferred.
+- **Measured.** `scripts/replay-plan-stall.mjs [runs-dir]` (after a build) replays the real
+  function over an archive. On 2026-10-22, over the main checkout's archive:
+  - #246-b stalls at positions 4, 7, 10, 12, 14 and 16 if a step-back never helps;
+  - #346 stalls at 4, 6, 8 and 12;
+  - none of the other eight runs with three or more critiques stalls, under `stallAfter` 2, 3 or 4.
+
+  Only #246 part A (five critiques) ran long enough to be a real negative, so the evidence against
+  false alarms is thin. That is why the first stall only asks the planner to step back.
+  `tests/plan-stall.test.ts` asserts the same numbers from fixtures copied out of those critiques.
