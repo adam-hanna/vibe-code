@@ -1963,6 +1963,17 @@ export function Cockpit({
   // whichever run the column happens to hold (#223).
   const shownRunId = viewing?.runId ?? (drafting !== null ? null : shownLive !== null ? runIdOf(shownLive) : null);
   /**
+   * Whether what is on screen is a draft with no run behind it yet.
+   *
+   * **One expression for every surface that would otherwise fall through to
+   * the window's last live run** (#319). A draft sets `viewing` to null, so
+   * anything choosing between "the opened run" and `run` picked the live one -
+   * which, while a new run is being talked through, is a run the draft has
+   * nothing to do with. The column learned it in #294 and the round cards in
+   * #247; Code, Verify and Spend were the three that had not.
+   */
+  const noRun = draftHasNoRun(drafting);
+  /**
    * The question round the loop is on, through `model.ts` rather than by index.
    *
    * The badge on the Questions tab and the pane behind it read the **same**
@@ -1971,7 +1982,8 @@ export function Cockpit({
    * and the pane behind it disagreed about one run and it was reported as two
    * separate bugs.
    */
-  const openQuestions = latestQuestions(run);
+  // A draft has no questions: its pane draws none, so its badge counts none (#414).
+  const openQuestions = noRun ? null : latestQuestions(run);
   /**
    * Which repository those panes read in.
    *
@@ -2011,6 +2023,8 @@ export function Cockpit({
   const liveRepo = shownLive !== null ? repoOf(shownLive) : shownDir;
   /** Whether what is on screen is a run this window is not narrating live. */
   const past = viewing !== null && shownLive === null;
+  /** The Questions tab's badge and pane, from one expression (#414). */
+  const shownQuestions = past ? null : openQuestions;
   // The round cards, built once here and handed to the surfaces that draw them.
   // `rounds()` is a re-shaping of what is already on `Run` - it measures nothing
   // and infers nothing - and one call is what keeps the pilot's log, the report
@@ -2043,17 +2057,6 @@ export function Cockpit({
    * failed leaves it there with the failure said beside it — a column showing
    * one run while claiming to show another is the confusion this set out to fix.
    */
-  /**
-   * Whether what is on screen is a draft with no run behind it yet.
-   *
-   * **One expression for every surface that would otherwise fall through to
-   * the window's last live run** (#319). A draft sets `viewing` to null, so
-   * anything choosing between "the opened run" and `run` picked the live one -
-   * which, while a new run is being talked through, is a run the draft has
-   * nothing to do with. The column learned it in #294 and the round cards in
-   * #247; Code, Verify and Spend were the three that had not.
-   */
-  const noRun = draftHasNoRun(drafting);
   // A draft not yet started has no run, so the column is drawn empty rather than
   // falling through to the window's last live run.
   const columnRun = noRun ? blank : past && opened.run !== null ? opened.run : run;
@@ -2065,6 +2068,13 @@ export function Cockpit({
   const live = liveTab(columnRun);
   const columnCards = columnRun === run ? cards : rounds(columnRun);
   const flying = (cycle: CycleKind): RoundCardData | null => inFlight(columnCards, columnRun, cycle);
+  /**
+   * How many commits the Code tab's pane draws, for its badge (#414): none in a
+   * draft, the opened run's for a past run (none until its replay arrives, as
+   * the pane says it is still reading), the live run's otherwise. It counted
+   * the live run's in all three.
+   */
+  const codeCommits = noRun ? 0 : past ? (opened.run?.commits.length ?? 0) : run.commits.length;
   /**
    * The verification passes the Verify tab draws, and the run whose directory
    * their logs are read from - **one run, never two** (#248). Each attempt opens
@@ -2087,7 +2097,11 @@ export function Cockpit({
             ? `This run could not be read again: ${opened.failure}`
             : 'Reading this run’s record…',
       }
-    : { passes: run.verify, dir: liveRepo, runId: run.identity?.runId ?? null, waiting: null };
+    : noRun
+      // A draft has run no gate. Its pane says there is no run, and its badge
+      // must not count the last run's passes beside that (#414).
+      ? { passes: [], dir: liveRepo, runId: null, waiting: null }
+      : { passes: run.verify, dir: liveRepo, runId: run.identity?.runId ?? null, waiting: null };
   /** One reading of the live turn's quiet, for the strip and the status bar (#267). */
   const quiet = staleness(run, now);
   // The run the pilot's conversation is about, for its log's round cards (#247).
@@ -2598,7 +2612,11 @@ export function Cockpit({
             <span className="flex items-center gap-1">
             <Button variant="quiet" size="sm" onClick={() => setTab('spend')} title="Usage for the live run">
               <Activity size={14} aria-hidden="true" />
-              {run.spend.tokens === null ? 'No usage reported' : `${fmtTokens(run.spend.tokens)} tokens`}
+              {noRun
+                // The last run's tokens beside a run that has not started would
+                // be that run's usage, read as this one's (#414).
+                ? 'No run yet'
+                : run.spend.tokens === null ? 'No usage reported' : `${fmtTokens(run.spend.tokens)} tokens`}
             </Button>
             {/* On a phone the run status is a sheet with no strip to reopen it
                 from (#347), so its way back is here - with the liveness dot the
@@ -2723,7 +2741,7 @@ export function Cockpit({
               onClick={() => open('code')}
             >
               <RunningMark on={live === 'code'} />
-              Code{run.commits.length > 0 ? ` · ${String(run.commits.length)}` : ''}
+              Code{codeCommits > 0 ? ` · ${String(codeCommits)}` : ''}
             </button>
             <button
               className={cn(TAB, tab === 'review' && TAB_ON)}
@@ -2742,8 +2760,8 @@ export function Cockpit({
               onClick={() => open('questions')}
             >
               Questions
-              {openQuestions !== null && openQuestions.blocking > 0
-                ? ` · ${String(openQuestions.blocking)}`
+              {shownQuestions !== null && shownQuestions.blocking > 0
+                ? ` · ${String(shownQuestions.blocking)}`
                 : ''}
             </button>
             {/* `5d`. The count is verification passes, not gates: the pane's
@@ -2822,7 +2840,7 @@ export function Cockpit({
             ))}
           {tab === 'questions' && (
             <QuestionsPane
-              questions={past ? null : openQuestions}
+              questions={shownQuestions}
               dir={shownDir}
               runId={shownRunId}
               revision={run.artifacts.length}
