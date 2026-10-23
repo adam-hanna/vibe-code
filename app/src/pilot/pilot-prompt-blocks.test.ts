@@ -144,9 +144,11 @@ describe('the window carries the table to the pilot and the screen', () => {
   test('from the config read the pilot already takes its standing instructions from', () => {
     expect(cockpit).toContain('setPilotPrompts(effective.prompts ?? null)');
     expect(cockpit).toContain('pilotPrompts={pilotPrompts}');
-    expect(pane).toContain("standing ?? null, pilotPrompts ?? null)");
+    // Case 2 (#438): the call gained the conversation's binding after the
+    // blocks, so both are matched up to their comma rather than to the end.
+    expect(pane).toContain('standing ?? null, pilotPrompts ?? null,');
     // A change in Settings reaches a conversation already open.
-    expect(pane).toContain('[model, provider, run, launched, dir, access, standing, pilotPrompts]');
+    expect(pane).toContain('[model, provider, run, launched, dir, access, standing, pilotPrompts,');
   });
 
   test('Settings lists the pilot blocks under a heading of their own', () => {

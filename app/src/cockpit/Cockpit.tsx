@@ -32,6 +32,8 @@ import type { KeyStatus } from '../pilot/keys';
 // differing only in case is a compile error on Windows and macOS both.
 import { PilotPane } from '../pilot/PilotPane';
 import { chatRun } from '../pilot/log';
+import { bindingOf, boundRun, sameBinding } from '../pilot/bound';
+import type { Binding } from '../pilot/bound';
 import { noCommands, reduceCommands, restore, running } from './commands';
 import { deviceKey, NOWHERE, readWhere, WHERE_KEY, startPanels, writableWhere } from './where';
 import type { BottomTab, Panels, Tab, Viewing, Where } from './where';
@@ -2113,8 +2115,7 @@ export function Cockpit({
   /** One reading of the live turn's quiet, for the strip and the status bar (#267). */
   const quiet = staleness(run, now);
   // The run the pilot's conversation is about, for its log's round cards (#247).
-  // The pane still takes the live `run` for its tools.
-  const pilotRun = useMemo(() => ({ ...columnRun, protocol }), [columnRun, protocol]);
+  // Its tools read the run the conversation is bound to (#438) - see `bindPane`.
   const pilotLogRun = chatRun({
     runId: pilotRunId,
     drafting: drafting !== null,
@@ -2131,15 +2132,42 @@ export function Cockpit({
    */
   const shownPane = paneOf({ dir: pilotDir, runId: pilotRunId }, drafts);
   const paneProps = useRef(
-    new Map<string, { dir: string; runId: string | null; run: typeof pilotRun; logRun: typeof pilotLogRun; launched: LiveRun['sent'] }>(),
+    new Map<string, { dir: string; runId: string | null; logRun: typeof pilotLogRun; launched: LiveRun['sent'] }>(),
   );
   paneProps.current.set(shownPane, {
     dir: pilotDir,
     runId: pilotRunId,
-    run: pilotRun,
     logRun: pilotLogRun,
     launched: shownLive?.sent ?? null,
   });
+  /**
+   * The run each mounted pane's conversation reads (#438), worked out afresh on
+   * every render from its own `(dir, runId)` - by id, never from the column -
+   * so a pane in the background reads its own run as it now is, and two live
+   * runs in one window cannot cross. `bindings` keeps what each pane last read,
+   * both so an unchanged answer stays the same object and so a background pane
+   * whose run is no longer open finishes on the copy it had.
+   */
+  const bindings = useRef(new Map<string, Binding>());
+  const withProtocol = useRef(new WeakMap<Run, Run>());
+  const openedRead =
+    past && viewing !== null
+      ? { dir: viewing.dir, runId: viewing.runId, run: opened.run, failure: opened.failure }
+      : null;
+  const bindPane = (pane: string, spot: { dir: string; runId: string | null }): { binding: Binding; run: Run } => {
+    const kept = bindings.current.get(pane) ?? null;
+    const next = bindingOf({ spot, drafts, lives, opened: openedRead, kept });
+    const binding = kept !== null && sameBinding(kept, next) ? kept : next;
+    bindings.current.set(pane, binding);
+    // The protocol is the service host's, which a replayed run never heard.
+    const src = boundRun(binding, blank);
+    let run = withProtocol.current.get(src);
+    if (run === undefined || run.protocol !== protocol) {
+      run = { ...src, protocol };
+      withProtocol.current.set(src, run);
+    }
+    return { binding, run };
+  };
   const [knownPanes, setKnownPanes] = useState<readonly string[]>([]);
   useEffect(() => {
     setKnownPanes((k) => (k.includes(shownPane) ? k : [...k, shownPane]));
@@ -3010,15 +3038,16 @@ export function Cockpit({
               const at = paneProps.current.get(pane);
               if (at === undefined) return null;
               const visible = pane === shownPane;
+              const bound = bindPane(pane, { dir: at.dir, runId: at.runId });
               return (
                 <div key={pane} className={visible ? 'contents' : 'hidden'} hidden={!visible}>
                     <PilotPane
                       background={!visible}
                       onBusy={hooksFor(pane).busy}
-                      // The run on screen, live or replayed (#246): what the pilot is
-                      // told about is the run a person is looking at. The protocol is the
-                      // service host's, which a replayed run never heard.
-                      run={at.run}
+                      // The run this conversation is bound to (#438), live or replayed:
+                      // its own, or the one it started - never whatever the column draws.
+                      run={bound.run}
+                      binding={bound.binding}
                       logRun={at.logRun}
                       launched={at.launched}
                       // **The run's repository, not the window's** (#223). Every other

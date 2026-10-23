@@ -1,5 +1,6 @@
 import { FENCE } from './emit';
-import { declare, describeRun } from './tools';
+import { declare, describeBound } from './tools';
+import type { Binding } from './bound';
 import type { Launched } from '../cockpit/argv';
 import type { PilotAccess } from './access';
 import type { Run } from '../cockpit/model';
@@ -192,6 +193,12 @@ export function ownTools(cli: 'claude' | 'codex', access: PilotAccess | null): s
  * model that rounds that to zero reports a measurement that was never taken.
  */
 const HOW_TO_READ = [
+  '`run` at the top says which run this conversation reads, by id, and whether it',
+  'is starting, live, ended or lost; an ended run carries how it ended. `none`',
+  'means no run is open for this conversation, and names the last run it started;',
+  '`unreadable` says why its narration cannot be read. Say so, rather than guessing',
+  'that a run is still starting.',
+  '',
   'If `before` is present this run was RESUMED, and everything else in the block',
   'describes only the part since it was picked up. `before` is what earlier',
   'sessions already did - rounds, spend, findings still open.',
@@ -511,6 +518,12 @@ export function systemPrompt(
    * until the config is read, and null then, which is every block's built-in.
    */
   prompts: unknown = null,
+  /**
+   * Which run this conversation reads (#438). The block below carries the same
+   * `run` header `read_run` does, so the prompt and the tool still agree. Null
+   * for a caller with no window, which prints the run alone, as before.
+   */
+  bound: Binding | null = null,
 ): string {
   const text = (name: PilotBlockName): string => resolvePilotBlock(name, prompts).text;
   return [
@@ -527,7 +540,7 @@ export function systemPrompt(
     '',
     '## The run, as this window holds it',
     '',
-    JSON.stringify(describeRun(run), null, 2),
+    JSON.stringify(describeBound(run, bound), null, 2),
     '',
     text(PILOT_BLOCK.read),
     '',
