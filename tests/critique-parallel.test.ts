@@ -328,16 +328,29 @@ test('a ceiling in the critique group while a rotation is live stops the sibling
 
   assert.deepEqual([...ctl.killed].sort(), ['critique-0-vote-1-v1', 'critique-0-vote-1-v3']);
   assert.ok(ctl.held.includes('compact'), 'the rotation was stopped with the group');
-  // The wrapper waits for the rotation: the run has not ended yet.
+  // The wrapper waits for the rotation, so the run cannot end while it is held.
+  // Polled to a deadline for the group having charged both stopped siblings,
+  // which is just before it rethrows, and failing at once if the run ends first:
+  // "ended early" and "never got that far" are different findings.
   let over = false;
   void ended.then(() => {
     over = true;
   });
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  await until(() => {
+    assert.equal(over, false, 'the run ended with the rotation still live');
+    return state.events.filter((e) => e.type === 'turn_failed').length === 2;
+  }, 'the group to charge its two stopped siblings');
   assert.equal(over, false, 'the run ended with the rotation still live');
 
   ctl.release('compact');
   const code = await ended;
+  // The decisive order, free of timing: the rotation can only record its
+  // `session_rotated` once released, and the run's one escalation comes after
+  // it - so the run's ending waited for the rotation to settle.
+  const rotated = state.events.findIndex((e) => e.type === 'session_rotated');
+  const escalated = state.events.findIndex((e) => e.type === 'escalation');
+  assert.ok(rotated >= 0, 'the rotation recorded nothing');
+  assert.ok(rotated < escalated, 'the run escalated before the rotation settled');
 
   assert.equal(code, EXIT.BUDGET);
   assert.equal(cancelRequested(), null, 'a ceiling set the run’s stop latch');
