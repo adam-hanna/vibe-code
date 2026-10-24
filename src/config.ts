@@ -29,7 +29,7 @@ import type {
   GatesConfig,
   LoadedConfig,
   PromptOverrides,
-  ReviewConfig,
+  CritiqueConfig,
   Sandbox,
   UnconfirmedP0,
   VerifyConfig,
@@ -47,8 +47,11 @@ const SANDBOXES: readonly Sandbox[] = ['read-only', 'workspace-write', 'danger-f
 /** What `review.unconfirmedP0` and `critique.unconfirmedP0` may say (#388): the owner's three, 2026-10-20. */
 export const UNCONFIRMED_P0: readonly UnconfirmedP0[] = ['block', 'halt', 'demote'];
 
-/** The keys of the `review` section, and of `critique` (#405), in the order a message lists them. */
-const REVIEW_KEYS = ['finders', 'verifiers', 'quorum', 'unconfirmedP0'] as const;
+/** The keys of the `critique` section (#405), in the order a message lists them. */
+const CRITIQUE_KEYS = ['finders', 'verifiers', 'quorum', 'unconfirmedP0'] as const;
+
+/** The keys of the `review` section: `critique`'s, and the bound on seats at once (#403). */
+const REVIEW_KEYS = [...CRITIQUE_KEYS, 'maxParallel'] as const;
 
 /**
  * The agent CLI versions this build was tested against (#298).
@@ -272,7 +275,9 @@ export const DEFAULTS: Config = {
   // before the key existed. `block` is the owner's decision (2026-10-20): an
   // unconfirmed P0 still blocks unless somebody chooses otherwise. No
   // recommended set of seats ships until #388's measurement has been made.
-  review: { finders: [], verifiers: [], quorum: null, unconfirmedP0: 'block' },
+  // `maxParallel: 1` is today's order, one seat turn after another (#403): the
+  // groundwork rule, so nothing about a run changes until somebody raises it.
+  review: { finders: [], verifiers: [], quorum: null, unconfirmedP0: 'block', maxParallel: 1 },
   // The same panel for the plan critique (#405), read by `planPhase` when either
   // list is non-empty. Empty, so a default plan loop is byte-identical to one
   // from before the key existed, and `block` for the reason `review`'s is. No
@@ -383,12 +388,12 @@ function mergeGates(base: GatesConfig, override: unknown): GatesConfig {
  * whole, so a project's `finders` replaces the global file's list rather than
  * appending to it, and a `quorum` the project does not name is left standing.
  */
-function mergeReview(base: ReviewConfig, override: unknown): ReviewConfig {
+function mergeReview<T extends CritiqueConfig>(base: T, override: unknown): T {
   if (override === undefined) return base;
-  if (!isRecord(override)) return override as ReviewConfig;
+  if (!isRecord(override)) return override as T;
   const out: Record<string, unknown> = { ...base };
   for (const [key, value] of Object.entries(override)) setOwn(out, key, value);
-  return out as unknown as ReviewConfig;
+  return out as unknown as T;
 }
 
 export function mergeConfig(base: Config, override: unknown): Config {
@@ -946,12 +951,14 @@ function validate(cfg: Config): void {
  * refusals would be two answers to what a legal seat is.
  */
 function validateSeats(section: 'review' | 'critique', value: unknown): void {
-  const takes = `${section} takes ${REVIEW_KEYS.slice(0, -1).join(', ')} and ${REVIEW_KEYS[REVIEW_KEYS.length - 1] ?? ''}`;
+  const keys: readonly string[] = section === 'review' ? REVIEW_KEYS : CRITIQUE_KEYS;
+  const listed = `${keys.slice(0, -1).join(', ')} and ${keys[keys.length - 1] ?? ''}`;
+  const takes = `${section} takes ${listed}`;
   if (!isRecord(value)) {
-    throw new Error(`${section} must be an object with finders, verifiers, quorum and unconfirmedP0`);
+    throw new Error(`${section} must be an object with ${listed}`);
   }
   for (const key of Object.keys(value)) {
-    if (!(REVIEW_KEYS as readonly string[]).includes(key)) {
+    if (!keys.includes(key)) {
       throw new Error(`${section}.${key} is not a setting; ${takes}`);
     }
   }
@@ -994,6 +1001,16 @@ function validateSeats(section: 'review' | 'critique', value: unknown): void {
   const p0: unknown = value['unconfirmedP0'];
   if (typeof p0 !== 'string' || !UNCONFIRMED_P0.includes(p0 as UnconfirmedP0)) {
     throw new Error(`${section}.unconfirmedP0 must be one of ${UNCONFIRMED_P0.join(', ')}`);
+  }
+  // Only the review's seats can overlap (#403); the critique's run in sequence
+  // until #452 unifies the runners, so it takes no bound.
+  if (section !== 'review') return;
+  // No upper bound: a cap would be a number nobody measured (#403).
+  const parallel: unknown = value['maxParallel'];
+  if (typeof parallel !== 'number' || !Number.isInteger(parallel) || parallel < 1) {
+    throw new Error(
+      'review.maxParallel must be a positive whole number of turns at once (1 runs them one after another)',
+    );
   }
 }
 

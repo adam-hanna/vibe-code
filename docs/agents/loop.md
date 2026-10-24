@@ -532,9 +532,8 @@ by a spec built from the finder's entry (through the same `specFor` `tableFor` u
 timeout, the path style, memory, the holder's name, the charge and the heartbeat follow the
 seat with no code of their own. `roles.reviewer` is the first finder, byte for byte; with
 `review.finders: []` the round is exactly what it was, with no `foundBy`, no new event and no
-new narration. Finders run in sequence after the first has reviewed every part. Running them at
-once needs the cancel latch, the charge seam, `saveState` and the heartbeat proven safe with two
-children, and is its own change.
+new narration. Finders run after the first has reviewed every part, up to `review.maxParallel`
+of them at once (#403; `1`, the default, is one after another) - see *Seats at once* below.
 
 - **The dispatch guard.** `claudeDispatch` asks `perTurnSlot(slot)` (`src/slots.ts`) before
   `shouldRotate` and before `recordTurnContext`. Both are about `main`: asked with a finder's
@@ -600,8 +599,9 @@ the gate. With `review.verifiers: []` nothing runs: no turn, no `votes` key, no 
 - **What is voted on.** Every P0 and P1 left after the reproducers, except one whose own
   reproducer *reproduced* - that is an observation, and a vote has nothing to add to it; it
   blocks whatever `unconfirmedP0` says. A finding a guard already moved is P2 by then, and P2
-  and P3 are never voted on. Each eligible finding goes to every verifier, in sequence (finding
-  1 to every verifier, then finding 2), labelled `vote-<r>-<n>-v<k>`: `<n>` is the finding's
+  and P3 are never voted on. Each eligible finding goes to every verifier - every ballot of the
+  round in one pool of up to `review.maxParallel` at once, which at `1` is finding 1 to every
+  verifier, then finding 2 (#403, *Seats at once* below) - labelled `vote-<r>-<n>-v<k>`: `<n>` is the finding's
   1-based place in the report as voted on, `v1` is `review.verifiers[0]`. `seatOf` reads it
   back as `kind: 'vote'`, `verifier: k`.
 - **A verifier is a reviewer whose seat was swapped and whose job is a vote.** `seatTable(roles,
@@ -654,6 +654,68 @@ the gate. With `review.verifiers: []` nothing runs: no turn, no `votes` key, no 
   Both agents were already probed on every run. A seat's turn that fails mid-turn names its own
   line (`TurnRequest.seatPath`), not `roles.reviewer`.
 
+### Seats at once (#403)
+
+#388 ran the seats in sequence on purpose: several live children of one run first needed the
+cancel latch, the charge seam, `saveState` and the heartbeat proven safe. #403 is that proof,
+and `review.maxParallel` (a whole number from 1, default `1`) is the bound. At `1` everything
+here is the sequential order, byte for byte - labels, prompts, events, narration and artifacts -
+because the groundwork rule says the setting changes nothing until somebody raises it.
+
+- **What overlaps.** `roles.reviewer` reviews every part first, **alone**: it keeps a
+  conversation, it can rotate, and it already overlaps a compaction under
+  `withConcurrentCompaction`; keeping it alone keeps all three paths exactly as they were. Then
+  the finders run as one group, up to `maxParallel` at once - each finder's own parts still in
+  sequence. Then the reproducers (`proveFindings`), in order, as before. Then every ballot of the
+  round - each eligible finding times each verifier - as a second group.
+- **`runSeatGroup` (`src/seat-group.ts`) decides when, never what.** Each task writes into a slot
+  its caller owns, indexed by config order: a finder's report by `k`, a ballot by (finding,
+  verifier). The merge reads the finder slots in order and the tally reads the ballot slots in
+  order, so `code-review-<n>.json`, `foundBy`, `votes` and its ballot order, the renamed
+  `-f<k>` ids, FOLLOW-UPS.md and NEEDS-INPUT.md are the same whichever turn finished first
+  (`review-parallel.test.ts` releases them in reverse and compares bytes). Events
+  (`turn_started`, `heartbeat`, `turn_finished`, the charges) stay in real time: they describe
+  what happened.
+- **One failure stays local**, as before: a finder's is `review_finder_failed` and contributes
+  nothing; a verifier's is a `cannot-tell` ballot. The others carry on.
+- **A ceiling or an escalation stops the group, not the run's latch.** A task that rejects -
+  an `Escalation` from `enforceCeilings` after a charge, a `Cancelled`, a rate limit past its
+  cap - stops the group: `stopTurnGroup` (`src/cancel.ts`) kills the group's live children and
+  wakes its waits, nothing more starts, every sibling is awaited (`withConcurrentCompaction`'s
+  `allSettled` rule), and the first error is rethrown. Each killed sibling is charged on its
+  way out by `withRateLimitRetry`'s `chargeFailure`, so its `turn_failed` and `child_ended` are
+  recorded before the `escalation` `cli.ts` records. No report or ballot from the round counts:
+  nothing is merged or tallied, and no `code-review-<n>.json` is written. A budget escalation
+  with siblings live keeps `enforceCeilings`' sentence and adds how many seat turns were live,
+  counting the one that crossed, and the run's totals after all of them were charged. **Why not
+  `requestCancel`:** a ceiling is not a stop. The latch would end the run as *"The run was
+  stopped"*, with the wrong exit code and the wrong reason. A group is found through
+  `AsyncLocalStorage`, for the reason the latch is a module variable: no token is threaded
+  through `runTurn`, the adapters and `run()`.
+- **A stop is the latch, unchanged.** `requestCancel` kills every registered child, so a stop
+  with three verifiers live kills all three, `proc.ts` refuses a fourth, and the run ends
+  `needs-input` with nothing tallied.
+- **The two in-flight guards stay run-level.** `guardTurnSpend` now counts the run's spend plus
+  every live turn's in-flight spend in the run's scope, not just its own; tripping it is still a
+  run stop through the latch, and with several turns live its reason names the combined figure
+  and the turns it counted. **Codex reports nothing in flight**, so concurrent Codex turns count
+  as zero until they are charged and can carry the run past `budget.maxTokens` by up to
+  `maxParallel` turns' spend. That is stated in `docs/configuration.md`, never estimated.
+  `guardTurnQuiet` is unchanged: **a silent finder or verifier stops the whole run**, as a silent
+  sequential one did; it does not become one `cannot-tell` ballot.
+- **Why it is safe.** `applyCharge` is synchronous and runs in the provider result's own
+  continuation, so two turns finishing together are both charged whole. `saveState` is
+  synchronous and atomic over the one in-memory `RunState`, and `inFlight` keys stay unique
+  because seat labels are unique per round. The heartbeat's live-turn map was built for
+  overlap already. Finders and verifiers sit on per-turn fresh slots, with no session and no
+  rotation. The one shared thing that was not safe was the Codex rate-limit monitor's connect,
+  which a second read could use mid-handshake; every read now waits on the one connect.
+- **What tells the window.** Only above `1`, a seat's `turn_started` carries its `label` and a
+  `turn_finished` follows it; the window keeps live turns by label (see
+  `core-and-window.md`). A `model_said` line is prefixed with its turn's label whenever another
+  turn is live in the run, so interleaved prose in the transcript stays readable; every other
+  per-turn line already names its turn.
+
 ## Finders and a vote for the plan critique (#405)
 
 #388 gave the review its panel and marked the critique out of scope (⚑2). This gives the critique
@@ -670,8 +732,9 @@ nothing about accuracy: the archive has no record of what the planner did with e
 - **Beside the review's runners, not through them.** `runCritiqueFinders` and `runCritiqueVotes`
   sit next to `runCritique`, built on the same shared modules (`mergeAcrossFinders`, `tally`,
   `countBallot`, `failedBallot`, `applyVotes`, `groundVoteEvidence`, `parseVote`), because #403
-  was rewriting `runFinders` and `runVotes` in parallel. Unifying them is a follow-up. Both run their
-  turns in sequence, for the review's reason.
+  was rewriting `runFinders` and `runVotes` in parallel. Unifying them is #452. Both run their
+  turns in sequence: `review.maxParallel` does not reach them, and the critique adopts #403's
+  `runSeatGroup` when the runners are unified.
 - **The order within a plan round.** Critic, then finders, then the merge, then the vote, then
   `refusePlaceholderPlan`, then `plan-critique-<n>.json`, `collectDeferred`, FOLLOW-UPS.md and
   `recordPendingFindings`, all inside `withConcurrentCompaction`'s callback; then the gate. The

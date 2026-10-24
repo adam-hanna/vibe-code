@@ -275,3 +275,44 @@ test('close is final: a later read does not reconnect', async () => {
   assert.equal(await monitor.read(config(), CWD), null);
   assert.equal(calls(), 1);
 });
+
+test('two reads arriving during the first handshake share it, and neither asks a client not yet initialised (#403)', async () => {
+  // Review seats running at once each check the limits before their turn, so the
+  // first two reads of a run can arrive together. `connect` assigns the client
+  // before the handshake resolves, and the second read used to find it there and
+  // send its request to a server that had not been initialised.
+  let initialized = false;
+  let answerInitialize: (() => void) | null = null;
+  const transport = new FakeTransport();
+  transport.onSend = (msg, t) => {
+    const method = msg['method'];
+    const id = msg['id'];
+    if (typeof method !== 'string' || typeof id !== 'number') return;
+    if (method === 'initialize') {
+      answerInitialize = () => {
+        initialized = true;
+        t.emit({ id, result: { userAgent: 'codex' } });
+      };
+      return;
+    }
+    if (method === 'account/rateLimits/read') {
+      assert.ok(initialized, 'a read was sent before the handshake finished');
+      t.emit({ id, result: READ_RESULT });
+    }
+  };
+  const { factory, calls } = countingFactory(() => transport);
+  const monitor = new CodexRateLimitMonitor(factory);
+
+  const first = monitor.read(config(), CWD);
+  const second = monitor.read(config(), CWD);
+  for (let i = 0; i < 10 && answerInitialize === null; i++) await Promise.resolve();
+  assert.ok(answerInitialize !== null, 'the handshake never started');
+  (answerInitialize as () => void)();
+  const [a, b] = await Promise.all([first, second]);
+
+  assert.equal(calls(), 1);
+  assert.equal(transport.sentFor('initialize').length, 1);
+  assert.equal(a?.usedPercent, 15);
+  assert.equal(b?.usedPercent, 15);
+  monitor.close();
+});

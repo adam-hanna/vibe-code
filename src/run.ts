@@ -1020,9 +1020,12 @@ const UNTHROTTLED: readonly ActivityObservation['source'][] = ['start', 'end', '
  * that dropped entries would be a second rule about when an entry ends, and the
  * whole design has one.
  *
- * Keyed by label plus provider, which is unique among live turns: the only
- * concurrency is `withConcurrentCompaction`, pairing Claude `compact` with a
- * Codex critique or review, so the pair differs on both axes.
+ * Keyed by label plus provider, which is unique among live turns. There are two
+ * sources of concurrency: `withConcurrentCompaction` pairs Claude `compact` with
+ * a Codex critique or review, so the pair differs on both axes; and a review
+ * seat group (`runSeatGroup`, #403) runs up to `review.maxParallel` finder or
+ * verifier turns at once, whose labels - `review-<r>-f<k>[-part<i>]` and
+ * `vote-<r>-<n>-v<k>` - are unique within a round.
  */
 function mergeInFlight(state: RunState, turns: readonly InFlightTurn[]): void {
   if (turns.length === 0) return;

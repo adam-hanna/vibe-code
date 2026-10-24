@@ -252,6 +252,39 @@ cap already takes; it inherits `cancel.ts`'s rule that **only interruptible chil
 never `git` and never the user's own verification gate; and the arithmetic is `applyCharge`'s
 own, so **no new number is introduced** — `maxTokens: 0` still means no limit.
 
+**Since #403 "this turn's" is "every live turn's".** Review seats may run up to
+`review.maxParallel` at once, and two turns each under what the run has left can be over it
+together. `onSpend` now hands the guard the run's spend plus every live turn's in-flight spend
+in the same run's scope, and the labels it counted; with several live, the reason names the
+combined figure and each turn. It is still a run stop through the latch. **Codex reports nothing
+in flight**, so a live Codex turn counts as zero until it is charged, and `N` concurrent Codex
+seats can carry the run past `budget.maxTokens` by up to `N` turns' spend before anything sees
+it. That overshoot is documented beside the setting and never estimated. A ceiling crossed
+*after* a charge, by `enforceCeilings`, stops the seat's group and not the run's latch: see
+`loop.md`, *Seats at once*. A silent seat still stops the whole run through `guardTurnQuiet`.
+
+**The window keeps every live turn, by label (#403).** It used to hold one `running` turn, and
+each `turn_started` ended the one before - true while turns could not overlap, and a wrong
+measurement on screen once seats could: the first verifier drawn finished while it ran, and
+every heartbeat given to the newest. Now:
+
+- A seat's `turn_started` carries its `label` when `review.maxParallel` is above 1, and the loop
+  narrates a `turn_finished` with the label when the turn settles. `Run.live` holds every open
+  turn, oldest first; `running` stays, as the newest of them, so every reader that only asks
+  "what is running" is unchanged.
+- A labelled start ends only unlabelled turns (the reviewer before its finders) and a stale turn
+  under its own label; the other labelled seats keep running. `turn_finished` ends its own turn;
+  an unknown label ends nothing. A new phase, an `ask`, a `result` and an unlabelled start end
+  them all, as before.
+- A heartbeat or work reading goes to the live turn its label names. One naming no live seat,
+  or naming none while labelled seats run, is dropped - never attached to a guess. A running
+  turn with no label takes every frame, which is the old path, unchanged.
+- The loop column and the rail draw every live turn live, and say which seats are running
+  (*"verifiers voting · alpha: v1, v3 · beta: v2 running"*), from the frames alone.
+- **Old runs and replays carry no label**, so they fold through the single-turn path exactly as
+  before. `replay.ts` synthesises unlabelled `turn_started` frames, and an archived run's turns
+  are each closed by the next start.
+
 **A silent death now leaves a curve behind it.** That host died with no stack, no narration
 and nothing on stderr — `host exited with code -1`, and a lock with no `ending.json`, which is
 #131's signature for terminated-from-outside and says nothing about what did the terminating.

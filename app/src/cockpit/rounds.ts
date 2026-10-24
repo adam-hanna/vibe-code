@@ -308,12 +308,14 @@ export function rounds(run: Run): readonly RoundCard[] {
  * started yet is not drawn as running - nothing is executing in it.
  */
 export function inFlight(cards: readonly RoundCard[], run: Run, cycle: CycleKind): RoundCard | null {
-  const running = run.running;
-  if (running === null) return null;
+  if (run.running === null) return null;
+  // Any live turn, not only the newest (#403): review seats running at once are
+  // all in the round, and the card holding any of them is the one in flight.
+  const live = new Set(run.live.map((t) => t.id));
   for (let i = cards.length - 1; i >= 0; i -= 1) {
     const card = cards[i];
     if (card?.cycle !== cycle) continue;
-    return card.turns.some((t) => t.id === running.id) ? card : null;
+    return card.turns.some((t) => live.has(t.id)) ? card : null;
   }
   return null;
 }

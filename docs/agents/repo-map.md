@@ -21,6 +21,7 @@ src/fork.ts          `vibe fork`: preflight that only reads, then a commit phase
 src/similarity.ts    the one similarity metric, its threshold, and the censuses behind it
 src/finder-merge.ts  one review or critique round's reports across finders, merged by claim, with foundBy (#388, #405)
 src/vote.ts          the review and critique votes' fail-closed tally, pure: quorum, counted ballots, outcome (#388, #405)
+src/seat-group.ts    a round's finder or verifier turns, review.maxParallel at once; a turn that ends the round stops its siblings, never the run's latch (#403)
 src/dispositions.ts  a review fix round's dispositions joined onto its findings, with seats, pure (#393)
 src/questions.ts     when two wordings are one question: the threshold, and REPHRASED.md
 src/raise.ts         what a person does to a run's findings: raise one, move a severity
@@ -54,7 +55,7 @@ src/schemas.ts       the JSON schemas both CLIs are pinned to
 src/validate.ts      parser vocabulary for model output
 src/proc.ts          child-process plumbing, and how a child ended
 src/review-md.ts     the repository's REVIEW.md, read from the run's start commit, for the review seats (#389)
-src/cancel.ts        stopping a turn that is already running - the latch, what it may kill, and the wait it may cut short
+src/cancel.ts        stopping a turn that is already running - the latch, what it may kill, the wait it may cut short, and the scoped turn group (#403)
 src/commands.ts      a command a person pressed - no shell, no shim, and where it runs
 src/commandlog.ts    a command's output on disk, and what the last launch left there
 src/models.ts        which models each CLI offers, asked of the CLI - never a list here

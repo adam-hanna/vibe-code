@@ -70,7 +70,7 @@ What a role does not choose is decided by its job. Writing roles get a writable 
 
 What it is for: more finders, which look at the change independently of each other, and verifiers, which vote on each blocking finding before it can block (#388). With both lists empty, which is the default, a review round is exactly what it was without this section. `vibe doctor` lists your finders and verifiers, and the line printed before the first turn names them.
 
-**What a finder does.** `roles.reviewer` reviews every part of the diff first, exactly as it does with no finders. Then each finder, in order, reviews every part too, with the same prompt the reviewer gets for that part: the same diff, plan, last implementer report, reproducer gates and judge files, apart from what it is told about earlier rounds (below). A finder never sees what another finder found. A finder that names `focus` gets one extra section at the end of its prompt, `## Focus for this review`, holding that text; no other finder's prompt changes.
+**What a finder does.** `roles.reviewer` reviews every part of the diff first, exactly as it does with no finders. Then each finder reviews every part too (up to `review.maxParallel` finders at once; their findings are merged in config order, whichever finishes first), with the same prompt the reviewer gets for that part: the same diff, plan, last implementer report, reproducer gates and judge files, apart from what it is told about earlier rounds (below). A finder never sees what another finder found. A finder that names `focus` gets one extra section at the end of its prompt, `## Focus for this review`, holding that text; no other finder's prompt changes.
 
 **The reviewer remembers earlier rounds; the other finders do not.** The reviewer keeps its conversation from round to round, so it remembers what it raised and how the fixer answered; the other finders start fresh every round, which makes them more independent of earlier rounds. From the second review round on, a reviewer that kept its conversation is told its previous findings are in context, to re-raise one that is still unresolved under the same id and to drop one that was addressed. A finder is told it does not have them, and to raise every defect it sees, including one that may have been raised before. Every seat is handed the most recent write turn's report, which after a fix round is the fixer's. Only the reviewer also has its own earlier findings and the earlier rounds' reports in its conversation. The fixer's per-finding dispositions (`fix-dispositions-<n>.json`) are shown to no reviewer.
 
@@ -86,7 +86,7 @@ What changes this, and what does not:
 
 **What it costs.** One extra turn per diff part per finder, every review round, all of it inside `budget.maxTokens`. There is no separate ceiling. A finder whose turn fails, other than by a stop or a ceiling, is recorded as `review_finder_failed` and contributes nothing; the round goes on with the others, and the round says how many finders reported (*"2 of 3 reported"*). The run summary's `Finders:` line says what the finders cost in turns and tokens.
 
-**What gets a vote.** After the findings are merged and any reproducers have run, every P0 and P1 goes to every verifier, one at a time - except a finding whose own reproducer reproduced, which blocks without a vote, and anything a check already moved to P2. P2 and P3 are never voted on.
+**What gets a vote.** After the findings are merged and any reproducers have run, every P0 and P1 goes to every verifier, in one pool of up to `review.maxParallel` turns at once (`1`, the default, runs them one after another; the votes are recorded in finding and verifier order whatever order they arrive in) - except a finding whose own reproducer reproduced, which blocks without a vote, and anything a check already moved to P2. P2 and P3 are never voted on.
 
 **What a verifier sees.** The finding's title, detail, citations and suggested fix; the plan and its out-of-scope list; the parts of the diff its citations point at (all of it, if they point at none); and the repository, to read. It never sees which finder raised the finding or how many did, how any other verifier voted, or the finding's id or history. It answers `real`, `not-real` or `cannot-tell`, and is asked whether the defect exists - not how severe it is or whether it is worth fixing. A `not-real` has to cite something that resolves, as a finding does; one that does not is recorded as cast and counted as `cannot-tell`. Every verifier turn is a fresh, read-only conversation, labelled `vote-<round>-<n>-v<k>`, where `<n>` is the finding's place in the round's report and `v1` is `review.verifiers[0]`.
 
@@ -102,13 +102,18 @@ A verifier whose turn fails, other than by a stop or a ceiling, counts as `canno
 
 **What the vote costs.** One turn per voted finding per verifier, every review round, inside `budget.maxTokens`. The run summary's `Votes:` line says what the vote cost in turns and tokens, and what the last round's vote came to.
 
+**Running seats at once.** `review.maxParallel` sets how many finder or verifier turns may be live at the same time. The reviewer still reviews every part first, alone. Then the finders run, up to that many at once. Then the reproducers run. Then every vote of the round runs as one pool, up to that many at once. It changes how long a round takes, not what it costs: the number of turns, and what each is asked, are the same, and so are `code-review-<n>.json`, FOLLOW-UPS.md and NEEDS-INPUT.md. One seat failing still costs only that seat. A ceiling crossed by one seat stops the others beside it, charges what they spent, and ends the run once. A stop, or a seat that goes silent past `progress.maxQuietMs`, ends the whole run.
+
+The cost is to the token ceiling. While turns are running, vibe stops the run when what it has spent plus what every live turn has spent so far reaches `budget.maxTokens`. Claude reports its spend as it goes, but Codex reports nothing until a turn ends, so Codex turns count as zero until then. With `N` Codex turns live at once, the run can pass `budget.maxTokens` by up to `N` turns' spend before the ceiling stops it. That spend is not estimated.
+
 ```json
 {
   "review": {
     "finders": [{ "provider": "claude", "model": "opus", "focus": "concurrency and error handling" }],
     "verifiers": ["codex", { "provider": "claude", "effort": "high" }],
     "quorum": null,
-    "unconfirmedP0": "block"
+    "unconfirmedP0": "block",
+    "maxParallel": 1
   }
 }
 ```
@@ -119,6 +124,7 @@ A verifier whose turn fails, other than by a stop or a ceiling, counts as `canno
 | `review.verifiers` | `[]` | The seats that vote on each blocking finding. Entries take exactly a role's keys. A `focus` on a verifier is refused as an unknown key. |
 | `review.quorum` | `null` | How many `real` votes confirm a finding. `null` means a majority of the verifiers, `floor(n/2)+1`. A whole number must be at least 1 and at most the number of verifiers, and it is refused when there are no verifiers. |
 | `review.unconfirmedP0` | `"block"` | What a P0 that the vote did not confirm does. `"block"` records the votes and it still blocks. `"halt"` stops the run and asks you, showing every vote. `"demote"` moves it to P2, as an unconfirmed P1 is moved. |
+| `review.maxParallel` | `1` | How many finder or verifier turns may run at once in a review round, a whole number of at least 1. `1` runs them one after another. More runs the round faster and costs no more turns, but Codex turns report no spend until they end, so `N` Codex turns at once can pass `budget.maxTokens` by up to `N` turns' spend. See [running seats at once](#review). |
 
 Every finder and every verifier runs as a fresh, read-only turn. It never resumes a conversation and never shares the implementer's session. A refused entry is named by its index, counted from 0, in the same words a role's mistake gets, for example `review.finders[1].effort is "huge"; must be one of low, medium, high, xhigh, max`.
 

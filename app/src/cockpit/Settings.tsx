@@ -1704,7 +1704,7 @@ export function Settings({
     codex?: { model?: string };
     instructions?: { text?: string };
     prompts?: unknown;
-    review?: { finders?: unknown; verifiers?: unknown; quorum?: unknown; unconfirmedP0?: unknown };
+    review?: { finders?: unknown; verifiers?: unknown; quorum?: unknown; unconfirmedP0?: unknown; maxParallel?: unknown };
     critique?: { finders?: unknown; verifiers?: unknown; quorum?: unknown; unconfirmedP0?: unknown };
   };
   const gates = effective.gates ?? {};
@@ -2931,6 +2931,23 @@ export function Settings({
           <span className={S.hint}>
             how many verifiers must say a finding is real. Blank means a majority of the verifiers —
             more than half of them.
+          </span>
+        </div>
+        {/* #403. The core refuses anything but a whole number from 1, and the
+            field puts back what is in force when a save is refused. */}
+        <div className={S.row}>
+          <label className={S.label} htmlFor="review-maxParallel">
+            parallel turns {source('review', 'maxParallel')}
+          </label>
+          <NumberField
+            id="review-maxParallel"
+            value={typeof review.maxParallel === 'number' ? review.maxParallel : undefined}
+            disabled={busy}
+            onSave={(n) => save({ review: { maxParallel: n } })}
+          />
+          <span className={S.hint}>
+            how many finder or verifier turns may run at once. 1 runs them one after another. Codex
+            reports no spend mid-turn, so N at once can pass the token ceiling by up to N turns.
           </span>
         </div>
         <div className={S.block}>

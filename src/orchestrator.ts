@@ -7,7 +7,7 @@ import {
   parseStructured,
   RateLimitError,
 } from '@src/claude.js';
-import { Cancelled, cancelRequested, sleepUnlessCancelled } from '@src/cancel.js';
+import { Cancelled, sleepUnlessCancelled, stopReason } from '@src/cancel.js';
 import { codexTurn, OutputCutOffError } from '@src/codex.js';
 import { cutOffNote } from '@src/cutoff.js';
 import type { CodexTurnOptions, CodexTurnResult } from '@src/codex.js';
@@ -52,6 +52,7 @@ import {
 } from '@src/roles.js';
 import type { Access, FinderEntry, Role, RoleSpec, RoleTable, VerifierEntry } from '@src/roles.js';
 import { mergeAcrossFinders } from '@src/finder-merge.js';
+import { runSeatGroup } from '@src/seat-group.js';
 import type { FinderReport } from '@src/finder-merge.js';
 import { claudeMcpDefinitions, resolveClaudeGrants } from '@src/mcp.js';
 import {
@@ -4282,7 +4283,8 @@ async function withRateLimitRetry<T>(
         // refusal do it, for two reasons: the loop would otherwise narrate
         // `rate_limit_resumed` on a wait that did not resume, and it would
         // announce a turn it is about to refuse to start.
-        throw new Cancelled(cancelRequested() ?? 'the run was stopped during a rate-limit wait');
+        // `stopReason`: a seat's wait may have been cut short by its group (#403).
+        throw new Cancelled(stopReason() ?? 'the run was stopped during a rate-limit wait');
       }
       log.step(`Resuming "${label}" after rate-limit wait`, {
         id: 'rate_limit_resumed',
@@ -5584,23 +5586,44 @@ async function runReview(
       reviewMd,
     );
   };
+  // Whether seat turns may overlap this round (#403). Only then do their
+  // `turn_started` frames carry the label and a `turn_finished` follow: a window
+  // keeps several turns live by label, and needs to be told when each one ends.
+  // At 1 the turns cannot overlap, and the narration is exactly what it was.
+  const parallel = cfg.review.maxParallel > 1;
+  const finishing = async <T>(label: string, kind: 'review' | 'vote', work: () => Promise<T>): Promise<T> => {
+    if (!parallel) return work();
+    try {
+      return await work();
+    } finally {
+      log.detail(`${label} finished`, {
+        id: 'turn_finished',
+        data: { label, role: 'reviewer', kind, round: state.reviewRound },
+      });
+    }
+  };
   /**
    * The additional finders (#388 Part B), after the first has reviewed every
    * part, and the merge across all of them.
    *
    * Each finder is a reviewer whose seat was swapped (`seatTable`): the same
    * `runTurn`, so its timeout, charge, heartbeat and path style follow the seat.
-   * In sequence, never at once - several children of one run would need the
-   * cancel latch, the charge seam, `saveState` and the heartbeat proven safe
-   * with two, which is its own change. A finder never sees another's findings:
-   * every one is handed the same prompt the first was, memoryless.
+   * A finder never sees another's findings: every one is handed the same prompt
+   * the first was, memoryless.
+   *
+   * Up to `review.maxParallel` finders at once (#403), as one `runSeatGroup`;
+   * `1`, the default, is one after another exactly as before. A finder's own
+   * parts stay in sequence, so a finder that fails stops at its first failed
+   * part as it always did. Each writes its report into its own slot, and the
+   * merge reads the slots in config order, so `foundBy`, the merged findings and
+   * the renamed `-f<k>` ids are the same whichever finder finished first.
    */
   const runFinders = async (
     entries: readonly FinderEntry[],
     firstReport: FindingsReport,
   ): Promise<FindingsReport> => {
-    const reported: FinderReport[] = [];
-    for (const f of entries) {
+    const reported: (FinderReport | undefined)[] = entries.map(() => undefined);
+    const tasks = entries.map((f, j) => async (): Promise<void> => {
       const table = seatTable(roles, f.setting);
       const parts: FindingsReport[] = [];
       let label = '';
@@ -5611,20 +5634,29 @@ async function runReview(
             : `review-${state.reviewRound}-f${f.k}`;
           log.step(`${holderLabel('reviewer', table)} is reviewing the implementation (finder ${f.k})`, {
             id: 'turn_started',
-            data: { role: 'reviewer', kind: 'review', round: state.reviewRound, finder: f.k, seat: f.path },
-          });
-          const outcome = await runTurn(
-            state,
-            cfg,
-            {
+            data: {
               role: 'reviewer',
-              prompt: P.withFocus(reviewPromptFor(i, false, false), f.focus),
-              cwd,
-              label,
-              seatPath: f.path,
+              kind: 'review',
+              round: state.reviewRound,
+              finder: f.k,
+              seat: f.path,
+              ...(parallel ? { label } : {}),
             },
-            turns,
-            table,
+          });
+          const outcome = await finishing(label, 'review', () =>
+            runTurn(
+              state,
+              cfg,
+              {
+                role: 'reviewer',
+                prompt: P.withFocus(reviewPromptFor(i, false, false), f.focus),
+                cwd,
+                label,
+                seatPath: f.path,
+              },
+              turns,
+              table,
+            ),
           );
           // Judged by what this turn did, attributed to the role it played. Its
           // test verdicts are parsed by nothing here and so dropped: the first
@@ -5665,17 +5697,18 @@ async function runReview(
           `Review finder ${f.k} (${f.path}, ${provider}/${model}) failed on ${label}: ${error}`,
           { round: state.reviewRound, finder: f.k, seat: f.path, label, error },
         );
-        continue;
+        return;
       }
       const [single] = parts;
-      reported.push({
+      reported[j] = {
         k: f.k,
         seat: f.path,
         provider: f.setting.provider,
         model: f.setting.model ?? 'default',
         report: parts.length === 1 && single !== undefined ? single : mergeReviewReports(parts),
-      });
-    }
+      };
+    });
+    await runSeatGroup(state, cfg.review.maxParallel, tasks);
 
     const all: FinderReport[] = [
       {
@@ -5685,7 +5718,8 @@ async function runReview(
         model: roles.reviewer.model ?? 'default',
         report: firstReport,
       },
-      ...reported,
+      // Config order, whatever order they finished in (#403 decision 3).
+      ...reported.filter((r): r is FinderReport => r !== undefined),
     ];
     const merge = mergeAcrossFinders(all);
     const seats = entries.length + 1;
@@ -5719,9 +5753,12 @@ async function runReview(
    * The vote on every blocking finding that was not reproduced (#388 Part C),
    * after the reproducers and before the gate.
    *
-   * Each eligible finding goes to every verifier, in sequence - every vote on
-   * finding 1, then every vote on finding 2 - for the reason the finders run in
-   * sequence. A verifier is a reviewer whose seat was swapped and whose job is a
+   * Each eligible finding goes to every verifier, every ballot of the round in
+   * one `runSeatGroup` of up to `review.maxParallel` at once (#403) - `1`, the
+   * default, is every vote on finding 1, then every vote on finding 2, as
+   * before. Each ballot is written into its (finding, verifier) slot and tallied
+   * from the slots in that order, so `votes` and the ballot order are the same
+   * whichever verifier answered first. A verifier is a reviewer whose seat was swapped and whose job is a
    * vote (`seatTable` with `VOTE_SCHEMA`): the same `runTurn`, so its timeout,
    * charge, heartbeat and path style follow the seat. It is shown the claim and
    * nothing about who made it, and never another verifier's vote.
@@ -5745,7 +5782,9 @@ async function runReview(
 
     const votes = new Map<string, Votes>();
     let cast = 0;
-    for (const { f, n } of eligible) {
+    const slots: Ballot[][] = eligible.map(() => []);
+    const tasks: (() => Promise<void>)[] = [];
+    for (const [i, { f, n }] of eligible.entries()) {
       // The diff parts its evidence cites, or every part when it cites none
       // of them: a claim about a file the diff never touched is still a claim
       // about this change, and the verifier can read the rest of the tree.
@@ -5769,67 +5808,76 @@ async function runReview(
         roles,
         reviewMd,
       );
-      const ballots: Ballot[] = [];
-      for (const v of verifiers) {
-        const table = seatTable(roles, v.setting, VOTE_SCHEMA);
-        const req: TurnRequest = {
-          role: 'reviewer',
-          prompt,
-          cwd,
-          label: `vote-${state.reviewRound}-${n}-v${v.k}`,
-          seatPath: v.path,
-        };
-        log.step(`${holderLabel('reviewer', table)} is checking ${f.id} (verifier ${v.k})`, {
-          id: 'turn_started',
-          data: {
+      const ballots: Ballot[] = slots[i] ?? [];
+      for (const [j, v] of verifiers.entries()) {
+        tasks.push(async (): Promise<void> => {
+          const table = seatTable(roles, v.setting, VOTE_SCHEMA);
+          const req: TurnRequest = {
             role: 'reviewer',
-            kind: 'vote',
-            round: state.reviewRound,
-            verifier: v.k,
-            seat: v.path,
-            finding: f.id,
-          },
-        });
-        cast += 1;
-        try {
-          const outcome = await runTurn(state, cfg, req, turns, table);
-          const said = parseVote(readStructured(outcome));
-          // The verifier's own path convention, because it typed the paths -
-          // the read `groundAndRecord` makes for the reviewer.
-          const grounded = groundVoteEvidence(
-            said.evidence,
+            prompt,
             cwd,
-            state.dir,
-            pathStyleFor(state, 'reviewer', table),
-          );
-          const counted = countBallot(said.vote, grounded.unresolved);
-          ballots.push({
-            seat: v.path,
-            provider: v.setting.provider,
-            model: v.setting.model ?? 'default',
-            vote: said.vote,
-            counted: counted.counted,
-            reason: said.reason,
-            evidence: grounded.evidence,
-            ...(counted.countedReason === undefined ? {} : { countedReason: counted.countedReason }),
+            label: `vote-${state.reviewRound}-${n}-v${v.k}`,
+            seatPath: v.path,
+          };
+          log.step(`${holderLabel('reviewer', table)} is checking ${f.id} (verifier ${v.k})`, {
+            id: 'turn_started',
+            data: {
+              role: 'reviewer',
+              kind: 'vote',
+              round: state.reviewRound,
+              verifier: v.k,
+              seat: v.path,
+              finding: f.id,
+              ...(parallel ? { label: req.label } : {}),
+            },
           });
-        } catch (err: unknown) {
-          // A stop, a ceiling, a rate limit waited out past its cap: not a vote.
-          if (err instanceof Escalation || err instanceof Cancelled) throw err;
-          // Nor a ceiling this failed turn itself crossed: `chargeFailure` has
-          // already charged it and held the ceiling rather than throwing it, and
-          // counting the failure as a ballot would go on to buy the next vote
-          // over the budget. Cost only for a Claude seat, `applyCharge`'s rule.
-          enforceCeilings(state, cfg, v.setting.provider === 'claude');
-          // Anything else is a vote not cast, and counts as one: `cannot-tell`,
-          // which can only keep the finding blocking. Too few usable votes must
-          // never let a finding through.
-          const ballot = failedBallot(v, err);
-          ballots.push(ballot);
-          log.warn(`Verifier ${v.k} (${v.path}) failed on ${req.label}, counted as cannot-tell: ${ballot.reason}`);
-        }
+          cast += 1;
+          try {
+            const outcome = await finishing(req.label, 'vote', () => runTurn(state, cfg, req, turns, table));
+            const said = parseVote(readStructured(outcome));
+            // The verifier's own path convention, because it typed the paths -
+            // the read `groundAndRecord` makes for the reviewer.
+            const grounded = groundVoteEvidence(
+              said.evidence,
+              cwd,
+              state.dir,
+              pathStyleFor(state, 'reviewer', table),
+            );
+            const counted = countBallot(said.vote, grounded.unresolved);
+            ballots[j] = {
+              seat: v.path,
+              provider: v.setting.provider,
+              model: v.setting.model ?? 'default',
+              vote: said.vote,
+              counted: counted.counted,
+              reason: said.reason,
+              evidence: grounded.evidence,
+              ...(counted.countedReason === undefined ? {} : { countedReason: counted.countedReason }),
+            };
+          } catch (err: unknown) {
+            // A stop, a ceiling, a rate limit waited out past its cap: not a vote.
+            if (err instanceof Escalation || err instanceof Cancelled) throw err;
+            // Nor a ceiling this failed turn itself crossed: `chargeFailure` has
+            // already charged it and held the ceiling rather than throwing it, and
+            // counting the failure as a ballot would go on to buy the next vote
+            // over the budget. Cost only for a Claude seat, `applyCharge`'s rule.
+            enforceCeilings(state, cfg, v.setting.provider === 'claude');
+            // Anything else is a vote not cast, and counts as one: `cannot-tell`,
+            // which can only keep the finding blocking. Too few usable votes must
+            // never let a finding through.
+            const ballot = failedBallot(v, err);
+            ballots[j] = ballot;
+            log.warn(`Verifier ${v.k} (${v.path}) failed on ${req.label}, counted as cannot-tell: ${ballot.reason}`);
+          }
+        });
       }
-      votes.set(f.id, tally(ballots, cfg.review.quorum));
+    }
+    await runSeatGroup(state, cfg.review.maxParallel, tasks);
+    // Tallied in (finding, verifier) order once every ballot is in, never as
+    // they arrive (#403 decision 3). A group that threw never gets here, so no
+    // partial vote is ever recorded.
+    for (const [i, { f }] of eligible.entries()) {
+      votes.set(f.id, tally(slots[i] ?? [], cfg.review.quorum));
     }
 
     const applied = applyVotes(report, votes, cfg.review.unconfirmedP0);

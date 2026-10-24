@@ -1688,6 +1688,11 @@ export function reportRoles(cfg: Config): void {
     // does - said before the first turn, as doctor says it (#405).
     log.info(`Critique vote: ${quorumText(cfg.critique.quorum, critiqueVerifiers.length)}, unconfirmed P0 ${cfg.critique.unconfirmedP0}`);
   }
+  // Only when seats can overlap (#403): at 1 they run one after another, and a
+  // run that never raised it prints what it always has.
+  if ((finders.length > 0 || verifiers.length > 0) && cfg.review.maxParallel > 1) {
+    log.info(`Parallel: up to ${cfg.review.maxParallel} seat turns at once`);
+  }
   for (const warning of roleWarnings(cfg)) log.warn(warning);
 }
 
@@ -1792,9 +1797,24 @@ function reportSeatSection(
     const width = Math.max(...rows.map(([label]) => label.length));
     for (const [label, text] of rows) log.info(`    ${label.padEnd(width)}  ${text}`);
   };
+  // How many of those turns may be live at once (#403). It changes no count of
+  // turns, only how many overlap - and with them, how far Codex turns, which
+  // report nothing in flight, can carry the run past budget.maxTokens.
+  // The review's alone: the critique's seats run in sequence until #452.
+  const maxParallel = section === 'review' ? cfg.review.maxParallel : null;
+  const parallel: [string, string] | null =
+    maxParallel === null
+      ? null
+      : [
+          'parallel',
+          maxParallel === 1
+            ? '1 (one after another)'
+            : `${maxParallel} at once (Codex turns can overshoot budget.maxTokens by up to ${maxParallel} turns' spend)`,
+        ];
   if (finders.length > 0) {
     log.info(headings.finders);
-    print(finders.map((f): [string, string] => [`finder ${f.k}`, seat(f.setting, f.focus)]));
+    const rows = finders.map((f): [string, string] => [`finder ${f.k}`, seat(f.setting, f.focus)]);
+    print(verifiers.length === 0 && parallel !== null ? [...rows, parallel] : rows);
   }
   if (verifiers.length === 0) return;
   log.info(headings.verifiers);
@@ -1802,6 +1822,7 @@ function reportSeatSection(
   const n = verifiers.length;
   rows.push(['quorum', quorumText(quorum, n)]);
   rows.push(['unconfirmed P0', unconfirmedP0]);
+  if (parallel !== null) rows.push(parallel);
   print(rows);
 }
 

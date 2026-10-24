@@ -107,3 +107,19 @@ test('under the defaults doctor prints no review block', async () => {
   assert.equal(lines.some((l) => l.includes('review seats')), false);
   assert.equal(lines.some((l) => l.includes('review finders') || l.includes('review verifiers')), false);
 });
+
+test('doctor says how many seat turns may run at once, and what that costs (#403)', async () => {
+  const one = await doctor(targetDir({ verifiers: ['codex', 'codex'] }));
+  assert.match(line(one.lines, 'parallel'), /\s1 \(one after another\)$/);
+  const lines = one.lines;
+  assert.ok(lines.indexOf(line(lines, 'parallel')) > lines.indexOf(line(lines, 'unconfirmed P0')));
+
+  const four = await doctor(targetDir({ finders: ['codex'], maxParallel: 4 }));
+  assert.match(
+    line(four.lines, 'parallel'),
+    /\s4 at once \(Codex turns can overshoot budget\.maxTokens by up to 4 turns' spend\)$/,
+  );
+  // And under the defaults, still nothing.
+  const none = await doctor(targetDir(undefined));
+  assert.equal(none.lines.filter((l) => /^\s+parallel\s/.test(l)).length, 0);
+});
