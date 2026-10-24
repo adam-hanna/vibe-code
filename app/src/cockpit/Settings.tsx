@@ -26,15 +26,21 @@ import { CLI_DEFAULT, loadCliModels, optionsFor, useModels, whyNot } from './mod
 import { backToCommand, convert, gatesPatch, pastedEscapes, readGates, ready, toRow } from './gateform';
 import type { Gate, GateRow } from './gateform';
 import {
+  appendFocus,
   blankRow as blankSeatRow,
+  FOCUS_EXAMPLES,
+  inheritedTimeout,
+  keepQuorumLegal,
+  minutesHint,
   quorumPatch,
+  quorumReading,
   readSeats,
   ready as seatReady,
   seatsPatch,
   toRow as toSeatRow,
   UNCONFIRMED_P0_CHOICES,
 } from './seatform';
-import type { Seat, SeatKind, SeatRow } from './seatform';
+import type { Seat, SeatKind, SeatRow, TimeoutSettings } from './seatform';
 import type { Listing } from './models';
 import { RemoteAccess } from '../remote/RemoteAccess';
 import { SURFACE } from '../surface';
@@ -810,6 +816,7 @@ function SeatList({
   providers,
   models,
   inherited,
+  timeouts,
   busy,
   onSave,
 }: {
@@ -820,6 +827,8 @@ function SeatList({
   models: Readonly<Record<string, Listing>>;
   /** What a blank model means for an agent: its own `model` setting, as configured. */
   inherited: (provider: string) => string | undefined;
+  /** What a blank minutes field takes, per agent: the effective config's two limits (#448). */
+  timeouts: TimeoutSettings;
   busy: boolean;
   onSave: (patch: Record<string, unknown>) => void;
 }) {
@@ -861,113 +870,165 @@ function SeatList({
     if (gone !== undefined && gone.saved !== null) commit(next);
   };
 
+  // Every column is drawn inside the pane's width (#448). The table is
+  // `table-fixed` at the pane's width, with the columns sized by the header,
+  // so a select is as wide as its column and no wider: one long Codex option
+  // made the model box as wide as the option and pushed minutes and remove out
+  // of view, which an auto-layout table allows whatever max width a select
+  // has. The full text stays in the option list. The focus has a row of its
+  // own under its finder's, at the table's width, because squeezed into a
+  // column it showed three characters.
   return (
     <div className={S.block}>
       {rows.length > 0 && (
-        <table className={S.matrix}>
+        <table className={cn(S.matrix, !SURFACE.compactChrome && 'w-full table-fixed [&_select]:w-full [&_select]:min-w-0 [&_select]:max-w-full')}>
           <thead>
             <tr>
-              <th>{noun}</th>
-              <th>agent</th>
-              <th>effort</th>
+              <th className="w-28">{noun}</th>
+              <th className="w-[16%]">agent</th>
+              <th className="w-[17%]">effort</th>
               <th>model</th>
-              <th>minutes</th>
-              {kind === 'finders' && <th>focus</th>}
-              <th />
+              <th className="w-40">minutes</th>
+              <th className="w-24" />
             </tr>
           </thead>
-          <tbody>
-            {rows.map((row, i) => (
-              <tr
+          {rows.map((row, i) => {
+            const label = `${noun} ${String(i + 1)}`;
+            const t = inheritedTimeout(row.provider, timeouts);
+            return (
+              <tbody
                 key={row.key}
-                // Leaving the row is the save, wherever in it focus was.
+                // Leaving the seat is the save, wherever in it focus was - its
+                // focus row included.
                 onBlur={(e) => {
                   if (e.currentTarget.contains(e.relatedTarget as Node | null)) return;
                   commit(latest.current);
                 }}
               >
-                <td>
-                  <code>{`${noun} ${String(i + 1)}`}</code>
-                </td>
-                <td>
-                  <select
-                    aria-label={`${noun} ${String(i + 1)} agent`}
-                    value={row.provider}
-                    disabled={busy}
-                    // A model named for one agent is not the other's, so it goes
-                    // with the agent - the role table's rule.
-                    onChange={(e) => commit(edit(row.key, { provider: e.target.value, model: '' }))}
-                  >
-                    <option value="">— choose an agent —</option>
-                    {providers.map((p) => (
-                      <option key={p} value={p}>
-                        {p}
-                      </option>
-                    ))}
-                  </select>
-                  {!seatReady(row) && <div className={S.hint}>saved once it names an agent</div>}
-                </td>
-                <td data-label="effort">
-                  <select
-                    aria-label={`${noun} ${String(i + 1)} effort`}
-                    value={row.effort}
-                    disabled={busy}
-                    onChange={(e) => commit(edit(row.key, { effort: e.target.value }))}
-                  >
-                    <option value="">— agent default —</option>
-                    {efforts.map((e) => (
-                      <option key={e} value={e}>
-                        {e}
-                      </option>
-                    ))}
-                  </select>
-                </td>
-                <td data-label="model">
-                  <ModelField
-                    id={`${kind}-${row.key}-model`}
-                    value={row.model === '' ? undefined : row.model}
-                    agent={row.provider === '' ? 'agent' : row.provider}
-                    listing={models[row.provider] ?? null}
-                    inherited={inherited(row.provider)}
-                    disabled={busy || row.provider === ''}
-                    onSave={(model) => commit(edit(row.key, { model }))}
-                  />
-                </td>
-                <td data-label="minutes">
-                  <input
-                    aria-label={`${noun} ${String(i + 1)} minutes`}
-                    className={S.num}
-                    value={row.minutes}
-                    placeholder="agent's"
-                    inputMode="numeric"
-                    disabled={busy}
-                    onChange={(e) => edit(row.key, { minutes: e.target.value })}
-                  />
-                </td>
-                {kind === 'finders' && (
-                  <td data-label="focus" className="w-full">
-                    <input
-                      aria-label={`${noun} ${String(i + 1)} focus`}
-                      className={S.text}
-                      value={row.focus}
-                      placeholder="— the shared prompt —"
+                <tr className={cn(kind === 'finders' && 'border-b-0! [&>td]:border-b-0!')}>
+                  <td className="whitespace-nowrap">
+                    <code>{label}</code>
+                  </td>
+                  <td>
+                    <select
+                      aria-label={`${label} agent`}
+                      value={row.provider}
                       disabled={busy}
-                      onChange={(e) => edit(row.key, { focus: e.target.value })}
+                      // A model named for one agent is not the other's, so it goes
+                      // with the agent - the role table's rule.
+                      onChange={(e) => commit(edit(row.key, { provider: e.target.value, model: '' }))}
+                    >
+                      <option value="">— choose an agent —</option>
+                      {providers.map((p) => (
+                        <option key={p} value={p}>
+                          {p}
+                        </option>
+                      ))}
+                    </select>
+                    {!seatReady(row) && <div className={S.hint}>saved once it names an agent</div>}
+                  </td>
+                  <td data-label="effort">
+                    <select
+                      aria-label={`${label} effort`}
+                      value={row.effort}
+                      disabled={busy}
+                      onChange={(e) => commit(edit(row.key, { effort: e.target.value }))}
+                    >
+                      <option value="">— agent default —</option>
+                      {efforts.map((e) => (
+                        <option key={e} value={e}>
+                          {e}
+                        </option>
+                      ))}
+                    </select>
+                  </td>
+                  <td
+                    data-label="model"
+                    // On the phone the cell is a flex item, which grows to its
+                    // select's longest option unless it is held to the row.
+                    className={cn('max-w-full min-w-0 [&>div]:flex-wrap', !SURFACE.compactChrome && '[&_select]:max-w-[28rem]!')}
+                  >
+                    <ModelField
+                      id={`${kind}-${row.key}-model`}
+                      value={row.model === '' ? undefined : row.model}
+                      agent={row.provider === '' ? 'agent' : row.provider}
+                      listing={models[row.provider] ?? null}
+                      inherited={inherited(row.provider)}
+                      disabled={busy || row.provider === ''}
+                      onSave={(model) => commit(edit(row.key, { model }))}
                     />
                   </td>
+                  <td data-label="minutes">
+                    <input
+                      aria-label={`${label} minutes`}
+                      className={cn(S.num, SURFACE.compactChrome ? 'w-36' : 'w-full')}
+                      value={row.minutes}
+                      // The number a blank field takes, read from the config (#448).
+                      placeholder={t.placeholder}
+                      title={t.key === null ? undefined : `blank takes ${t.key}`}
+                      inputMode="numeric"
+                      disabled={busy}
+                      onChange={(e) => edit(row.key, { minutes: e.target.value })}
+                    />
+                  </td>
+                  <td className="text-right">
+                    <Button variant="quiet" size="sm" disabled={busy} onClick={() => remove(row.key)}>
+                      remove
+                    </Button>
+                  </td>
+                </tr>
+                {kind === 'finders' && (
+                  <tr>
+                    <td colSpan={6}>
+                      <div className="flex flex-col gap-2">
+                        <label className={S.factname} htmlFor={`${kind}-${row.key}-focus`}>
+                          {`${label} focus`}
+                        </label>
+                        <textarea
+                          id={`${kind}-${row.key}-focus`}
+                          className={S.text}
+                          rows={2}
+                          value={row.focus}
+                          placeholder="blank: no extra focus"
+                          disabled={busy}
+                          onChange={(e) => edit(row.key, { focus: e.target.value })}
+                        />
+                        {/* What the text does, from `withFocus` in src/prompts.ts (#448). */}
+                        <span className={S.hint}>
+                          Added word for word to this finder&apos;s prompt only, under{' '}
+                          <code>## Focus for this review</code>. Blank: it reviews with the
+                          reviewer&apos;s prompt and nothing more.
+                        </span>
+                        {/* Examples, not a vocabulary: each adds its phrase to the text,
+                            which stays free text (#448). */}
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className={S.hint}>add:</span>
+                          {FOCUS_EXAMPLES.map((phrase) => (
+                            <Button
+                              key={phrase}
+                              variant="secondary"
+                              size="sm"
+                              disabled={busy}
+                              onClick={() => commit(edit(row.key, { focus: appendFocus(latest.current.find((r) => r.key === row.key)?.focus ?? '', phrase) }))}
+                            >
+                              {phrase}
+                            </Button>
+                          ))}
+                        </div>
+                      </div>
+                    </td>
+                  </tr>
                 )}
-                <td>
-                  <Button variant="quiet" size="sm" disabled={busy} onClick={() => remove(row.key)}>
-                    remove
-                  </Button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
+              </tbody>
+            );
+          })}
         </table>
       )}
+      {rows.length > 0 && <span className={S.hint}>{minutesHint(providers, timeouts)}</span>}
       <div className={S.row}>
-        <Button variant="quiet" size="sm" disabled={busy} onClick={() => setRows([...latest.current, blankSeatRow()])}>
+        {/* A bordered button with a plus, so it reads as one (#448). */}
+        <Button variant="secondary" size="sm" disabled={busy} onClick={() => setRows([...latest.current, blankSeatRow()])}>
+          <span aria-hidden="true">+</span>
           {`add a ${noun}`}
         </Button>
       </div>
@@ -975,37 +1036,57 @@ function SeatList({
   );
 }
 
-/** The quorum: blank is a majority (`null`), which the number fields cannot say. */
+/**
+ * The quorum: blank is a majority (`null`), which the number fields cannot say.
+ *
+ * Beside it, what the value comes to as it is typed (#448) - `2 of 3 (a
+ * majority)`, as `vibe doctor` says it - and the two quorums the core refuses,
+ * said here rather than only in the banner after a save. Counted against the
+ * saved verifiers, which are what the core checks it against.
+ */
 function QuorumField({
   value,
+  verifiers,
   disabled,
   onSave,
 }: {
   value: number | null;
+  verifiers: number;
   disabled: boolean;
   onSave: (patch: Record<string, unknown>) => void;
 }) {
   const inForce = value === null ? '' : String(value);
   const { typed, setTyped, focus, left } = useTyped(inForce);
+  const reading = quorumReading(typed, verifiers);
   return (
-    <input
-      id="review-quorum"
-      className={S.num}
-      value={typed}
-      placeholder="majority"
-      inputMode="numeric"
-      disabled={disabled}
-      {...focus}
-      onChange={(e) => setTyped(e.target.value)}
-      onBlur={() => {
-        left();
-        if (typed.trim() !== inForce) onSave(quorumPatch(typed));
-      }}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter') e.currentTarget.blur();
-        if (e.key === 'Escape') setTyped(inForce);
-      }}
-    />
+    <>
+      <input
+        id="review-quorum"
+        className={cn(S.num, 'w-28')}
+        value={typed}
+        placeholder="majority"
+        inputMode="numeric"
+        disabled={disabled}
+        aria-describedby="review-quorum-reading"
+        aria-invalid={reading.problem}
+        {...focus}
+        onChange={(e) => setTyped(e.target.value)}
+        onBlur={() => {
+          left();
+          if (typed.trim() !== inForce) onSave(quorumPatch(typed));
+        }}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') e.currentTarget.blur();
+          if (e.key === 'Escape') setTyped(inForce);
+        }}
+      />
+      <span
+        id="review-quorum-reading"
+        className={reading.problem ? 'rounded-sm bg-alarm px-2 py-0.5 text-body-sm text-primary' : 'text-body-sm text-secondary'}
+      >
+        {reading.text}
+      </span>
+    </>
   );
 }
 
@@ -1491,6 +1572,8 @@ export function Settings({
    * screen is left or pointed at another file, the lifetime `saved` has.
    */
   const [savedFrom, setSavedFrom] = useState<string | null>(null);
+  // Said beside the quorum when removing a verifier put it back to a majority (#448).
+  const [quorumReset, setQuorumReset] = useState<string | null>(null);
   useEffect(() => setSavedFrom(null), [scope, dir]);
   const [busy, setBusy] = useState(false);
   const [refusals, setRefusals] = useState(0);
@@ -1659,7 +1742,7 @@ export function Settings({
     // frame that could not be read does not take remote access or the type
     // scale away with it.
     return (
-      <div className={cn(PANE, 'w-full max-w-5xl gap-5', SURFACE.compactChrome && 'px-4')}>
+      <div className={cn(PANE, 'w-full max-w-[96rem] gap-5', SURFACE.compactChrome && 'px-4')}>
         {empty}
         <ThisWindow
           scale={scale}
@@ -1690,8 +1773,8 @@ export function Settings({
     budget?: Record<string, number | boolean | undefined>;
     git?: Record<string, string | number | boolean | null | undefined>;
     verify?: Record<string, unknown>;
-    claude?: { model?: string };
-    codex?: { model?: string };
+    claude?: { model?: string; planTimeoutMs?: unknown };
+    codex?: { model?: string; timeoutMs?: unknown };
     instructions?: { text?: string };
     prompts?: unknown;
     review?: { finders?: unknown; verifiers?: unknown; quorum?: unknown; unconfirmedP0?: unknown };
@@ -1765,9 +1848,13 @@ export function Settings({
     />
   );
 
+  // The pane was capped at `max-w-5xl` (1024px), so on a wide window the
+  // tables were squeezed beside an empty gutter and clipped (#448). It now
+  // takes the window up to 96rem; the prose is held to its own measure by
+  // `S.note` and `S.why`, so only the tables and rows of controls widen.
   return (
     <Refusals.Provider value={refusals}>
-    <div className={cn(PANE, "w-full max-w-5xl gap-5 [&_code]:font-mono [&_code]:text-mono-sm [&_code]:text-secondary", SURFACE.compactChrome && 'px-4 [&_select]:max-w-full [&_code]:break-words')}>
+    <div className={cn(PANE, "w-full max-w-[96rem] gap-5 [&_code]:font-mono [&_code]:text-mono-sm [&_code]:text-secondary", SURFACE.compactChrome && 'px-4 [&_select]:max-w-full [&_code]:break-words')}>
       {/* **Which file, said here** (#223). Chosen by the door this screen was
           opened from, so the heading and the line under it are what tell the two
           apart — nothing else on the screen looks different. */}
@@ -2819,7 +2906,10 @@ export function Settings({
                       ))}
                     </select>
                   </td>
-                  <td>
+                  {/* A select is as wide as its longest option, and one of Codex's ran this
+                      table past the pane, and on the phone past the screen (#448); the
+                      full text stays in the list. */}
+                  <td className={cn('max-w-full min-w-0', !SURFACE.compactChrome && '[&_select]:max-w-[24rem]')}>
                     {/* **The list this build knows, and `other…` past it.** The
                         first cut was free text, argued from the core's own rule:
                         `RoleSetting.model` is validated only for being a
@@ -2880,10 +2970,14 @@ export function Settings({
         <p className={S.note}>
           Finders are reviewers in addition to the one above, each reviewing every part of the
           change after it without seeing the others&apos; findings: one extra turn per part per
-          finder, every review round. Verifiers vote on each blocking finding that its own test did
-          not reproduce, each seeing only the claim, never who raised it or how the others voted:
-          one extra turn per such finding per verifier. A P1 the vote does not confirm is moved to
-          P2; a vote that cannot tell keeps it blocking.
+          finder, every review round. The reviewer above is already the first finder, and keeps
+          its conversation from round to round (a Codex reviewer, while Codex sessions are kept);
+          every finder here starts fresh each round,
+          which is the main reason to add one, most of all on the other agent. Verifiers vote on
+          each P0 and P1 that its own test did not reproduce, each seeing only the claim, never
+          who raised it or how the others voted: one extra turn per such finding per verifier. A
+          P2 or P3 never reaches the vote. A P1 the vote does not confirm is moved to P2; a vote
+          that cannot tell keeps it blocking.
         </p>
         <h4 className={S.h4}>finders</h4>
         <SeatList
@@ -2893,10 +2987,16 @@ export function Settings({
           providers={frame.providers}
           models={models}
           inherited={inheritedModel}
+          timeouts={effective}
           busy={busy}
           onSave={save}
         />
         <h4 className={S.h4}>verifiers</h4>
+        {/* What reaches the vote, said at the table (#448), as docs/configuration.md#review says it. */}
+        <p className={S.note}>
+          Only P0s and P1s are voted on. One whose own reproducer reproduced blocks without a
+          vote, and a P2 or P3 never reaches it.
+        </p>
         <SeatList
           kind="verifiers"
           seats={readSeats(review.verifiers)}
@@ -2904,8 +3004,16 @@ export function Settings({
           providers={frame.providers}
           models={models}
           inherited={inheritedModel}
+          timeouts={effective}
           busy={busy}
-          onSave={save}
+          onSave={(patch) => {
+            // A remove that leaves the quorum above the verifiers left resets it
+            // in the same save, and says so, rather than being refused (#448).
+            const saved = typeof review.quorum === 'number' ? review.quorum : null;
+            const kept = keepQuorumLegal(patch, saved);
+            setQuorumReset(kept.reset && saved !== null ? `was ${String(saved)}; reset to a majority with that change` : null);
+            save(kept.patch);
+          }}
         />
         <div className={S.row}>
           <label className={S.label} htmlFor="review-quorum">
@@ -2913,12 +3021,17 @@ export function Settings({
           </label>
           <QuorumField
             value={typeof review.quorum === 'number' ? review.quorum : null}
+            verifiers={readSeats(review.verifiers).length}
             disabled={busy}
-            onSave={save}
+            onSave={(patch) => {
+              setQuorumReset(null);
+              save(patch);
+            }}
           />
-          <span className={S.hint}>
-            how many verifiers must say a finding is real. Blank means a majority of the verifiers —
-            more than half of them.
+          {quorumReset !== null && <span className={S.hint}>{quorumReset}</span>}
+          <span className={S.why}>
+            how many verifiers must say a P0 or P1 is real. Blank means a majority of the verifiers —
+            more than half of them. A P2 or P3 is never voted on.
           </span>
         </div>
         <div className={S.block}>
