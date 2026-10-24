@@ -721,7 +721,7 @@ nothing about accuracy: the archive has no record of what the planner did with e
   finder and vote labels into the `critique` phase, and the summary's review lines count only
   `review`-phase seats; `Critique finders:`/`Critique votes:` summary lines; unconfirmed plan
   findings are listed under their own sentence (split by `raisedBy: 'critic'`); doctor's critique
-  block and the pre-run `Critique finders:`/`Critique verifiers:` lines; `describeMcp`'s critique
+  block and the pre-run `Critique finders:`/`Critique verifiers:`/`Critique vote:` lines (the last giving the quorum and `unconfirmedP0`); `describeMcp`'s critique
   rows and `mcpRefusals`' critique grantees; `seatProviders` for the sandbox preflight; and the
   Settings section "who else critiques the plan, and who votes". The window folds the two critique
   frames into the same `finderMerges` and `voteTallies` as the review's, so a critique card carries

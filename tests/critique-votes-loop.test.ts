@@ -230,6 +230,26 @@ test('a not-real that cites nothing resolvable is counted as cannot-tell', async
   assert.match(votes.ballots[0]?.countedReason ?? '', /^its evidence resolved to nothing/);
 });
 
+test("a not-real citing the round's plan artifact resolves, and the prompt names that artifact", async () => {
+  const state = run('vibe-cvotes-plan-cite-');
+  const onPlan = {
+    vote: 'not-real',
+    reason: 'Step 2 of the plan already handles it.',
+    evidence: [{ kind: 'artifact', path: 'plan-0.json', line: null, excerpt: null, ref: null }],
+  };
+  const { prompts } = await drive(
+    state,
+    withCritique({ verifiers: THREE }),
+    critiquing(state, (r) => (r === 0 ? [blocker('weak-claim')] : []), byVerifier(onPlan, onPlan, REAL)),
+  );
+  assert.match(prompts.get('critique-0-vote-1-v1') ?? '', /The plan below is the run artifact `plan-0\.json`/);
+  const [found] = critiqueArtifact(state);
+  const votes = found?.votes as Votes;
+  assert.equal(votes.ballots[0]?.counted, 'not-real', votes.ballots[0]?.countedReason ?? '');
+  assert.equal(votes.outcome, 'unconfirmed');
+  assert.equal(found?.severity, 'P2');
+});
+
 test('a P1 the critic marks deferred reaches the vote as an ordinary P1, and a P2 is never voted on', async () => {
   // `parseFindings` clears `defer` on every P0 and P1 a turn returns, so the
   // vote's `defer: true` exclusion cannot be reached from a turn: this pins

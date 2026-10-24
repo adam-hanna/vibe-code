@@ -1355,6 +1355,13 @@ export function critiqueVotePrompt(
   roles: RoleTable = ROLES,
   /** The repository's `REVIEW.md`, as `votePrompt` takes it (#389). Absent renders nothing. */
   reviewMd?: ReviewStandards | undefined,
+  /**
+   * The run artifact holding the plan being voted on, `plan-<n>.json`, so a
+   * `not-real` that points at the plan's own text can cite something that
+   * resolves. `VOTE_EVIDENCE`'s example, `PLAN.md`, is written only once the
+   * plan loop ends, so during a critique it resolves to nothing.
+   */
+  planArtifact = 'plan-0.json',
 ): string {
   return `You are checking one claimed defect in an implementation plan, before any code is written. Someone critiquing the plan says the defect below exists in it. Decide whether it does.
 
@@ -1373,6 +1380,8 @@ Judge **whether the defect exists in this plan** - not how severe it is, and not
 ## Evidence
 
 ${VOTE_EVIDENCE}
+
+The plan below is the run artifact \`${planArtifact}\`. To cite the plan itself, cite it as an \`artifact\` with the path \`${planArtifact}\`; \`PLAN.md\` is not written until the plan is approved.
 
 ## The claim
 

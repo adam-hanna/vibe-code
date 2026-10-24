@@ -5296,6 +5296,9 @@ async function runCritiqueVotes(
       state.environment,
       roles,
       reviewMd,
+      // The artifact this round's plan was written to, which a `not-real`
+      // pointing at the plan can cite and have resolve.
+      `plan-${state.planRound}.json`,
     );
     const ballots: Ballot[] = [];
     for (const v of verifiers) {

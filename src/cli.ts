@@ -1684,6 +1684,9 @@ export function reportRoles(cfg: Config): void {
   const critiqueVerifiers = readVerifiers(cfg, 'critique');
   if (critiqueVerifiers.length > 0) {
     log.info(`Critique verifiers: ${critiqueVerifiers.map(({ setting }) => spelled(setting)).join(' ')}`);
+    // And the vote's policy, which decides what an unconfirmed plan finding
+    // does - said before the first turn, as doctor says it (#405).
+    log.info(`Critique vote: ${quorumText(cfg.critique.quorum, critiqueVerifiers.length)}, unconfirmed P0 ${cfg.critique.unconfirmedP0}`);
   }
   for (const warning of roleWarnings(cfg)) log.warn(warning);
 }
@@ -1765,6 +1768,11 @@ function reportCritiqueSeats(cfg: Config): void {
   });
 }
 
+/** A quorum over `n` verifiers as doctor prints it: the majority is said as the definition it is. */
+function quorumText(quorum: number | null, n: number): string {
+  return quorum === null ? `${Math.floor(n / 2) + 1} of ${n} (a majority)` : `${quorum} of ${n}`;
+}
+
 /** One section's seats, quorum and unconfirmed P0, under the headings its caller words. */
 function reportSeatSection(
   cfg: Config,
@@ -1792,10 +1800,7 @@ function reportSeatSection(
   log.info(headings.verifiers);
   const rows: [string, string][] = verifiers.map((v): [string, string] => [`verifier ${v.k}`, seat(v.setting)]);
   const n = verifiers.length;
-  rows.push([
-    'quorum',
-    quorum === null ? `${Math.floor(n / 2) + 1} of ${n} (a majority)` : `${quorum} of ${n}`,
-  ]);
+  rows.push(['quorum', quorumText(quorum, n)]);
   rows.push(['unconfirmed P0', unconfirmedP0]);
   print(rows);
 }

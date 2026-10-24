@@ -154,7 +154,16 @@ test("the run's startup names the critique seats, and says nothing without them"
   assert.deepEqual(named(captured(() => reportRoles(seated))), [
     '  Critique finders: claude@opus/high',
     '  Critique verifiers: codex claude',
+    '  Critique vote: 2 of 2 (a majority), unconfirmed P0 block',
   ]);
+  const halting = withCritique({ verifiers: ['codex', 'claude', 'codex'], quorum: 2, unconfirmedP0: 'halt' });
+  assert.deepEqual(
+    named(captured(() => reportRoles(halting))).filter((l) => l.includes('Critique vote')),
+    ['  Critique vote: 2 of 3, unconfirmed P0 halt'],
+  );
+  // Finders alone cast no vote, so there is no policy to state.
+  const findersOnly = withCritique({ finders: ['codex'] });
+  assert.equal(named(captured(() => reportRoles(findersOnly))).some((l) => l.includes('Critique vote')), false);
   assert.deepEqual(named(captured(() => reportRoles(DEFAULTS))), []);
 });
 

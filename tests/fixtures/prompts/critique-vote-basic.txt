@@ -22,6 +22,8 @@ Each citation names one kind of place:
 
 A path must name something inside the repository - or, for `artifact`, inside the run directory. Your citations count if **any one** of them resolves.
 
+The plan below is the run artifact `plan-0.json`. To cite the plan itself, cite it as an `artifact` with the path `plan-0.json`; `PLAN.md` is not written until the plan is approved.
+
 ## The claim
 
 ### The plan edits a function that does not exist
