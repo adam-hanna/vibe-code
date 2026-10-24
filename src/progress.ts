@@ -776,8 +776,16 @@ export interface ProgressOptions {
    * loop's business - `orchestrator.ts` wires this to the budget and to
    * `requestCancel`, so the module that owns money owns the decision and this
    * one stays a measurement.
+   *
+   * **Every live turn's spend, not this turn's alone (#403).** Review seats may
+   * run several at once, and two turns each under what the run has left can be
+   * over it together. So `tokens` is this turn's figure plus the in-flight figure
+   * of every other live turn in the same run, and `labels` names every turn that
+   * was counted, this one first. A Codex turn reports nothing in flight and adds
+   * nothing - a known unknown, never estimated. With one turn live both are
+   * exactly what they were.
    */
-  onSpend?: ((tokens: number) => void) | undefined;
+  onSpend?: ((tokens: number, labels: readonly string[]) => void) | undefined;
   /**
    * How long the child has been silent, reported each beat (#223).
    *
@@ -979,7 +987,16 @@ export function createHeartbeat(
     // take the ceiling with it - those are the two ways this goes wrong and they
     // want opposite placements.
     try {
-      onSpend?.(snapshot.tokens);
+      if (onSpend !== undefined) {
+        let tokens = snapshot.tokens;
+        const labels = [label];
+        for (const [other, turn] of turns) {
+          if (other === id) continue;
+          tokens += turn.tokens() ?? 0;
+          labels.push(turn.label);
+        }
+        onSpend(tokens, labels);
+      }
       // Same placement and the same reason: after the line that explains it, so
       // a stop always has the `quiet Xm` beat sitting above it on screen. Only
       // when the child has written at least once - a turn with no line yet has
@@ -1063,9 +1080,14 @@ export function createHeartbeat(
     // and `state.events` is not a transcript (#133).
     if (snapshot.said.length > 0) {
       const said = snapshot.said.splice(0, snapshot.said.length);
+      // Prefixed with the turn's label only while another turn is live in this
+      // run (#403): then two turns' prose interleaves in the transcript and a
+      // line that does not say whose it is cannot be read. Alone, it is the
+      // line it always was.
+      const shared = contributors(true).length > 1;
       for (const text of said) {
         try {
-          detail(text, { id: 'model_said', data: { label, text } });
+          detail(shared ? `${label}: ${text}` : text, { id: 'model_said', data: { label, text } });
         } catch {
           // Same rule as the parse above: narration must never end a turn.
         }
@@ -1268,7 +1290,7 @@ export function progressOptions(
     // enforces `maxTokens` between turns and cannot stop the one in flight: an
     // implement turn ran to 8.8M tokens under a 25M ceiling and the run never
     // got to notice, because the turn never returned to be charged.
-    onSpend: (tokens) => guardTurnSpend(state, cfg, label, tokens),
+    onSpend: (tokens, labels) => guardTurnSpend(state, cfg, label, tokens, labels),
     // The other ceiling on a turn in flight, and the one the turn ceiling cannot
     // cover: `codex.timeoutMs` bounds how long a turn may take, this bounds how
     // long it may say nothing while taking it.
@@ -1296,18 +1318,38 @@ export function progressOptions(
  *   only - never `git`, never the verification gate, which is the user's own
  *   command. That rule is already there and this inherits it.
  * - **The projection is the run's own arithmetic, not a new one.** What the run
- *   has already spent plus what this turn has spent so far, against the same
- *   `maxTokens` `applyCharge` reads. No new number is introduced, which is why
+ *   has already spent plus what every live turn of it has spent so far - this
+ *   one, and since #403 any review seat running beside it - against the same
+ *   `maxTokens` `applyCharge` reads. A Codex turn counts as zero in flight, so
+ *   several Codex turns at once can pass the ceiling by what they spend before
+ *   they are charged; that is stated, not estimated. No new number is introduced, which is why
  *   there is no threshold to justify: the ceiling is the user's.
  *
  * Disabled with the ceiling: `maxTokens: 0` means no limit, and it means no
  * limit here too.
  */
-function guardTurnSpend(state: RunState, cfg: Config, label: string, tokens: number): void {
+function guardTurnSpend(
+  state: RunState,
+  cfg: Config,
+  label: string,
+  tokens: number,
+  labels: readonly string[] = [label],
+): void {
   const ceiling = cfg.budget.maxTokens;
   if (ceiling <= 0) return;
   const spent = state.tokensUsed + tokens;
   if (spent < ceiling) return;
+  // Several live turns are named as several, with the figure they make together
+  // (#403): a reason naming one turn would blame it for spend that was not its.
+  if (labels.length > 1) {
+    requestCancel(
+      `the in-flight spend of ${labels.length} live turns (${labels.join(', ')}) took this run to ` +
+        `${fmtTokens(spent)} tokens, at or past the ceiling of ${fmtTokens(ceiling)} in ` +
+        'budget.maxTokens. Codex turns report nothing in flight and are counted at zero. The turns ' +
+        'were stopped mid-flight; their spend is charged and the run can be resumed with a higher ceiling.',
+    );
+    return;
+  }
   // Named with both figures, because "over budget" without them is the sentence
   // nobody can check. `requestCancel` is idempotent, so a second beat crossing
   // the same line does not stack a second reason.

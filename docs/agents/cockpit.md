@@ -73,7 +73,9 @@ Two rules the cockpit inherits from the design and must not quietly drop:
 - **While a gate is held there is no live card, and the turn before it is still drawn.** An
   `ask` closes the running turn, exactly as `phase_started`, `turn_started`, `gate_stopped`
   and `result` do — a gate holds *between* things, so nothing is executing while one is
-  outstanding. Leaving it open was not cosmetic: a run held overnight drew `5h40m · last
+  outstanding. (Since #403 a `turn_started` that carries a `label` closes only unlabelled turns,
+  so review seats running at once stay live side by side, each drawn live; `ask`, a phase and a
+  `result` still close every one. See `core-and-window.md`.) Leaving it open was not cosmetic: a run held overnight drew `5h40m · last
   activity 5h39m ago` on a turn that took a minute, two inches above a footer correctly
   saying the loop was waiting for a human. The card said kill it and the footer said press
   continue. The turn stays on screen with its measurements — that is what a person is

@@ -88,6 +88,65 @@ test('the run total counts, not just this turn', () => {
   assert.equal(beat(0, 200_000, 5_000_000), null);
 });
 
+/**
+ * Two Claude turns live in one run, each spending `each`, the second beating
+ * after the first: what the guard decided after each beat (#403).
+ */
+function twoLive(runTokens: number, each: number, ceiling: number): { first: string | null; second: string | null } {
+  clearCancel();
+  const run = state(runTokens);
+  const cfg = config(ceiling);
+  const start = (label: string) => {
+    const options = progressOptions(run, cfg, label, 'opus', 'claude');
+    assert.ok(options, 'progress was disabled, so this case proves nothing');
+    const heartbeat = createHeartbeat({
+      ...options,
+      parse: parser(each),
+      unit: 'tool use',
+      provider: 'claude',
+      emit: () => undefined,
+      timers: idle,
+      now: () => 0,
+    });
+    heartbeat.begin();
+    return heartbeat;
+  };
+  const a = start('vote-0-1-v1');
+  const b = start('vote-0-1-v2');
+  try {
+    a.onLine('{}');
+    const first = cancelRequested();
+    b.onLine('{}');
+    return { first, second: cancelRequested() };
+  } finally {
+    a.stop();
+    b.stop();
+    clearCancel();
+  }
+}
+
+test('two live turns are stopped on what they spend together, though neither alone is over (#403)', () => {
+  // 1M spent, a 5M ceiling, two turns at 3M each: either alone leaves the run at
+  // 4M, both together take it to 7M.
+  const { first, second } = twoLive(1_000_000, 3_000_000, 5_000_000);
+  assert.equal(first, null, 'the first beat, with the second turn at nothing yet, was stopped');
+  assert.ok(second !== null, 'two turns together spent past the ceiling and nothing stopped them');
+  assert.match(second, /in-flight spend of 2 live turns \(vote-0-1-v2, vote-0-1-v1\)/);
+  assert.match(second, /7\.0M/);
+  assert.match(second, /5\.0M/);
+  assert.match(second, /budget\.maxTokens/);
+  assert.match(second, /Codex turns report nothing in flight and are counted at zero/);
+  // And two that stay under it together are left alone.
+  assert.deepEqual(twoLive(1_000_000, 1_000_000, 5_000_000), { first: null, second: null });
+});
+
+test('one live turn is stopped with the sentence it always had', () => {
+  const why = beat(1_000_000, 9_000_000, 5_000_000);
+  assert.ok(why !== null);
+  assert.match(why, /^the implement turn took this run to /);
+  assert.doesNotMatch(why, /live turns/);
+});
+
 test('a turn under the ceiling is left alone', () => {
   assert.equal(beat(1_000_000, 1_000_000, 5_000_000), null);
 });

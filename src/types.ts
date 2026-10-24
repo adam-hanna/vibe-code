@@ -881,6 +881,11 @@ export interface ReviewConfig {
   /** How many `real` votes confirm a finding; null is a majority, floor(n/2)+1. */
   quorum: number | null;
   unconfirmedP0: UnconfirmedP0;
+  /**
+   * How many finder or verifier turns may be live at once in a round (#403).
+   * `1` runs them one after another, which is the order of every run before it.
+   */
+  maxParallel: number;
 }
 
 /** Block name to replacement text. Open-ended keys, checked against the real list. */
@@ -1666,9 +1671,15 @@ export interface TestChanges {
  * One turn's observed-but-uncharged spend. See `RunState.inFlight`.
  *
  * Keyed by `label` plus `provider` wherever it is looked up, which is unique
- * among live turns: the only concurrency is `withConcurrentCompaction`, and it
+ * among live turns. There are two sources of concurrency. `withConcurrentCompaction`
  * pairs Claude's `compact` with a Codex critique or review turn, so the pair
- * differs on both axes.
+ * differs on both axes. A review seat group (`runSeatGroup`, #403) runs up to
+ * `review.maxParallel` finder or verifier turns at once, and their labels -
+ * `review-<r>-f<k>[-part<i>]` and `vote-<r>-<n>-v<k>` - are unique within a
+ * round, so the key stays unique there too. `saveState` stays safe with several
+ * live: it is synchronous and atomic, and it writes the one in-memory
+ * `RunState` of the one run this process holds, so no write can interleave
+ * inside another or lose a charge.
  *
  * `tokens` absent means the provider reports no figure while a turn is in
  * flight, which is true of Codex: its stream carries usage only on

@@ -144,6 +144,25 @@ export interface Turn {
   beat: Beat | null;
   /** The most recent work reading, or null before one has arrived. */
   work: Work | null;
+  /**
+   * The turn's own label, when its `turn_started` named one (#403).
+   *
+   * Only review seats that may overlap - `review.maxParallel` above 1 - name
+   * one, and only a labelled turn can be one of several live at once: it is
+   * what a heartbeat, a work reading and a `turn_finished` are matched by.
+   * Absent on every other turn and on every run from before #403, which are
+   * folded exactly as they always were.
+   */
+  label?: string;
+  /** Which seat a labelled turn is, as its frame said. Absent when it said none. */
+  seat?: TurnSeat;
+}
+
+/** A finder's or a verifier's number, and the finding a verifier votes on. */
+export interface TurnSeat {
+  finder?: number;
+  verifier?: number;
+  finding?: string;
 }
 
 export interface PhaseGroup {
@@ -793,8 +812,22 @@ export interface Run {
    * derived from not having one would read as a spotless plan.
    */
   plannedOnly: { carried: number } | null;
-  /** The turn with no `endedAt`, if any. */
+  /**
+   * The newest turn with no `endedAt`, if any - the last of `live`.
+   *
+   * Every reader that asks "is something running, and what" reads this, and
+   * keeps the answer it always got: one turn runs at a time except while review
+   * seats overlap (#403), and then any one of them is a true answer to that
+   * question. A reader that has to show each of them reads `live`.
+   */
   running: Turn | null;
+  /**
+   * Every turn with no `endedAt`, oldest first (#403).
+   *
+   * At most one entry, except while labelled review seats overlap. Set only
+   * together with `running`, through `withLive`, so the two cannot disagree.
+   */
+  live: readonly Turn[];
   gate: Gate | null;
   /**
    * The last boundary that held, or null before any has (#223).
@@ -970,6 +1003,7 @@ export function emptyRun(): Run {
     artifacts: [],
     plannedOnly: null,
     running: null,
+    live: [],
     gate: null,
     lastGate: null,
     decidedFrom: null,
@@ -1540,20 +1574,67 @@ export function hostLost(run: Run, at: number, why: string): Run {
   };
 }
 
-/** Close the running turn, if there is one. */
-function endRunning(run: Run, at: number): Run {
-  if (run.running === null) return run;
-  const id = run.running.id;
+/** `live` and `running` together, so the newest live turn is always `running`. */
+function withLive(run: Run, live: readonly Turn[]): Run {
+  return { ...run, live, running: live[live.length - 1] ?? null };
+}
+
+/** Close the live turns `closes` picks, stamping each with `at`. */
+function endLive(run: Run, at: number, closes: (t: Turn) => boolean): Run {
+  const ending = new Set(run.live.filter(closes).map((t) => t.id));
+  if (ending.size === 0) return run;
   return {
-    ...run,
-    running: null,
+    ...withLive(run, run.live.filter((t) => !ending.has(t.id))),
     cycles: run.cycles.map((cycle) => ({
       ...cycle,
       phases: cycle.phases.map((phase) => ({
         ...phase,
-        turns: phase.turns.map((t) => (t.id === id ? { ...t, endedAt: at } : t)),
+        turns: phase.turns.map((t) => (ending.has(t.id) ? { ...t, endedAt: at } : t)),
       })),
     })),
+  };
+}
+
+/** Close every running turn, if there is any. */
+function endRunning(run: Run, at: number): Run {
+  return endLive(run, at, () => true);
+}
+
+/**
+ * Apply `patch` to the live turn a frame is about, wherever it is drawn.
+ *
+ * **Which turn is the frame's own label's, or - on a run whose running turn
+ * names none - the running turn**, which is how every frame was attributed
+ * before #403 and still is for every turn that cannot overlap. A labelled turn
+ * is matched by label only: a frame naming no live turn, or naming none at all
+ * while labelled turns run, is dropped, because a measurement attributed to a
+ * guess is a wrong measurement on screen.
+ */
+function patchLive(run: Run, label: string | null, patch: (t: Turn) => Turn): Run {
+  const running = run.running;
+  if (running === null) return run;
+  const target = running.label === undefined ? running : run.live.find((t) => label !== null && t.label === label);
+  if (target === undefined) return run;
+  const id = target.id;
+  const apply = (t: Turn): Turn => (t.id === id ? patch(t) : t);
+  return {
+    ...withLive(run, run.live.map(apply)),
+    cycles: run.cycles.map((cycle) => ({
+      ...cycle,
+      phases: cycle.phases.map((p) => ({ ...p, turns: p.turns.map(apply) })),
+    })),
+  };
+}
+
+function readSeat(data: Record<string, unknown>): TurnSeat | null {
+  const finder = num(data['finder']);
+  const verifier = num(data['verifier']);
+  const finding = str(data['finding']);
+  if (finder === null && verifier === null && finding === null) return null;
+  return {
+    ...(finder === null ? {} : { finder }),
+    ...(verifier === null ? {} : { verifier }),
+    ...(finding === null ? {} : { finding }),
   };
 }
 
@@ -1649,9 +1730,11 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
         // column rather than guessed into one. It is still in the output pane,
         // which is where an unrecognised thing belongs.
         if (kind === undefined) return next;
-        // A new phase closes whatever turn was still open. The loop does not
-        // narrate a turn ending, so the next thing starting is the signal - and
-        // it is a true one, because turns within a run never overlap.
+        // A new phase closes whatever turn was still open - every live turn,
+        // labelled review seats included (#403). The loop narrates no end for an
+        // unlabelled turn, so the next thing starting is the signal; and seats
+        // that overlap all belong to one phase, so a new phase means none of
+        // them is running any more.
         const closed = endRunning(next, at);
         const round = num(data['round']);
         // Kept when a later phase carries none, rather than cleared: the base is
@@ -1683,6 +1766,13 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
         const role = str(data['role']);
         const kind = str(data['kind']);
         if (role === null || kind === null) return next;
+        // A label is what lets this turn run beside another (#403). Without one,
+        // the start of a turn is the end of whatever was running, as it always
+        // was. With one, it ends only turns that cannot overlap - those with no
+        // label, such as the reviewer before its finders - and a stale turn under
+        // its own label; every other labelled seat keeps running.
+        const label = str(data['label']);
+        const seat = label === null ? null : readSeat(data);
         const turn: Turn = {
           id: id(),
           role,
@@ -1692,33 +1782,38 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
           endedAt: null,
           beat: null,
           work: null,
+          ...(label === null ? {} : { label }),
+          ...(seat === null ? {} : { seat }),
         };
-        const closed = endRunning(next, at);
+        const closed =
+          label === null
+            ? endRunning(next, at)
+            : endLive(next, at, (t) => t.label === undefined || t.label === label);
         return {
-          ...closed,
-          running: turn,
+          ...withLive(closed, [...closed.live, turn]),
           cycles: mapLastPhase(closed.cycles, (p) => ({ ...p, turns: [...p.turns, turn] })),
         };
+      }
+
+      // The end of one labelled turn, said by the loop because several can be
+      // running at once and no next start can stand in for it (#403). A label
+      // no live turn has is ignored rather than closing a guess.
+      case 'turn_finished': {
+        const label = str(data['label']);
+        if (label === null) return next;
+        return endLive(next, at, (t) => t.label === label);
       }
 
       case 'heartbeat': {
         const beat = readBeat(data, at);
         // A heartbeat with no turn open is dropped from the column. It cannot be
         // attributed, and a measurement that cannot be attributed is not recorded.
-        if (beat === null || next.running === null) return next;
+        // Neither can one whose label names no live seat (#403): see `patchLive`.
+        if (beat === null) return next;
         // Re-anchored to the loop's own measurement. See the header: our clock
         // ticks between beats, the loop's clock wins whenever it speaks.
-        const turnId = next.running.id;
         const startedAt = at - beat.elapsedMs;
-        const patch = (t: Turn): Turn => (t.id === turnId ? { ...t, beat, startedAt } : t);
-        return {
-          ...next,
-          running: patch(next.running),
-          cycles: next.cycles.map((cycle) => ({
-            ...cycle,
-            phases: cycle.phases.map((p) => ({ ...p, turns: p.turns.map(patch) })),
-          })),
-        };
+        return patchLive(next, str(data['label']), (t) => ({ ...t, beat, startedAt }));
       }
 
       /**
@@ -1738,17 +1833,8 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
         // Same rule the heartbeat follows, for the same reason: a reading with
         // no turn open cannot be attributed, and a measurement that cannot be
         // attributed is not recorded.
-        if (work === null || next.running === null) return next;
-        const turnId = next.running.id;
-        const patch = (t: Turn): Turn => (t.id === turnId ? { ...t, work } : t);
-        return {
-          ...next,
-          running: patch(next.running),
-          cycles: next.cycles.map((cycle) => ({
-            ...cycle,
-            phases: cycle.phases.map((p) => ({ ...p, turns: p.turns.map(patch) })),
-          })),
-        };
+        if (work === null) return next;
+        return patchLive(next, str(data['label']), (t) => ({ ...t, work }));
       }
 
       case 'preflight_started':
