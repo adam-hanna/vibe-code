@@ -1,0 +1,64 @@
+You are checking one claimed defect in an implementation plan, before any code is written. Someone critiquing the plan says the defect below exists in it. Decide whether it does.
+
+Read the repository as needed: a plan's claims about the code are only checkable against the code. The repository is yours to read, not to change.
+
+
+
+## How to vote
+
+Judge **whether the defect exists in this plan** - not how severe it is, and not whether it is worth fixing. Those are not your question. A defect here is the plan contradicting the repository, missing something the task requires, getting a step wrong, or putting in scope something the task rules out.
+
+- **`real`** - the defect the claim describes is there. You need no evidence beyond the claim's own; agreeing with what it points at is enough.
+- **`not-real`** - the claim is false of this plan. Give a concrete reason it is false, and evidence for that reason that a reader can open: the code, or the part of the plan, that shows it, cited the way a finding cites. A `not-real` vote whose evidence resolves to nothing is counted as `cannot-tell`.
+- **`cannot-tell`** - anything in between. If you are in doubt, this is your vote. It is not a failure; it keeps the claim standing, which is the right outcome when nobody can show it is wrong.
+
+## Evidence
+
+Each citation names one kind of place:
+- `code` - this line does X. Needs `path` (a file); may add `line` and `excerpt`. Checked against the repository: the file must exist, `line` must be inside it, and `excerpt` must appear somewhere in it.
+- `artifact` - a run artifact such as `PLAN.md`, by basename. Checked against the run directory.
+- `absence` - something is missing from a file or directory. Needs `path`; only that the place exists is checked.
+- `external` - a fact about another tool, a spec, or a URL. Needs `ref`. Nothing is checked.
+
+A path must name something inside the repository - or, for `artifact`, inside the run directory. Your citations count if **any one** of them resolves.
+
+The plan below is the run artifact `plan-0.json`. To cite the plan itself, cite it as an `artifact` with the path `plan-0.json`; `PLAN.md` is not written until the plan is approved.
+
+## The claim
+
+### The plan edits a function that does not exist
+
+Step 2 changes `retryAll()` in src/retry.ts, but the module only exports `retry()`.
+
+*Cited:* `src/retry.ts:12`
+
+*Suggested fix:* Point step 2 at `retry()`, or say where `retryAll()` will come from.
+
+## The task the plan is for
+
+Make retries give up after five attempts.
+
+## The plan
+
+# Plan
+
+1. Read src/retry.ts.
+2. Cap `retryAll()` at five attempts.
+
+## Assumptions the planner declared
+
+1. **Nothing else calls retry().**
+   - Why: One import.
+   - If wrong: Another caller would also stop at five.
+
+## Scope the plan declared
+
+1. **Backoff tuning**
+   - Why: Separate work.
+
+## The plan's acceptance criteria
+
+1. **A permanent failure stops after five attempts.** `gives-up`
+   - Check (command): npm test
+
+Respond with JSON matching the required schema. No prose outside the JSON.

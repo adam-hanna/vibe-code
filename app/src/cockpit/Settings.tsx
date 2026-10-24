@@ -34,7 +34,7 @@ import {
   toRow as toSeatRow,
   UNCONFIRMED_P0_CHOICES,
 } from './seatform';
-import type { Seat, SeatKind, SeatRow } from './seatform';
+import type { Seat, SeatKind, SeatRow, SeatSection } from './seatform';
 import type { Listing } from './models';
 import { RemoteAccess } from '../remote/RemoteAccess';
 import { SURFACE } from '../surface';
@@ -805,6 +805,7 @@ function ModelField({
  */
 function SeatList({
   kind,
+  section = 'review',
   seats,
   efforts,
   providers,
@@ -814,6 +815,8 @@ function SeatList({
   onSave,
 }: {
   kind: SeatKind;
+  /** The section the list is saved under (#405); the review's unless said. */
+  section?: SeatSection;
   seats: Seat[];
   efforts: readonly string[];
   providers: readonly string[];
@@ -841,10 +844,12 @@ function SeatList({
     // `savedJson` stands in for `seats`, whose identity changes every render.
   }, [savedJson, refusals]);
 
-  const noun = kind === 'finders' ? 'finder' : 'verifier';
+  // A critique row says so (#405), so its controls' labels never collide with
+  // the review's on the same page.
+  const noun = `${section === 'critique' ? 'critique ' : ''}${kind === 'finders' ? 'finder' : 'verifier'}`;
   const commit = (next: readonly SeatRow[]): void => {
-    const patch = seatsPatch(kind, next);
-    const sent = (patch['review'] as Record<string, unknown>)[kind];
+    const patch = seatsPatch(kind, next, section);
+    const sent = (patch[section] as Record<string, unknown>)[kind];
     // Leaving a row without changing it is not an edit.
     if (JSON.stringify(sent) === JSON.stringify(seats)) return;
     onSave(patch);
@@ -977,10 +982,15 @@ function SeatList({
 
 /** The quorum: blank is a majority (`null`), which the number fields cannot say. */
 function QuorumField({
+  id = 'review-quorum',
+  section = 'review',
   value,
   disabled,
   onSave,
 }: {
+  /** The input's id, for its label: one per section on the page (#405). */
+  id?: string;
+  section?: SeatSection;
   value: number | null;
   disabled: boolean;
   onSave: (patch: Record<string, unknown>) => void;
@@ -989,7 +999,7 @@ function QuorumField({
   const { typed, setTyped, focus, left } = useTyped(inForce);
   return (
     <input
-      id="review-quorum"
+      id={id}
       className={S.num}
       value={typed}
       placeholder="majority"
@@ -999,7 +1009,7 @@ function QuorumField({
       onChange={(e) => setTyped(e.target.value)}
       onBlur={() => {
         left();
-        if (typed.trim() !== inForce) onSave(quorumPatch(typed));
+        if (typed.trim() !== inForce) onSave(quorumPatch(typed, section));
       }}
       onKeyDown={(e) => {
         if (e.key === 'Enter') e.currentTarget.blur();
@@ -1695,6 +1705,7 @@ export function Settings({
     instructions?: { text?: string };
     prompts?: unknown;
     review?: { finders?: unknown; verifiers?: unknown; quorum?: unknown; unconfirmedP0?: unknown; maxParallel?: unknown };
+    critique?: { finders?: unknown; verifiers?: unknown; quorum?: unknown; unconfirmedP0?: unknown };
   };
   const gates = effective.gates ?? {};
   const loop = effective.loop ?? {};
@@ -1706,6 +1717,7 @@ export function Settings({
   const verify = effective.verify ?? {};
   const roles = effective.roles ?? {};
   const review = effective.review ?? {};
+  const critique = effective.critique ?? {};
   // What a seat's blank model means: its agent's own setting, as the role rows read it.
   const inheritedModel = (provider: string): string | undefined =>
     provider === 'claude' || provider === 'codex' ? effective[provider]?.model : undefined;
@@ -2961,6 +2973,82 @@ export function Settings({
         {scope === 'project' && (
           <ReviewMdNote dir={dir} baseRef={typeof git['baseRef'] === 'string' ? git['baseRef'] : null} />
         )}
+      </section>
+
+      {/* ---- more critique seats, and a vote (#405) ---------------------- */}
+      <section className={S.block}>
+        <h3 className={S.h}>who else critiques the plan, and who votes</h3>
+        {/* The review's panel, for the plan critique, saved under `critique`.
+            What each costs is said in turns; nothing says how accurate either
+            is, because nothing has measured it. */}
+        <p className={S.note}>
+          Finders are critics in addition to the one above, each critiquing every version of the
+          plan after it without seeing the others&apos; findings: one extra turn per plan round per
+          finder. A finder starts fresh every round and does not have earlier rounds&apos; findings.
+          Verifiers vote on each blocking plan finding that was not deferred, each seeing only the
+          claim, never who raised it or how the others voted: one extra turn per such finding per
+          verifier, every plan round. A P1 the vote does not confirm is moved to P2; a vote that
+          cannot tell keeps it blocking.
+        </p>
+        <h4 className={S.h4}>finders</h4>
+        <SeatList
+          kind="finders"
+          section="critique"
+          seats={readSeats(critique.finders)}
+          efforts={frame.efforts}
+          providers={frame.providers}
+          models={models}
+          inherited={inheritedModel}
+          busy={busy}
+          onSave={save}
+        />
+        <h4 className={S.h4}>verifiers</h4>
+        <SeatList
+          kind="verifiers"
+          section="critique"
+          seats={readSeats(critique.verifiers)}
+          efforts={frame.efforts}
+          providers={frame.providers}
+          models={models}
+          inherited={inheritedModel}
+          busy={busy}
+          onSave={save}
+        />
+        <div className={S.row}>
+          <label className={S.label} htmlFor="critique-quorum">
+            quorum {source('critique', 'quorum')}
+          </label>
+          <QuorumField
+            id="critique-quorum"
+            section="critique"
+            value={typeof critique.quorum === 'number' ? critique.quorum : null}
+            disabled={busy}
+            onSave={save}
+          />
+          <span className={S.hint}>
+            how many verifiers must say a plan finding is real. Blank means a majority of the
+            verifiers — more than half of them.
+          </span>
+        </div>
+        <div className={S.block}>
+          <span className={S.label}>
+            a P0 the vote does not confirm {source('critique', 'unconfirmedP0')}
+          </span>
+          {UNCONFIRMED_P0_CHOICES.map((choice) => (
+            <label key={choice.value} className={cn(S.radio, 'max-w-none')}>
+              <input
+                type="radio"
+                name="critique-unconfirmed-p0"
+                checked={critique.unconfirmedP0 === choice.value}
+                disabled={busy}
+                onChange={() => save({ critique: { unconfirmedP0: choice.value } })}
+              />
+              <span>
+                <code>{choice.value}</code> — {choice.meaning}
+              </span>
+            </label>
+          ))}
+        </div>
       </section>
 
       {/* ---- what every turn is told ------------------------------------- */}

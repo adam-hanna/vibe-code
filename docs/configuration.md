@@ -130,6 +130,46 @@ Every finder and every verifier runs as a fresh, read-only turn. It never resume
 
 `review` may be set in the settings for all projects and in a project's `vibe.config.json`. The project wins key by key, and a list is replaced whole: a project that names `finders` replaces the global file's finders and keeps its `quorum`.
 
+## `critique`
+
+What it is for: the same panel as [`review`](#review), for the plan critique (#405). More finders, which critique each version of the plan independently of each other, and verifiers, which vote on each blocking plan finding before it can block. It is a section of its own so the plan can have a different panel from the diff, or none. With both lists empty, which is the default, a plan critique is exactly what it was without this section. `vibe doctor` lists your critique finders and verifiers, and the line printed before the first turn names them.
+
+**What a finder does.** `roles.critic` critiques the plan first, exactly as it does with no finders, and keeps its own settings and its conversation (under `codex.persistSession`, the thread it shares with the answerer). Then each finder, in order, critiques the same plan with the same prompt the critic gets that round. A plan is never split, so a finder takes one turn per plan round, labelled `critique-<round>-f<k>`, where `f1` is `critique.finders[0]`. A finder never sees what another finder found. A finder that names `focus` gets one extra section at the end of its prompt holding that text.
+
+**The critic remembers earlier rounds; the other finders do not.** A finder starts fresh every round, so from the second plan round on it is told it does not have the earlier rounds' findings, and to raise every defect it sees, including one that may have been raised before. This is the same difference the review has between its reviewer and its finders, and whether it should stay is the same open question (#435).
+
+**Merging and failures** work as the review's do: two findings are one defect when they cite the same code location or their titles say the same thing, a renamed id becomes `<id>-f<k>`, and every finding in `plan-critique-<n>.json` carries `foundBy`, naming `roles.critic` and `critique.finders[i]`. A finder whose turn fails, other than by a stop or a ceiling, is recorded as `critique_finder_failed` and contributes nothing, and the round says how many finders reported.
+
+**What gets a vote.** After the merge, every P0 and P1 goes to every verifier, one at a time, except a finding marked deferred and anything a check already moved to P2. The critique has no reproducers. P2 and P3 are never voted on.
+
+**What a verifier sees.** The finding's title, detail, citations and suggested fix; the plan, its assumptions, its out-of-scope list and its acceptance criteria; the task; the repository's `REVIEW.md`; and the repository, to read. It never sees which seat raised the finding or how many did, how any other verifier voted, or the finding's id or severity. It answers `real`, `not-real` or `cannot-tell` to one question: does this defect exist in this plan? That covers the plan contradicting the code, missing something the task requires, getting a step wrong, or taking on what the task rules out; it is not asked how severe the defect is or whether it is worth fixing. A `not-real` has to cite something that resolves, as in the review; the prompt names the round's `plan-<n>.json` as the artifact to cite for the plan's own text. Each turn is a fresh, read-only conversation labelled `critique-<round>-vote-<n>-v<k>`, where `<n>` is the finding's place in the merged report and `v1` is `critique.verifiers[0]`.
+
+**The outcomes** are the review's three. A confirmed finding keeps its severity; an undecided one keeps blocking; an unconfirmed P1 is moved to P2 with the tally as the reason. With `loop.fixNonBlocking` on it then goes to the implementer with the plan's other non-blocking findings, and either way it is listed in FOLLOW-UPS.md as unconfirmed by vote. A plan revision shows it as non-blocking, with its tally. An unconfirmed P0 does what `critique.unconfirmedP0` says; under `"halt"` the round's `plan-critique-<n>.json` is written with the P0 unchanged and the run stops for input (exit code 2), with every vote in NEEDS-INPUT.md. Leave it alone and resume, and the plan is revised with it still blocking; demote it under *Change a severity* and resume, and the plan is approved without another critique if the gate now passes. A resume never votes on that round again.
+
+**Every round votes afresh.** A finding raised again in a later round, under the same id, is voted on again by fresh verifiers that know nothing of the earlier tally. The plan loop's guards - the gate, `loop.p1Tolerance`, `loop.stallAfter`, the repeat check and `loop.maxPlanRounds` - all read the findings after the vote, so a P1 the vote moved does not count as blocking. Finder and verifier turns are not plan rounds: `loop.maxPlanRounds` still counts critiques.
+
+**What it costs.** One extra turn per plan round per finder, and one turn per voted finding per verifier, every plan round, all of it inside `budget.maxTokens`. There is no separate ceiling. The run summary's `Critique finders:` and `Critique votes:` lines say what each cost in turns and tokens.
+
+```json
+{
+  "critique": {
+    "finders": [{ "provider": "claude", "focus": "whether the plan matches the brief" }],
+    "verifiers": ["codex", "claude", "codex"],
+    "quorum": null,
+    "unconfirmedP0": "block"
+  }
+}
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `critique.finders` | `[]` | Finders **in addition to** `roles.critic`, which stays the first finder and keeps its own settings and its conversation. Every finder here starts fresh each round and does not have earlier rounds' findings (see [above](#critique)). Entries are written as `review.finders` entries are, `focus` included. |
+| `critique.verifiers` | `[]` | The seats that vote on each blocking plan finding. Entries take exactly a role's keys. A `focus` on a verifier is refused as an unknown key. |
+| `critique.quorum` | `null` | How many `real` votes confirm a finding. `null` means a majority of the verifiers, `floor(n/2)+1`. A whole number must be at least 1 and at most the number of verifiers, and it is refused when there are no verifiers. |
+| `critique.unconfirmedP0` | `"block"` | What a P0 that the vote did not confirm does. `"block"` records the votes and it still blocks. `"halt"` stops the run and asks you, showing every vote. `"demote"` moves it to P2, as an unconfirmed P1 is moved. |
+
+Validation, error wording and layering are the review's, with `critique.` in place of `review.`: for example `critique.verifiers[0] has unknown key "focus"`, and a project that names `finders` replaces the global file's critique finders whole.
+
 ## `gates`
 
 `gates` decides where the loop hands control back to you. Each boundary takes one of three modes:

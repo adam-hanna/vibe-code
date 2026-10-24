@@ -584,13 +584,27 @@ function specFor(role: Role, setting: RoleSetting, slot: SlotName): RoleSpec {
  * the heartbeat - then follows the seat with no code of its own. With no
  * `mcpServers` the seat reaches none (#138), as any role that names none does.
  */
-export function seatTable(roles: RoleTable, seat: RoleSetting, schema?: object): RoleTable {
-  const spec = specFor('reviewer', seat, seatSlot(seat.provider));
+export function seatTable(
+  roles: RoleTable,
+  seat: RoleSetting,
+  schema?: object,
+  /**
+   * The role whose row the seat copies (#405): the reviewer's for a review seat,
+   * the critic's for a critique seat - the same job either way, on the seat's
+   * own agent and a fresh conversation. Defaults to the reviewer, so every
+   * review caller is unchanged.
+   */
+  role: 'reviewer' | 'critic' = 'reviewer',
+): RoleTable {
+  const spec = specFor(role, seat, seatSlot(seat.provider));
   // A verifier (#388 Part C) answers a vote, not a review, and both providers
   // take the response schema off the spec - so the seat carries the schema its
-  // job asks for. A finder passes none and keeps the reviewer's.
-  return { ...roles, reviewer: schema === undefined ? spec : { ...spec, schema } };
+  // job asks for. A finder passes none and keeps the role's.
+  return { ...roles, [role]: schema === undefined ? spec : { ...spec, schema } };
 }
+
+/** Which config section a seat list is read from: the review's (#388) or the critique's (#405). */
+export type SeatSection = 'review' | 'critique';
 
 /** One `review.finders[i]` entry, read. `k` is 1-based: `f1` is `review.finders[0]`. */
 export interface FinderEntry {
@@ -606,14 +620,15 @@ export interface FinderEntry {
  *
  * Read through `roleSetting`, the reader config validation used, so a bare
  * provider name and a seat object come back in one shape. `focus` was checked
- * by `validateReview`; this only carries it. Absent `review` - a `state.config`
- * stored before the section existed - is no finders, which is what that run was.
+ * by `validateSeats`; this only carries it. Absent section - a `state.config`
+ * stored before it existed - is no finders, which is what that run was.
+ * `section` is `critique` for the plan critique's finders (#405).
  */
-export function readFinders(cfg: Config): FinderEntry[] {
-  const finders: unknown = (cfg.review as Config['review'] | undefined)?.finders;
+export function readFinders(cfg: Config, section: SeatSection = 'review'): FinderEntry[] {
+  const finders: unknown = (cfg[section] as Config[SeatSection] | undefined)?.finders;
   if (!Array.isArray(finders)) return [];
   return finders.map((entry: unknown, i) => {
-    const path = `review.finders[${i}]`;
+    const path = `${section}.finders[${i}]`;
     const setting = roleSetting(path, entry, { keys: FINDER_KEYS });
     const focus = isRecord(entry) && typeof entry['focus'] === 'string' ? entry['focus'] : undefined;
     return { k: i + 1, path, setting, ...(focus === undefined ? {} : { focus }) };
@@ -627,24 +642,31 @@ export type VerifierEntry = Omit<FinderEntry, 'focus'>;
  * The review verifiers this config names, in order (#388 Part C).
  *
  * `readFinders`' sibling, through the same `roleSetting` reader with a role's
- * keys only - `validateReview` refuses a `focus` on a verifier. Absent
- * `review` is no verifiers, which is what a run stored before it was.
+ * keys only - `validateSeats` refuses a `focus` on a verifier. Absent
+ * section is no verifiers, which is what a run stored before it was. `section`
+ * is `critique` for the plan critique's verifiers (#405).
  */
-export function readVerifiers(cfg: Config): VerifierEntry[] {
-  const verifiers: unknown = (cfg.review as Config['review'] | undefined)?.verifiers;
+export function readVerifiers(cfg: Config, section: SeatSection = 'review'): VerifierEntry[] {
+  const verifiers: unknown = (cfg[section] as Config[SeatSection] | undefined)?.verifiers;
   if (!Array.isArray(verifiers)) return [];
   return verifiers.map((entry: unknown, i) => {
-    const path = `review.verifiers[${i}]`;
+    const path = `${section}.verifiers[${i}]`;
     return { k: i + 1, path, setting: roleSetting(path, entry) };
   });
 }
 
 /**
- * The providers any review seat - a finder or a verifier - takes a turn on,
- * deduped, in `providersForRoles`' order. Empty for a config that seats none.
+ * The providers any review or critique seat - a finder or a verifier - takes a
+ * turn on, deduped, in `providersForRoles`' order. Empty for a config that seats
+ * none. The critique's seats count since #405: a Codex that only a critique
+ * verifier uses still runs under `codex.sandbox`.
  */
 export function seatProviders(cfg: Config): AgentProvider[] {
-  const held = new Set([...readFinders(cfg), ...readVerifiers(cfg)].map((e) => e.setting.provider));
+  const seats = (['review', 'critique'] as const).flatMap((section) => [
+    ...readFinders(cfg, section),
+    ...readVerifiers(cfg, section),
+  ]);
+  const held = new Set(seats.map((e) => e.setting.provider));
   return (['claude', 'codex'] as const).filter((provider) => held.has(provider));
 }
 

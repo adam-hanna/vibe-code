@@ -828,6 +828,24 @@ export function isToAddress(f: unknown): f is Finding {
   );
 }
 
+/**
+ * A finding an approved plan hands the implementer (#425, #405): one to
+ * address, or a P2 the critique vote moved.
+ *
+ * The plan side only. A vote-moved finding is `isDeferrable` - FOLLOW-UPS.md
+ * lists it as *Unconfirmed by vote* either way - and so not `isToAddress`; but
+ * #405 decision 5 has an unconfirmed plan P1 follow #425's rule for a plan's
+ * non-blocking findings: under `loop.fixNonBlocking` it reaches the
+ * implementer, who judges it like any other, rather than being lost. A real
+ * deferral (`defer: true`) still is not one.
+ */
+export function isPlanToAddress(f: unknown): f is Finding {
+  return (
+    isToAddress(f) ||
+    (hasFindingShape(f) && (f.severity === 'P2' || f.severity === 'P3') && f.defer !== true && movedByVote(f))
+  );
+}
+
 const UNADDRESSED_OUTCOMES: ReadonlySet<string> = new Set([
   'not-addressed',
   'deferred',

@@ -70,12 +70,29 @@ export function describeMcp(
   roles: RoleTable,
   finders: readonly FinderEntry[] = [],
   verifiers: readonly VerifierEntry[] = [],
+  /**
+   * The plan critique's seats (#405), apart from the review's so each row can
+   * say which section it is: a critique finder and a review finder share a `k`
+   * and nothing else. Absent or empty prints exactly what it did before.
+   */
+  critique: { finders: readonly FinderEntry[]; verifiers: readonly VerifierEntry[] } = {
+    finders: [],
+    verifiers: [],
+  },
 ): string[] {
+  const critiqueRows: [string, FinderEntry | VerifierEntry][] = [
+    ...critique.finders.map((f): [string, FinderEntry] => [`critique finder ${String(f.k)}:`, f]),
+    ...critique.verifiers.map((v): [string, VerifierEntry] => [`critique verifier ${String(v.k)}:`, v]),
+  ];
   // `role:` rather than doctor's bare `role` column, so the line that states a
   // seat's model and timeout stays the only one that starts with its name.
   // Padded to the role names alone, so a config with no finder prints exactly
-  // what it did before finders were seated (#388 Part B).
-  const width = Math.max(...ROLE_NAMES.map((role) => role.length)) + 1;
+  // what it did before finders were seated (#388 Part B) - and widened only by
+  // a critique seat's label, which is longer than any role's (#405).
+  const width = Math.max(
+    ...ROLE_NAMES.map((role) => role.length + 1),
+    ...critiqueRows.map(([label]) => label.length),
+  );
   const row = (label: string, granted: readonly string[], provider: 'claude' | 'codex'): string => {
     const named = granted.length === 0 ? 'none' : granted.join(', ');
     return `${label.padEnd(width)}  ${named}  (${enforcementLabel(provider)})`;
@@ -84,6 +101,7 @@ export function describeMcp(
     ...ROLE_NAMES.map((role) => row(`${role}:`, mcpServersFor(role, roles), roles[role].provider)),
     ...finders.map((f) => row(`finder ${String(f.k)}:`, f.setting.mcpServers ?? [], f.setting.provider)),
     ...verifiers.map((v) => row(`verifier ${String(v.k)}:`, v.setting.mcpServers ?? [], v.setting.provider)),
+    ...critiqueRows.map(([label, e]) => row(label, e.setting.mcpServers ?? [], e.setting.provider)),
   ];
   return [
     ...lines,
@@ -398,6 +416,18 @@ export async function mcpRefusals(cfg: Config, roles: RoleTable, ctx: McpRefusal
           subject: v.path,
           provider: v.setting.provider,
           servers: v.setting.mcpServers ?? [],
+        }),
+      ),
+    // And each critique seat (#405), for the same two reasons, on the critic's
+    // job: a critique verifier that cannot start counts as `cannot-tell` too.
+    ...[...readFinders(cfg, 'critique'), ...readVerifiers(cfg, 'critique')]
+      .filter((e) => (e.setting.mcpServers ?? []).length > 0)
+      .map(
+        (e): Grantee => ({
+          role: 'critic',
+          subject: e.path,
+          provider: e.setting.provider,
+          servers: e.setting.mcpServers ?? [],
         }),
       ),
   ];

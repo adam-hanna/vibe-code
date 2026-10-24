@@ -172,10 +172,21 @@ interface Seat {
    * `turn_started` carries, while its group is the code round that ran the gate.
    */
   turnRound?: number;
-  /** Which additional review finder took the turn (#388 Part B); absent for the first. */
+  /**
+   * Which additional finder took the turn (#388 Part B); absent for the first.
+   * A review finder in the `review` phase, a critique finder (#405) in `critique`.
+   */
   finder?: number;
-  /** Which review verifier cast this vote (#388 Part C); `1` is `review.verifiers[0]`. */
+  /**
+   * Which verifier cast this vote (#388 Part C); `1` is `review.verifiers[0]`, or
+   * `critique.verifiers[0]` in the `critique` phase (#405).
+   */
   verifier?: number;
+}
+
+/** The config section a finder's or verifier's seat is read from (#405). */
+function sectionOf(seat: Seat): 'review' | 'critique' {
+  return seat.phase === 'critique' ? 'critique' : 'review';
 }
 
 /**
@@ -218,7 +229,29 @@ export function seatOf(label: string): Seat | null {
   if (revise !== null) return { role: 'planner', kind: 'revise', phase: 'planning', round: revise };
   const critique = numbered('critique');
   if (critique !== null) {
-    return { role: 'critic', kind: 'critique', phase: 'critique', round: critique };
+    // `critique-2-vote-3-v1` is critique verifier 1's vote on finding 3 of plan
+    // round 2, and `critique-2-f1` is critique finder 1's turn in that round
+    // (#405): turns of the critique round, on the critic's job, told apart by
+    // `verifier` and `finder` as the review's are. The critic itself carries
+    // neither key, so every run from before #405 reads exactly as it did.
+    const verifier = /^critique-\d+-vote-\d+-v(\d+)$/.exec(label)?.[1];
+    if (verifier !== undefined) {
+      return {
+        role: 'critic',
+        kind: 'vote',
+        phase: 'critique',
+        round: critique,
+        verifier: Number.parseInt(verifier, 10),
+      };
+    }
+    const finder = /^critique-\d+-f(\d+)$/.exec(label)?.[1];
+    return {
+      role: 'critic',
+      kind: 'critique',
+      phase: 'critique',
+      round: critique,
+      ...(finder === undefined ? {} : { finder: Number.parseInt(finder, 10) }),
+    };
   }
   const answers = numbered('answers');
   // The answerer sits inside the plan cycle: a question round produces no
@@ -501,13 +534,14 @@ export function replayRun(state: RunState, sources: ReplaySources): Replay {
           round: seat.turnRound ?? round,
           // An additional finder's frame says which one, as the live frame does
           // (#388 Part B). The first finder's frame is unchanged.
+          // A critique seat's names its own section (#405).
           ...(seat.finder === undefined
             ? {}
-            : { finder: seat.finder, seat: `review.finders[${String(seat.finder - 1)}]` }),
+            : { finder: seat.finder, seat: `${sectionOf(seat)}.finders[${String(seat.finder - 1)}]` }),
           // And a verifier's says which one, as its live frame does (#388 Part C).
           ...(seat.verifier === undefined
             ? {}
-            : { verifier: seat.verifier, seat: `review.verifiers[${String(seat.verifier - 1)}]` }),
+            : { verifier: seat.verifier, seat: `${sectionOf(seat)}.verifiers[${String(seat.verifier - 1)}]` }),
           // Told, never inferred. A window that guessed which turns had a
           // measured start would guess wrong on the ones that matter.
           unmeasured: start === null,
@@ -593,6 +627,10 @@ export function replayRun(state: RunState, sources: ReplaySources): Replay {
     'review_finders_merged',
     'review_finder_failed',
     'review_votes_tallied',
+    // The critique's own, for the same reasons (#405).
+    'critique_finders_merged',
+    'critique_finder_failed',
+    'critique_votes_tallied',
     'fix_dispositions',
     'fix_dispositions_unreadable',
   ]);
