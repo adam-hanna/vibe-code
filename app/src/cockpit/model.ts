@@ -398,7 +398,8 @@ export function gateSentence(census: Census): string | null {
 }
 
 /**
- * What a review round's finders came to (#388 Part B), off `review_finders_merged`.
+ * What a review round's finders came to (#388 Part B), off `review_finders_merged` -
+ * or a plan critique round's (#405), off `critique_finders_merged`.
  *
  * Carried for one number above all: `reported`, the finders that actually
  * reported that round, which is the only honest denominator for a finding's
@@ -422,7 +423,8 @@ export interface FinderMerge {
 }
 
 /**
- * What a review round's vote came to (#388 Part C), off `review_votes_tallied`.
+ * What a review round's vote came to (#388 Part C), off `review_votes_tallied` -
+ * or a plan critique round's (#405), off `critique_votes_tallied`.
  *
  * Every number is the core's own count. Absent on a round with no verifier,
  * which writes no such frame; a frame missing either of the two counts that say
@@ -2002,7 +2004,10 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
         };
       }
 
-      case 'review_finders_merged': {
+      // The plan critique's merge (#405) is the same frame for the same card,
+      // attached by arrival to the critique round it came in.
+      case 'review_finders_merged':
+      case 'critique_finders_merged': {
         // Dropped rather than guessed when either count is missing: a
         // denominator this window invented is the claim the frame exists to
         // replace.
@@ -2027,7 +2032,10 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
         };
       }
 
-      case 'review_votes_tallied': {
+      // And the plan critique's tally (#405), which has no reproducers: its
+      // `reproduced` is absent and so null.
+      case 'review_votes_tallied':
+      case 'critique_votes_tallied': {
         // Dropped rather than guessed when either count is missing, as the
         // finders' merge frame is.
         const findings = num(data['findings']);

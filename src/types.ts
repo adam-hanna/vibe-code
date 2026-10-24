@@ -849,6 +849,19 @@ export interface Config {
    */
   review: ReviewConfig;
   /**
+   * More critique seats than the one critic, and a vote before a plan finding
+   * blocks (#405). The same four keys as `review`, validated by the same code
+   * under `critique.` paths, and read by `planPhase` when either list is
+   * non-empty.
+   *
+   * A section of its own rather than a reuse of `review`, by the owner's
+   * decision: the panel for a plan may differ from the panel for a diff, or be
+   * none at all - a plan vote is one turn per blocking finding per verifier,
+   * while a review round's votes scale with what the diff turned up. Settable
+   * in the global file as `review` is.
+   */
+  critique: CritiqueConfig;
+  /**
    * Whether a terminal `vibe run`, `vibe plan` or `vibe doctor` ends by saying
    * that npm has a newer vibe (#323). The only setting that reaches the
    * network; `src/updatecheck.ts` says what is sent. Read only by the terminal
@@ -882,6 +895,9 @@ export interface ReviewConfig {
   quorum: number | null;
   unconfirmedP0: UnconfirmedP0;
 }
+
+/** The `critique` section (#405): `review`'s shape, for the plan critique. See `Config.critique`. */
+export type CritiqueConfig = ReviewConfig;
 
 /** Block name to replacement text. Open-ended keys, checked against the real list. */
 export type PromptOverrides = Readonly<Record<string, string>>;

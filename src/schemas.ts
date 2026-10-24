@@ -535,6 +535,41 @@ export const VOTE_SCHEMA = {
   },
 } as const satisfies object;
 
+/**
+ * One critique verifier's vote on one plan finding (#405).
+ *
+ * `VOTE_SCHEMA`'s shape exactly - the same keys, the same three votes and the
+ * same evidence item, because `parseVote` and `groundVoteEvidence` read both -
+ * worded for a plan rather than a code change. A schema of its own rather than
+ * a rewording of `VOTE_SCHEMA`, which the review's verifiers are sent and which
+ * stays byte-identical.
+ */
+export const PLAN_VOTE_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['vote', 'reason', 'evidence'],
+  properties: {
+    vote: {
+      type: 'string',
+      enum: ['real', 'not-real', 'cannot-tell'],
+      description:
+        'real = the defect the claim describes exists in this plan. not-real = it does not, and ' +
+        'you can show why. cannot-tell = anything in between, including any doubt.',
+    },
+    reason: {
+      type: 'string',
+      description: 'Why, in a few sentences. For not-real, the concrete reason the claim is false of this plan.',
+    },
+    evidence: {
+      type: 'array',
+      description:
+        'Where to look. Needed for not-real: a not-real vote whose citations resolve to ' +
+        'nothing is counted as cannot-tell. May be empty for real and cannot-tell.',
+      items: FINDINGS_SCHEMA.properties.findings.items.properties.evidence.items,
+    },
+  },
+} as const satisfies object;
+
 /** Codex answering Claude's blocking questions. */
 export const ANSWERS_SCHEMA = {
   type: 'object',

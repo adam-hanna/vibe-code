@@ -97,6 +97,7 @@ Put a `vibe.config.json` in the repository. Flags override it. `vibe.config.exam
 | `verify.testPaths` | Which changed files count as tests when a review checks whether the run edited its own judge. Replaces the built-in list (`**/*.test.*`, `**/tests/**`, `**/test_*.py` and similar). `vibe.config.json` always counts. |
 | `roles` | Which agent (Claude or Codex), model and effort holds each job: planner, critic, answerer, implementer and reviewer. |
 | `review.finders`, `review.verifiers` | More seats that review the diff, and seats that vote on each blocking finding before it blocks. Both empty by default, which is one reviewer and no vote. The reviewer keeps its conversation from round to round; the other finders start fresh every round. |
+| `critique.finders`, `critique.verifiers` | The same for the plan critique: more seats that critique each version of the plan, and seats that vote on each blocking plan finding before it blocks. Both empty by default, which is one critic and no vote. The critic keeps its conversation; the other finders start fresh every round. |
 | `budget.maxTokens` | A ceiling for the whole run, across both agents. |
 | `loop.maxPlanRounds`, `loop.maxReviewRounds` | How many rounds before vibe stops and asks. |
 | `gates` | Where the loop pauses for you: `auto`, `step` (the app only) or `stop`. |

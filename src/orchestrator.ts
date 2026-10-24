@@ -20,7 +20,7 @@ import {
   groundVoteEvidence,
   refusePlaceholderPlan,
 } from '@src/evidence.js';
-import { FIX_SCHEMA, VOTE_SCHEMA } from '@src/schemas.js';
+import { FIX_SCHEMA, PLAN_VOTE_SCHEMA, VOTE_SCHEMA } from '@src/schemas.js';
 import { dispositionSummary, settleDispositions } from '@src/dispositions.js';
 import { countBallot, describeVotes, failedBallot, tally } from '@src/vote.js';
 import { describeOutcome, observe } from '@src/reproducer.js';
@@ -112,6 +112,7 @@ import {
 import {
   hasFindingShape,
   isDeferrable,
+  isPlanToAddress,
   isReportBasename,
   isToAddress,
   isUnaddressed,
@@ -842,7 +843,7 @@ async function runPhases(
           // config rather than on what was stored (#425): a resume layers the
           // project file over the run's settings, so a run approved with the
           // setting on and resumed with it off must get the old prompt.
-          toAddress(cfg, state.planNonBlocking ?? []),
+          planToAddress(cfg, state.planNonBlocking ?? []),
           // An approved plan can predate the answers to its advisory questions
           // (#277); the implementer is told them, and that they win.
         ) + P.advisoryAnswers(state.advisoryAnswers, 'implementer'),
@@ -1022,7 +1023,10 @@ function approvePlan(
   // is now a P2 with a `by: 'human'` move and no guard's `downgraded`, so it is
   // treated as any approved P2 is. Accepting a plan says the finding need not
   // block it, not that it is no longer work.
-  const nonBlocking = toAddress(cfg, findings);
+  //
+  // A P1 the critique vote moved goes too (#405): it is a P2 now, and an
+  // unconfirmed claim is still one the implementer can settle.
+  const nonBlocking = planToAddress(cfg, findings);
   // The sentence, chosen before it is said, because since #223 saying it and
   // recording it are one call and the call sits below the two assignments
   // its data reads. The two branches and their wording are unchanged, and so
@@ -1044,7 +1048,10 @@ function approvePlan(
   // unconditionally so an approving round that declined nothing cannot
   // leave an earlier round's value standing, and written on the same state
   // save that clears the pending findings below.
-  state.declined = findings.filter(isDeferrable);
+  // Not a vote-moved finding (#405): `declined` tells the implementer a
+  // finding is real and agreed to belong elsewhere, and an unconfirmed claim is
+  // neither. It goes to FOLLOW-UPS.md as unconfirmed by vote regardless.
+  state.declined = findings.filter((f) => isDeferrable(f) && !movedByVote(f));
   // For the same reason and on the same save (#425): an approving round with
   // nothing to hand on removes the field rather than leaving an earlier
   // round's standing - and removes rather than empties it, so a run with
@@ -1339,17 +1346,33 @@ async function planPhase(
     // `withConcurrentCompaction` surfaces it once `work` has resolved. Anything
     // left outside the callback would be skipped for a critique the run has
     // already paid for.
-    const critique = await withConcurrentCompaction(
+    const { found: critique, held } = await withConcurrentCompaction(
       state,
       cfg,
       async () => {
         const critiqued = await runCritique(state, cfg, cwd, plan, roles, turns, planActivity);
+        // The critique's finders and its vote (#405), in that order and before
+        // everything below, so the artifact, the deferrals, the pending
+        // findings and the gate all read one report: merged, voted, with
+        // `foundBy` and `votes`. With both lists empty, exactly the critic's
+        // report: no turn, no key, no event. None of these turns is a plan
+        // round - `planRound` moves only with a revision.
+        const finders = readFinders(cfg, 'critique');
+        const merged =
+          finders.length === 0
+            ? critiqued
+            : await runCritiqueFinders(state, cfg, cwd, plan, roles, turns, planActivity, finders, critiqued);
+        const verifiers = readVerifiers(cfg, 'critique');
+        const voted =
+          verifiers.length === 0
+            ? { report: merged, held: [] }
+            : await runCritiqueVotes(state, cfg, cwd, plan, roles, turns, verifiers, merged);
         // Before the artifact and before `recordPendingFindings`, so the round's
         // record shows what the run refused on and the next revision is told
         // about it. A mechanical fact about the artifact on disk, added to the
         // critic's judgement rather than replacing it (#108).
         const planFile = `plan-${state.planRound}.json`;
-        const { report: found, raised } = refusePlaceholderPlan(critiqued, plan.plan_md, planFile);
+        const { report: found, raised } = refusePlaceholderPlan(voted.report, plan.plan_md, planFile);
         if (raised !== null) {
           recordAndSay(
             state,
@@ -1367,7 +1390,7 @@ async function planPhase(
         // Cleared again below the moment the gate says there is nothing to
         // consume.
         recordPendingFindings(state, 'plan', found.findings);
-        return found;
+        return { found, held: voted.held };
       },
       turns.claude,
       'critic',
@@ -1380,6 +1403,22 @@ async function planPhase(
     // goes. A window drawing it only on a failure would have four counts while
     // the news was bad and nothing while it was good.
     sayFindings('plan', critique.findings, decision, cfg.loop.p1Tolerance);
+    // `critique.unconfirmedP0: "halt"` (#405), the review's stop for the plan:
+    // after the artifact and the pending findings, because the stop is about a
+    // record that has to exist. The P0 is not moved. A resume with no answer
+    // takes the pending findings to the revision, blocking, and casts no vote
+    // again; one whose person demoted it takes #394's acceptance above.
+    if (held.length > 0) {
+      throw new Escalation(
+        EXIT.NEEDS_HUMAN,
+        `The critique verifiers did not confirm ${held.length} P0 finding(s), and ` +
+          'critique.unconfirmedP0 is "halt". Each is still P0. Leave it alone and it keeps blocking: ' +
+          'the resume sends it to the plan revision. To demote one, fill in its block under ' +
+          '"Change a severity" below, then resume.',
+        null,
+        held,
+      );
+    }
     if (decision.pass) {
       approvePlan(state, cfg, plan, critique.findings, decision);
       break;
@@ -2272,6 +2311,16 @@ function renderOutstanding(
  */
 function toAddress(cfg: Config, findings: readonly unknown[]): Finding[] {
   return cfg.loop.fixNonBlocking ? findings.filter(isToAddress) : [];
+}
+
+/**
+ * `toAddress` for an approved plan (#405): the same switch, and a P2 the
+ * critique vote moved goes to the implementer too (`isPlanToAddress`). Equal to
+ * `toAddress` on every run without critique verifiers, which is every run that
+ * has no vote-moved plan finding.
+ */
+function planToAddress(cfg: Config, findings: readonly unknown[]): Finding[] {
+  return cfg.loop.fixNonBlocking ? findings.filter(isPlanToAddress) : [];
 }
 
 /** How FOLLOW-UPS.md names each `UnaddressedFinding` outcome (#425). */
@@ -5023,6 +5072,38 @@ function recordDowngrades(state: RunState, downgraded: readonly Finding[]): void
   }
 }
 
+/**
+ * The critique prompt for this round: what the critic is sent, and what every
+ * additional critique finder is sent with `hasMemory` false (#405). One
+ * builder, so the critic's prompt and a finder's cannot come to differ in
+ * anything but the memory note and a finder's focus.
+ */
+function critiquePromptFor(
+  state: RunState,
+  plan: Plan,
+  roles: RoleTable,
+  planActivity: TurnActivity | undefined,
+  hasMemory: boolean,
+): string {
+  return (
+    P.critiquePrompt(
+      plan.plan_md,
+      plan.assumptions,
+      plan.out_of_scope,
+      state.planRound + 1,
+      hasMemory,
+      state.environment,
+      roles,
+      // The plan's own bar, not a snapshot: this runs before the gate, and
+      // the critic is what decides whether the bar is any good.
+      plan.acceptance_criteria,
+      planActivity,
+      // Answers no revision has folded in yet (#277). Empty on every run that
+      // skipped no revision, so this prompt is byte-identical there.
+    ) + P.advisoryAnswers(state.advisoryAnswers, 'critic')
+  );
+}
+
 async function runCritique(
   state: RunState,
   cfg: Config,
@@ -5046,21 +5127,7 @@ async function runCritique(
     cfg,
     {
       role: 'critic',
-      prompt: P.critiquePrompt(
-        plan.plan_md,
-        plan.assumptions,
-        plan.out_of_scope,
-        state.planRound + 1,
-        roleHasMemory(state, cfg, 'critic', roles),
-        state.environment,
-        roles,
-        // The plan's own bar, not a snapshot: this runs before the gate, and
-        // the critic is what decides whether the bar is any good.
-        plan.acceptance_criteria,
-        planActivity,
-        // Answers no revision has folded in yet (#277). Empty on every run that
-        // skipped no revision, so this prompt is byte-identical there.
-      ) + P.advisoryAnswers(state.advisoryAnswers, 'critic'),
+      prompt: critiquePromptFor(state, plan, roles, planActivity, roleHasMemory(state, cfg, 'critic', roles)),
       cwd,
       label: `critique-${state.planRound}`,
     },
@@ -5077,6 +5144,243 @@ async function runCritique(
     parseFindings(readStructured(outcome)),
     outcome.activity,
   );
+}
+
+/**
+ * The additional critique finders (#405), after the critic, and the merge
+ * across all of them.
+ *
+ * The review's `runFinders` (#388 Part B) for a plan, and a sibling of it rather
+ * than a caller: #403 is rewriting that one to run concurrently, and unifying
+ * the two is a follow-up for after both land. A plan is never split, so each
+ * finder is one turn per plan round. Each is a critic whose seat was swapped
+ * (`seatTable` on the critic's row): read-only, a fresh conversation every
+ * turn, handed the critic's prompt for this round with no memory - the
+ * no-memory `continuityNote` from round 2 on, the #435 asymmetry - plus its
+ * focus. In sequence, never at once, for the review's reason. A finder never
+ * sees another's findings.
+ */
+async function runCritiqueFinders(
+  state: RunState,
+  cfg: Config,
+  cwd: string,
+  plan: Plan,
+  roles: RoleTable,
+  turns: AgentTurns,
+  planActivity: TurnActivity | undefined,
+  entries: readonly FinderEntry[],
+  first: FindingsReport,
+): Promise<FindingsReport> {
+  const reported: FinderReport[] = [];
+  for (const f of entries) {
+    const table = seatTable(roles, f.setting, undefined, 'critic');
+    const label = `critique-${state.planRound}-f${f.k}`;
+    log.step(`${holderLabel('critic', table)} is critiquing the plan (finder ${f.k})`, {
+      id: 'turn_started',
+      data: { role: 'critic', kind: 'critique', round: state.planRound, finder: f.k, seat: f.path },
+    });
+    let report: FindingsReport;
+    try {
+      const outcome = await runTurn(
+        state,
+        cfg,
+        {
+          role: 'critic',
+          prompt: P.withFocus(critiquePromptFor(state, plan, roles, planActivity, false), f.focus),
+          cwd,
+          label,
+          seatPath: f.path,
+        },
+        turns,
+        table,
+      );
+      report = groundAndRecord(state, cwd, 'critic', table, parseFindings(readStructured(outcome)), outcome.activity);
+    } catch (err: unknown) {
+      // `runFinders`' rule: a stop or a ceiling ends the round as it would for
+      // the critic, including a ceiling this failure itself crossed.
+      if (err instanceof Escalation || err instanceof Cancelled) throw err;
+      enforceCeilings(state, cfg, f.setting.provider === 'claude');
+      // Anything else costs this finder only, and the record says so.
+      const message = err instanceof Error ? err.message : String(err);
+      const error = message.split(/\r?\n/)[0] ?? '';
+      const provider = f.setting.provider;
+      const model = f.setting.model ?? 'default';
+      recordAndSay(
+        state,
+        'warn',
+        'critique_finder_failed',
+        `Critique finder ${f.k} (${f.path}, ${provider}/${model}) failed on ${label}: ${error}`,
+        { round: state.planRound, finder: f.k, seat: f.path, label, error },
+      );
+      continue;
+    }
+    reported.push({ k: f.k, seat: f.path, provider: f.setting.provider, model: f.setting.model ?? 'default', report });
+  }
+
+  const all: FinderReport[] = [
+    { k: 0, seat: 'roles.critic', provider: roles.critic.provider, model: roles.critic.model ?? 'default', report: first },
+    ...reported,
+  ];
+  const merge = mergeAcrossFinders(all);
+  const seats = entries.length + 1;
+  const raised = all.reduce((n, r) => n + r.report.findings.length, 0);
+  // Recorded, not narration only, for the review's reason: the one account of
+  // how many finders reported in the attempt that wrote this round's artifact.
+  recordAndSay(
+    state,
+    'info',
+    'critique_finders_merged',
+    `plan critique round ${state.planRound + 1}: ${seats} finders, ${all.length} of ${seats} reported, ` +
+      `${raised} findings → ${merge.report.findings.length} after merge ` +
+      `(${merge.byCitation} merged by citation, ${merge.byTitle} by title)`,
+    {
+      round: state.planRound,
+      finders: seats,
+      reported: all.length,
+      findings: raised,
+      merged: merge.report.findings.length,
+      byCitation: merge.byCitation,
+      byTitle: merge.byTitle,
+    },
+  );
+  return merge.report;
+}
+
+/**
+ * The vote on every blocking plan finding (#405), after the merge and before
+ * the gate.
+ *
+ * The review's `runVotes` (#388 Part C) for a plan, beside it for the reason
+ * `runCritiqueFinders` is. Every P0 and P1 goes to every verifier, in sequence;
+ * the critique has no reproducer, so nothing is exempt for having reproduced. A
+ * finding a guard already moved is P2 by now and is not voted on. Nor is one
+ * marked `defer: true`, though `parseFindings` clears `defer` on every P0 and P1
+ * a turn returns, so today that is only a finding stored that way.
+ *
+ * A verifier is a critic whose seat was swapped and whose job is a vote
+ * (`seatTable` with `PLAN_VOTE_SCHEMA` on the critic's row), shown the claim,
+ * the task, the plan and REVIEW.md, and never the id, the severity, who raised
+ * it or another ballot. Each round's vote stands alone: a finding raised again
+ * next round is voted on again, by fresh turns that know no earlier tally.
+ */
+async function runCritiqueVotes(
+  state: RunState,
+  cfg: Config,
+  cwd: string,
+  plan: Plan,
+  roles: RoleTable,
+  turns: AgentTurns,
+  verifiers: readonly VerifierEntry[],
+  report: FindingsReport,
+): Promise<{ report: FindingsReport; held: Finding[] }> {
+  const blocking = (f: Finding): boolean => f.severity === 'P0' || f.severity === 'P1';
+  // 1-based in the merged report: the `<i>` of the label.
+  const eligible = report.findings
+    .map((f, i) => ({ f, n: i + 1 }))
+    .filter(({ f }) => blocking(f) && f.defer !== true);
+  const deferred = report.findings.filter((f) => blocking(f) && f.defer === true).length;
+  const reviewMd = await reviewStandardsFor(state, cwd);
+
+  const votes = new Map<string, Votes>();
+  let cast = 0;
+  for (const { f, n } of eligible) {
+    const prompt = P.critiqueVotePrompt(
+      {
+        title: f.title,
+        detail: f.detail,
+        suggested_fix: f.suggested_fix,
+        ...(f.evidence === undefined ? {} : { evidence: f.evidence }),
+      },
+      state.task,
+      plan,
+      state.environment,
+      roles,
+      reviewMd,
+    );
+    const ballots: Ballot[] = [];
+    for (const v of verifiers) {
+      const table = seatTable(roles, v.setting, PLAN_VOTE_SCHEMA, 'critic');
+      const req: TurnRequest = {
+        role: 'critic',
+        prompt,
+        cwd,
+        label: `critique-${state.planRound}-vote-${n}-v${v.k}`,
+        seatPath: v.path,
+      };
+      log.step(`${holderLabel('critic', table)} is checking ${f.id} (verifier ${v.k})`, {
+        id: 'turn_started',
+        data: { role: 'critic', kind: 'vote', round: state.planRound, verifier: v.k, seat: v.path, finding: f.id },
+      });
+      cast += 1;
+      try {
+        const outcome = await runTurn(state, cfg, req, turns, table);
+        const said = parseVote(readStructured(outcome));
+        // The verifier's own path convention, because it typed the paths.
+        const grounded = groundVoteEvidence(said.evidence, cwd, state.dir, pathStyleFor(state, 'critic', table));
+        const counted = countBallot(said.vote, grounded.unresolved);
+        ballots.push({
+          seat: v.path,
+          provider: v.setting.provider,
+          model: v.setting.model ?? 'default',
+          vote: said.vote,
+          counted: counted.counted,
+          reason: said.reason,
+          evidence: grounded.evidence,
+          ...(counted.countedReason === undefined ? {} : { countedReason: counted.countedReason }),
+        });
+      } catch (err: unknown) {
+        // `runVotes`' rule: a stop or a ceiling is not a vote, and anything
+        // else is a vote not cast, counted as `cannot-tell`.
+        if (err instanceof Escalation || err instanceof Cancelled) throw err;
+        enforceCeilings(state, cfg, v.setting.provider === 'claude');
+        const ballot = failedBallot(v, err);
+        ballots.push(ballot);
+        log.warn(`Verifier ${v.k} (${v.path}) failed on ${req.label}, counted as cannot-tell: ${ballot.reason}`);
+      }
+    }
+    votes.set(f.id, tally(ballots, cfg.critique.quorum));
+  }
+
+  const applied = applyVotes(report, votes, cfg.critique.unconfirmedP0);
+  recordDowngrades(state, applied.downgraded);
+
+  const outcomes = [...votes.values()];
+  const count = (o: Votes['outcome']): number => outcomes.filter((v) => v.outcome === o).length;
+  const confirmed = count('confirmed');
+  const unconfirmed = count('unconfirmed');
+  const undecided = count('undecided');
+  const moved = applied.downgraded.length;
+  const held = applied.held.length;
+  const kept = unconfirmed - moved - held;
+  const fate = [
+    moved > 0 ? `${moved} moved to P2` : '',
+    kept > 0 ? `${kept} still blocking` : '',
+    held > 0 ? `${held} held for you` : '',
+  ].filter((x) => x !== '');
+  // Recorded, not narration only: the summary and the window read the last of
+  // these for the round, never a tally of failed turns.
+  recordAndSay(
+    state,
+    'info',
+    'critique_votes_tallied',
+    `plan critique round ${state.planRound + 1}: ${eligible.length} findings to vote × ` +
+      `${verifiers.length} verifiers, ${cast} votes; ${confirmed} confirmed, ${unconfirmed} unconfirmed` +
+      `${fate.length > 0 ? ` (${fate.join(', ')})` : ''}, ${undecided} undecided (still blocking)` +
+      `${deferred > 0 ? `; ${deferred} deferred, not voted` : ''}`,
+    {
+      round: state.planRound,
+      findings: eligible.length,
+      verifiers: verifiers.length,
+      votes: cast,
+      confirmed,
+      unconfirmed,
+      moved,
+      held,
+      undecided,
+      deferred,
+    },
+  );
+  return { report: applied.report, held: applied.held };
 }
 
 async function runReview(
