@@ -850,9 +850,10 @@ export interface Config {
   review: ReviewConfig;
   /**
    * More critique seats than the one critic, and a vote before a plan finding
-   * blocks (#405). The same four keys as `review`, validated by the same code
+   * blocks (#405). The same five keys as `review`, validated by the same code
    * under `critique.` paths, and read by `planPhase` when either list is
-   * non-empty.
+   * non-empty. Its `maxParallel` is its own (#452): raising the review's
+   * never changes how a plan round runs.
    *
    * A section of its own rather than a reuse of `review`, by the owner's
    * decision: the panel for a plan may differ from the panel for a diff, or be
@@ -895,17 +896,18 @@ export interface ReviewConfig {
   quorum: number | null;
   unconfirmedP0: UnconfirmedP0;
   /**
-   * How many finder or verifier turns may be live at once in a round (#403).
-   * `1` runs them one after another, which is the order of every run before it.
+   * How many finder or verifier turns may be live at once in a review round
+   * (#403), or a plan critique round (#452). `1` runs them one after another,
+   * which is the order of every run before it.
    */
   maxParallel: number;
 }
 
 /**
- * The `critique` section (#405): `review`'s shape, for the plan critique, less
- * `maxParallel` - its seats run in sequence until #452. See `Config.critique`.
+ * The `critique` section (#405): `review`'s shape, for the plan critique, with
+ * a `maxParallel` of its own since #452. See `Config.critique`.
  */
-export type CritiqueConfig = Omit<ReviewConfig, 'maxParallel'>;
+export type CritiqueConfig = ReviewConfig;
 
 /** Block name to replacement text. Open-ended keys, checked against the real list. */
 export type PromptOverrides = Readonly<Record<string, string>>;
@@ -1692,10 +1694,11 @@ export interface TestChanges {
  * Keyed by `label` plus `provider` wherever it is looked up, which is unique
  * among live turns. There are two sources of concurrency. `withConcurrentCompaction`
  * pairs Claude's `compact` with a Codex critique or review turn, so the pair
- * differs on both axes. A review seat group (`runSeatGroup`, #403) runs up to
- * `review.maxParallel` finder or verifier turns at once, and their labels -
- * `review-<r>-f<k>[-part<i>]` and `vote-<r>-<n>-v<k>` - are unique within a
- * round, so the key stays unique there too. `saveState` stays safe with several
+ * differs on both axes. A review or plan critique seat group (`runSeatGroup`,
+ * #403, #452) runs up to `review.maxParallel` or `critique.maxParallel` finder
+ * or verifier turns at once, and their labels - `review-<r>-f<k>[-part<i>]` and
+ * `vote-<r>-<n>-v<k>`, or `critique-<r>-f<k>` and `critique-<r>-vote-<n>-v<k>` -
+ * are unique within a round, so the key stays unique there too. `saveState` stays safe with several
  * live: it is synchronous and atomic, and it writes the one in-memory
  * `RunState` of the one run this process holds, so no write can interleave
  * inside another or lose a charge.

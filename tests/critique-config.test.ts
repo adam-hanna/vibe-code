@@ -6,7 +6,7 @@ import path from 'node:path';
 import { configDiff, DEFAULTS, loadConfig, PROJECT_ONLY, writeConfigPatch } from '@src/config.js';
 
 /**
- * The `critique` section (#405): the review's four keys for the plan critique,
+ * The `critique` section (#405): the review's five keys for the plan critique,
  * validated by the same code with the same words, `critique.` in place of
  * `review.`. `review-config.test.ts` pins the review's messages and is not
  * touched by this; what a run does with the section is pinned in
@@ -26,7 +26,7 @@ function refused(critique: unknown, message: string | RegExp): void {
 }
 
 test('the defaults are no extra seats, a majority, and an unconfirmed P0 that blocks', () => {
-  assert.deepEqual(DEFAULTS.critique, { finders: [], verifiers: [], quorum: null, unconfirmedP0: 'block' });
+  assert.deepEqual(DEFAULTS.critique, { finders: [], verifiers: [], quorum: null, unconfirmedP0: 'block', maxParallel: 1 });
   assert.deepEqual(loadConfig(project({})).critique, DEFAULTS.critique);
 });
 
@@ -38,7 +38,8 @@ test('seats are written like roles, a finder may name a focus, and it is apart f
     unconfirmedP0: 'halt',
   };
   const cfg = loadConfig(project({ critique }));
-  assert.deepEqual(cfg.critique, critique);
+  // `maxParallel` filled from the default, as every key a file leaves out is (#452).
+  assert.deepEqual(cfg.critique, { ...critique, maxParallel: 1 });
   assert.deepEqual(cfg.review, DEFAULTS.review, 'the review panel is not the critique panel');
 });
 
@@ -61,11 +62,26 @@ test('every refusal is the review\'s, under critique. paths', () => {
   refused({ verifiers: ['gemini'] }, /Error: critique\.verifiers\[0\] is "gemini"; expected "claude" or "codex"/);
   refused(
     { quorom: 2 },
-    'critique.quorom is not a setting; critique takes finders, verifiers, quorum and unconfirmedP0',
+    'critique.quorom is not a setting; critique takes finders, verifiers, quorum, unconfirmedP0 and maxParallel',
   );
-  refused(null, 'critique must be an object with finders, verifiers, quorum and unconfirmedP0');
+  refused(null, 'critique must be an object with finders, verifiers, quorum, unconfirmedP0 and maxParallel');
   refused({ finders: 'codex' }, 'critique.finders must be a list of seats, or [] for none');
   refused({ verifiers: {} }, 'critique.verifiers must be a list of seats, or [] for none');
+});
+
+test('critique.maxParallel is a positive whole number of turns, defaulting to 1 (#452)', () => {
+  const message = 'critique.maxParallel must be a positive whole number of turns at once (1 runs them one after another)';
+  for (const bad of [0, -1, 1.5, '2', null]) refused({ maxParallel: bad }, message);
+  assert.equal(DEFAULTS.critique.maxParallel, 1);
+  assert.equal((load({}) as { maxParallel: number }).maxParallel, 1);
+  assert.equal((load({ maxParallel: 1 }) as { maxParallel: number }).maxParallel, 1);
+  assert.equal((load({ maxParallel: 8 }) as { maxParallel: number }).maxParallel, 8);
+});
+
+test("raising review.maxParallel alone leaves the critique's bound at 1 (#452)", () => {
+  const cfg = loadConfig(project({ review: { maxParallel: 4 } }));
+  assert.equal(cfg.review.maxParallel, 4);
+  assert.equal(cfg.critique.maxParallel, 1);
 });
 
 test('a focus on a critique verifier is refused as an unknown key', () => {
@@ -89,6 +105,7 @@ test('critique is set globally and per project, the project winning key by key a
       verifiers: ['codex', 'claude'],
       quorum: 2,
       unconfirmedP0: 'block',
+      maxParallel: 1,
     });
   } finally {
     if (before === undefined) delete process.env['VIBE_GLOBAL_CONFIG'];

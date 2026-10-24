@@ -182,3 +182,85 @@ describe('the setting', () => {
     expect(settings).toMatch(/source\('review', 'maxParallel'\)/);
   });
 });
+
+/**
+ * The plan critique's seats, at `critique.maxParallel` above 1 (#452): the same
+ * labelled frames as the review's, under the critique's labels and kinds, so the
+ * fold keeps them live side by side and the seat line names them in the review
+ * card's words.
+ */
+describe('critique seats run side by side as review seats do', () => {
+  const CRITIQUE = say('phase_started', { phase: 'critique', round: 0 });
+  const CRITIC = say('turn_started', { role: 'critic', kind: 'critique', round: 0 });
+  const critiqueFinder = (k: number): Frame =>
+    say('turn_started', {
+      role: 'critic',
+      kind: 'critique',
+      round: 0,
+      finder: k,
+      seat: `critique.finders[${String(k - 1)}]`,
+      label: `critique-0-f${String(k)}`,
+    });
+  const critiqueVote = (k: number, finding: string, n: number): Frame =>
+    say('turn_started', {
+      role: 'critic',
+      kind: 'vote',
+      round: 0,
+      verifier: k,
+      seat: `critique.verifiers[${String(k - 1)}]`,
+      finding,
+      label: `critique-0-vote-${String(n)}-v${String(k)}`,
+    });
+
+  test('two labelled critique finders are both live, and the critic before them finished', () => {
+    const run = fold([CRITIQUE, CRITIC, critiqueFinder(1), critiqueFinder(2)]);
+    expect(run.live.map((t) => t.label)).toEqual(['critique-0-f1', 'critique-0-f2']);
+    expect(byLabel(run, 'critique-0-f1')?.seat).toEqual({ finder: 1 });
+    const critic = turnsOf(run).find((t) => t.kind === 'critique' && t.label === undefined);
+    expect(critic?.endedAt).not.toBeNull();
+  });
+
+  test('a heartbeat goes to the critique seat its label names', () => {
+    const run = fold([CRITIQUE, critiqueFinder(1), critiqueFinder(2), beat('critique-0-f2', 4_000)]);
+    expect(byLabel(run, 'critique-0-f2')?.beat?.elapsedMs).toBe(4_000);
+    expect(byLabel(run, 'critique-0-f1')?.beat).toBeNull();
+  });
+
+  test('turn_finished ends its own critique seat and leaves the other running', () => {
+    const run = fold([
+      CRITIQUE,
+      critiqueFinder(1),
+      critiqueFinder(2),
+      say('turn_finished', { label: 'critique-0-f1', role: 'critic', kind: 'critique', round: 0 }),
+    ]);
+    expect(byLabel(run, 'critique-0-f1')?.endedAt).not.toBeNull();
+    expect(run.live.map((t) => t.label)).toEqual(['critique-0-f2']);
+  });
+
+  test('the seat line names critique finders by number, and votes as the review card does', () => {
+    expect(liveSeatsLine(fold([CRITIQUE, CRITIC, critiqueFinder(1), critiqueFinder(2)]))).toBe(
+      'finders critiquing · f1, f2 running',
+    );
+    expect(liveSeatsLine(fold([CRITIQUE, critiqueVote(1, 'alpha', 1), critiqueVote(2, 'alpha', 1)]))).toBe(
+      'verifiers voting · alpha: v1, v2 running',
+    );
+  });
+
+  test('the loop column draws both live, under the seat line, in the full and the compact rail', () => {
+    const run = fold([CRITIQUE, CRITIC, critiqueFinder(1), critiqueFinder(2)]);
+    const html = renderToStaticMarkup(createElement(LoopColumn, { run, now: 1_000_010 }));
+    expect(html.split('border-accent-border bg-active').length - 1).toBe(2);
+    expect(html).toContain('finders critiquing · f1, f2 running');
+    const rail = renderToStaticMarkup(createElement(LoopColumn, { run, now: 1_000_010, compact: true }));
+    expect(rail).toContain('finders critiquing · f1, f2 running');
+  });
+
+  test('its setting sits in the critique section beside its quorum and saves critique.maxParallel', () => {
+    const quorum = settings.indexOf('htmlFor="critique-quorum"');
+    const parallel = settings.indexOf('htmlFor="critique-maxParallel"');
+    expect(quorum).toBeGreaterThan(0);
+    expect(parallel).toBeGreaterThan(quorum);
+    expect(settings).toMatch(/onSave=\{\(n\) => save\(\{ critique: \{ maxParallel: n \} \}\)\}/);
+    expect(settings).toMatch(/source\('critique', 'maxParallel'\)/);
+  });
+});

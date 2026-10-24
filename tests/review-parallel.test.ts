@@ -458,7 +458,7 @@ test('a bound that is not a whole number from 1 is refused, never read as no sea
   let ran = 0;
   for (const bad of [Number.NaN, 0, 1.5, undefined as unknown as number]) {
     await assert.rejects(
-      runSeatGroup(state, bad, [() => Promise.resolve(void (ran += 1))]),
+      runSeatGroup(state, bad, [() => Promise.resolve(void (ran += 1))], 'review.maxParallel'),
       /review\.maxParallel is .*; it must be a whole number of turns from 1/,
     );
   }

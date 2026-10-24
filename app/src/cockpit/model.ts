@@ -147,9 +147,10 @@ export interface Turn {
   /**
    * The turn's own label, when its `turn_started` named one (#403).
    *
-   * Only review seats that may overlap - `review.maxParallel` above 1 - name
-   * one, and only a labelled turn can be one of several live at once: it is
-   * what a heartbeat, a work reading and a `turn_finished` are matched by.
+   * Only review or plan critique seats that may overlap - `review.maxParallel`
+   * or `critique.maxParallel` above 1 (#452) - name one, and only a labelled
+   * turn can be one of several live at once: it is what a heartbeat, a work
+   * reading and a `turn_finished` are matched by.
    * Absent on every other turn and on every run from before #403, which are
    * folded exactly as they always were.
    */
@@ -819,14 +820,14 @@ export interface Run {
    *
    * Every reader that asks "is something running, and what" reads this, and
    * keeps the answer it always got: one turn runs at a time except while review
-   * seats overlap (#403), and then any one of them is a true answer to that
+   * or critique seats overlap (#403, #452), and then any one of them is a true answer to that
    * question. A reader that has to show each of them reads `live`.
    */
   running: Turn | null;
   /**
    * Every turn with no `endedAt`, oldest first (#403).
    *
-   * At most one entry, except while labelled review seats overlap. Set only
+   * At most one entry, except while labelled review or critique seats overlap. Set only
    * together with `running`, through `withLive`, so the two cannot disagree.
    */
   live: readonly Turn[];
@@ -1733,10 +1734,10 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
         // which is where an unrecognised thing belongs.
         if (kind === undefined) return next;
         // A new phase closes whatever turn was still open - every live turn,
-        // labelled review seats included (#403). The loop narrates no end for an
-        // unlabelled turn, so the next thing starting is the signal; and seats
-        // that overlap all belong to one phase, so a new phase means none of
-        // them is running any more.
+        // labelled review and critique seats included (#403, #452). The loop
+        // narrates no end for an unlabelled turn, so the next thing starting is
+        // the signal; and seats that overlap all belong to one phase, so a new
+        // phase means none of them is running any more.
         const closed = endRunning(next, at);
         const round = num(data['round']);
         // Kept when a later phase carries none, rather than cleared: the base is

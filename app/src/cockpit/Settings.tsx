@@ -1789,7 +1789,7 @@ export function Settings({
     instructions?: { text?: string };
     prompts?: unknown;
     review?: { finders?: unknown; verifiers?: unknown; quorum?: unknown; unconfirmedP0?: unknown; maxParallel?: unknown };
-    critique?: { finders?: unknown; verifiers?: unknown; quorum?: unknown; unconfirmedP0?: unknown };
+    critique?: { finders?: unknown; verifiers?: unknown; quorum?: unknown; unconfirmedP0?: unknown; maxParallel?: unknown };
   };
   const gates = effective.gates ?? {};
   const loop = effective.loop ?? {};
@@ -3155,6 +3155,25 @@ export function Settings({
           <span className={S.hint}>
             how many verifiers must say a plan finding is real. Blank means a majority of the
             verifiers — more than half of them.
+          </span>
+        </div>
+        {/* #452. The critique's own bound, not the review's: the core refuses
+            anything but a whole number from 1, and the field puts back what is
+            in force when a save is refused. */}
+        <div className={S.row}>
+          <label className={S.label} htmlFor="critique-maxParallel">
+            parallel turns {source('critique', 'maxParallel')}
+          </label>
+          <NumberField
+            id="critique-maxParallel"
+            value={typeof critique.maxParallel === 'number' ? critique.maxParallel : undefined}
+            disabled={busy}
+            onSave={(n) => save({ critique: { maxParallel: n } })}
+          />
+          <span className={S.hint}>
+            how many finder or verifier turns may run at once in a plan round. 1 runs them one after
+            another. Codex reports no spend mid-turn, so N at once can pass the token ceiling by up
+            to N turns.
           </span>
         </div>
         <div className={S.block}>
