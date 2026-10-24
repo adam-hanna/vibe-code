@@ -343,8 +343,27 @@ export interface FixOutput {
 export function parseFixOutput(raw: unknown): FixOutput {
   const o = record(raw, 'fix', raw);
   const report = str(o, 'report', 'fix', raw);
-  const dispositions = arr(o, 'dispositions', 'fix', raw).map((d, i) => {
-    const path = `fix.dispositions[${String(i)}]`;
+  return { report, dispositions: readDispositionList(o, 'fix', raw) };
+}
+
+/** One disposition as a turn said it, before it is joined onto a finding. */
+export type SaidDisposition = FixOutput['dispositions'][number];
+
+/**
+ * A findings revision's dispositions (#453), or a throw.
+ *
+ * Strict for the reason `parseFixOutput` is: a missing key, a non-array or one
+ * malformed entry makes the whole list unreadable, which records nothing -
+ * never a partial list whose gaps would read as findings the planner left out.
+ * The plan half of the same output is `parsePlan`'s, and is read separately.
+ */
+export function parsePlanDispositions(raw: unknown): SaidDisposition[] {
+  return readDispositionList(record(raw, 'revise', raw), 'revise', raw);
+}
+
+function readDispositionList(o: Record<string, unknown>, where: string, raw: unknown): SaidDisposition[] {
+  return arr(o, 'dispositions', where, raw).map((d, i) => {
+    const path = `${where}.dispositions[${String(i)}]`;
     const e = record(d, path, raw);
     return {
       id: str(e, 'id', path, raw),
@@ -352,7 +371,6 @@ export function parseFixOutput(raw: unknown): FixOutput {
       reason: str(e, 'reason', path, raw),
     };
   });
-  return { report, dispositions };
 }
 
 export function parseAnswers(raw: unknown): AnswersReport {

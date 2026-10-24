@@ -73,7 +73,7 @@ vibe stats
 vibe stats --json
 ```
 
-Reads every run in the repository's archive and reports how the loop has behaved: plan revisions and question rounds per run, how often a final fix round was needed, the tokens each kind of turn took, and more. Each rate states how many runs could not answer it. It also reports what the fixer did with each reviewer finding: fixed, rebutted by the fixer, deferred or not addressed. Those are shown per reviewer seat and by severity, each beside the others and the total, together with how many fix rounds recorded no dispositions. Findings a person raised are not counted. `--json` prints the document instead of the table. Nothing is written.
+Reads every run in the repository's archive and reports how the loop has behaved: plan revisions and question rounds per run, how often a final fix round was needed, the tokens each kind of turn took, and more. Each rate states how many runs could not answer it. It also reports what the fixer did with each reviewer finding: fixed, rebutted by the fixer, deferred or not addressed. Those are shown per reviewer seat and by severity, each beside the others and the total, together with how many fix rounds recorded no dispositions. It reports what the planner did with each critic finding in the same terms, rebutted by the planner, per critic seat, by severity and by the finding's vote outcome, with how many plan revisions recorded none and how many rebutted findings the next critique raised again under the same id. That last count does not notice a finding raised again under a new id, so it undercounts. Findings a person raised, or vibe raised itself, are not counted. `--json` prints the document instead of the table. Nothing is written.
 
 ## `vibe doctor`
 

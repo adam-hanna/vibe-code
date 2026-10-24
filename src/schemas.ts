@@ -267,9 +267,12 @@ export const FINDINGS_SCHEMA = {
         // Left alone on the same evidence: `test_verdicts` (last in
         // `REVIEW_SCHEMA`, often `[]`) shows no blank run before it in the
         // archive, and `ANSWERS_SCHEMA`, `FIX_SCHEMA` and `PLAN_SCHEMA` end on
-        // fields that are not null. `scripts/count-schema-stalls.mjs` is how a
-        // later archive confirms or refutes this, including whether the stall
-        // simply moved to the new last key.
+        // fields that are not null. `REVISE_SCHEMA` (#453) is `PLAN_SCHEMA` with
+        // `dispositions` appended, and ends on `dispositions[].reason`, a
+        // non-null string, so it keeps to the rule rather than testing it.
+        // `scripts/count-schema-stalls.mjs` is how a later archive confirms or
+        // refutes this, including whether the stall simply moved to the new
+        // last key.
         required: [
           'id',
           'severity',
@@ -639,6 +642,47 @@ export const FIX_SCHEMA = {
             description:
               'fixed = you changed the code to resolve it. rebutted = you believe it is incorrect ' +
               'and changed nothing for it. deferred = real, but separable work you did not do here. ' +
+              'not-addressed = none of these.',
+          },
+          reason: { type: 'string', description: 'Why, in a sentence or two.' },
+        },
+      },
+    },
+  },
+} as const satisfies object;
+
+/**
+ * A findings revision's turn (#453): the plan, plus what the planner did with
+ * each finding it was shown. `PLAN_SCHEMA`'s properties in their order with a
+ * required `dispositions` after them, so the plan half is read by `parsePlan`
+ * unchanged and the dispositions are split off before anything stores the plan.
+ *
+ * Sent only on `revise-<n>`, the revision answering a critique: the first plan
+ * turn and an answers-only revision send `PLAN_SCHEMA` exactly as before. The
+ * enum is `FIX_SCHEMA`'s, worded for a plan. It ends on `reason`, a non-null
+ * string - see the key-order note in `FINDINGS_SCHEMA`.
+ */
+export const REVISE_SCHEMA = {
+  ...PLAN_SCHEMA,
+  required: [...PLAN_SCHEMA.required, 'dispositions'],
+  properties: {
+    ...PLAN_SCHEMA.properties,
+    dispositions: {
+      type: 'array',
+      description: 'One entry per finding id listed in the prompt, and only those ids.',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['id', 'disposition', 'reason'],
+        properties: {
+          id: { type: 'string', description: 'The finding id, exactly as listed.' },
+          disposition: {
+            type: 'string',
+            enum: ['fixed', 'rebutted', 'deferred', 'not-addressed'],
+            description:
+              'fixed = you changed the plan to resolve it. rebutted = you believe it is incorrect ' +
+              'and changed nothing in the plan for it; explain why in plan_md as well. deferred = ' +
+              'real, but separable work you recorded in out_of_scope rather than planning here. ' +
               'not-addressed = none of these.',
           },
           reason: { type: 'string', description: 'Why, in a sentence or two.' },

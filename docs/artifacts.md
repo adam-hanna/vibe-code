@@ -11,6 +11,7 @@ Most files are conditional: a missing one means the run had nothing to put in it
 | `PLAN.md` | The approved plan. |
 | `plan-<n>.json` | Each plan round: the plan, its declared assumptions, open questions, out-of-scope list and acceptance criteria. |
 | `plan-critique-<n>.json` | The critic's findings on each plan round. |
+| `plan-dispositions-<n>.json` | What the plan revision of round `<n>` said it did with each critique finding it was given: `fixed`, `rebutted`, `deferred` or `not-addressed`, with its reason, the seats that raised the finding, and the finding's vote outcome when it was voted on. It answers `plan-critique-<n-1>.json`. Missing when the planner's answer could not be read, and for a revision that answered only questions. |
 | `answers-<n>.json` | The answerer's answers to the planner's questions, one file per question round. |
 | `implementation-report.md` | What the implementer says it did, under five fixed headings. It is handed to the reviewer as a claim, not as evidence. |
 | `fix-report-<n>.md`, `verify-fix-<n>.md` | The same report after a review fix round, or after a verification repair. |
