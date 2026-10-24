@@ -41,7 +41,7 @@ function withGlobal<T>(at: string, body: () => T): T {
 }
 
 test('the defaults are no extra seats, a majority, and an unconfirmed P0 that blocks', () => {
-  assert.deepEqual(DEFAULTS.review, { finders: [], verifiers: [], quorum: null, unconfirmedP0: 'block' });
+  assert.deepEqual(DEFAULTS.review, { finders: [], verifiers: [], quorum: null, unconfirmedP0: 'block', maxParallel: 1 });
   assert.deepEqual(loadConfig(project({})).review, DEFAULTS.review);
 });
 
@@ -51,6 +51,7 @@ test('seats are written like roles, and a finder may name a focus', () => {
     verifiers: [{ provider: 'codex', mcpServers: ['github'] }, 'claude', 'codex'],
     quorum: 2,
     unconfirmedP0: 'halt',
+    maxParallel: 3,
   };
   assert.deepEqual(load(review), review);
   // Absent focus is the shared prompt, and accepted.
@@ -116,9 +117,16 @@ test('focus: empty, blank or not a string is refused; on a verifier it is an unk
   );
 });
 
+test('maxParallel is a positive whole number of turns, with no upper bound (#403)', () => {
+  const message = 'review.maxParallel must be a positive whole number of turns at once (1 runs them one after another)';
+  for (const bad of [0, -1, 1.5, '2', null]) refused({ maxParallel: bad }, message);
+  assert.equal((load({ maxParallel: 1 }) as { maxParallel: number }).maxParallel, 1);
+  assert.equal((load({ maxParallel: 8 }) as { maxParallel: number }).maxParallel, 8);
+});
+
 test('the section is strict: no dropped key, no swallowed null', () => {
-  refused({ quorom: 2 }, 'review.quorom is not a setting; review takes finders, verifiers, quorum and unconfirmedP0');
-  refused(null, 'review must be an object with finders, verifiers, quorum and unconfirmedP0');
+  refused({ quorom: 2 }, 'review.quorom is not a setting; review takes finders, verifiers, quorum, unconfirmedP0 and maxParallel');
+  refused(null, 'review must be an object with finders, verifiers, quorum, unconfirmedP0 and maxParallel');
   refused({ finders: 'codex' }, 'review.finders must be a list of seats, or [] for none');
   refused({ verifiers: {} }, 'review.verifiers must be a list of seats, or [] for none');
 });
@@ -139,6 +147,7 @@ test('review is set globally and per project, the project winning key by key and
       verifiers: ['codex', 'codex', 'claude'],
       quorum: 3,
       unconfirmedP0: 'block',
+      maxParallel: 1,
     });
     // The project's finders replace the global list; the global quorum and verifiers stand.
     assert.deepEqual(loadConfig(project({ review: { finders: [{ provider: 'codex', focus: 'tests' }] } })).review, {
@@ -146,6 +155,7 @@ test('review is set globally and per project, the project winning key by key and
       verifiers: ['codex', 'codex', 'claude'],
       quorum: 3,
       unconfirmedP0: 'block',
+      maxParallel: 1,
     });
     // A global write goes to the global file and is validated there.
     writeConfigPatch(null, { review: { unconfirmedP0: 'demote' } }, 'global');

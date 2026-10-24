@@ -2,12 +2,15 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { Cancelled, CANCEL_ENDING, cancelRequested, currentTurnGroup, registerInterruptible } from '@src/cancel.js';
+import { attachSpend } from '@src/charge.js';
 import type { ClaudeTurnOptions } from '@src/claude.js';
 import { parseHumanAnswers, recordHumanAnswers } from '@src/cli.js';
 import type { CodexTurnOptions } from '@src/codex.js';
 import { DEFAULTS } from '@src/config.js';
 import { Escalation, EXIT, orchestrate, writeEscalation } from '@src/orchestrator.js';
 import type { AgentTurns } from '@src/orchestrator.js';
+import { attachEnding } from '@src/proc.js';
 import { mergeHumanAnswers, reconcileQuestionRecords } from '@src/questions.js';
 import { acceptMoves, acceptRaised, parseMoves, parseRaised, raisePhase } from '@src/raise.js';
 import { createRun, resumePhase, saveState, takePendingFindings } from '@src/run.js';
@@ -272,6 +275,132 @@ export function agents(handlers: Handlers, calls: string[]): AgentTurns {
       });
     },
   };
+}
+
+/**
+ * A turn the test holds open, for the cases that need two at once (#403).
+ *
+ * `agents()` resolves every turn in the same tick it is dispatched, so nothing
+ * it drives can overlap. This holds each turn `hold(label)` names until the case
+ * calls `release(label)`, and every other one for `delayMs`, so seat turns run
+ * side by side exactly as `runSeatGroup` dispatches them. It is `turn-seam.test.ts`'s
+ * held-promise pattern made reusable, and it leaves `agents()` and its callers
+ * untouched.
+ */
+export interface Deferred {
+  /** Which labels wait for `release`; the rest finish after `delayMs`. */
+  hold: (label: string) => boolean;
+  delayMs: number;
+  /** What a turn killed mid-flight reports having spent (#403). 0 reports nothing. */
+  spentOnKill: number;
+  /** Turns dispatched and not yet settled, and the most there ever were. */
+  live: number;
+  maxLive: number;
+  /** Held turns, in the order they started, until released or killed. */
+  held: string[];
+  /** Every dispatched turn's options, by label - a case reaches `progress` here. */
+  options: Map<string, ClaudeTurnOptions | CodexTurnOptions>;
+  /** Labels whose turn was killed rather than finished. */
+  killed: string[];
+  release: (label: string) => void;
+  /** Where `release` finds a held turn; written by `deferredAgents`. */
+  readonly releases: Map<string, () => void>;
+}
+
+export function deferred(over: Partial<Pick<Deferred, 'hold' | 'delayMs' | 'spentOnKill'>> = {}): Deferred {
+  const releases = new Map<string, () => void>();
+  const ctl: Deferred = {
+    hold: over.hold ?? (() => false),
+    delayMs: over.delayMs ?? 0,
+    spentOnKill: over.spentOnKill ?? 0,
+    live: 0,
+    maxLive: 0,
+    held: [],
+    options: new Map(),
+    killed: [],
+    releases,
+    release: (label) => {
+      const go = releases.get(label);
+      if (go === undefined) throw new Error(`no held turn is labelled ${label}`);
+      releases.delete(label);
+      go();
+    },
+  };
+  return ctl;
+}
+
+/**
+ * `agents()`, with every turn held as `ctl` says and killable as a real child is.
+ *
+ * Each turn registers a kill the way `proc.run` does, so `requestCancel` and a
+ * stopped turn group reach it, and a killed turn rejects as a real one does: a
+ * `Cancelled` carrying a SIGKILL ending and, when `ctl.spentOnKill` is set, the
+ * spend it had been observed to make - which is what `chargeFailure` charges.
+ */
+export function deferredAgents(handlers: Handlers, calls: string[], ctl: Deferred): AgentTurns {
+  const { releases } = ctl;
+  const now = agents(handlers, []);
+  const held = <T>(label: string, produce: () => Promise<T>): Promise<T> => {
+    calls.push(label);
+    ctl.live += 1;
+    ctl.maxLive = Math.max(ctl.maxLive, ctl.live);
+    const group = currentTurnGroup();
+    return new Promise<T>((resolve, reject) => {
+      let done = false;
+      const finish = (settle: () => void): void => {
+        if (done) return;
+        done = true;
+        ctl.live -= 1;
+        ctl.held = ctl.held.filter((l) => l !== label);
+        unregister();
+        settle();
+      };
+      const unregister = registerInterruptible(() => {
+        ctl.killed.push(label);
+        releases.delete(label);
+        finish(() =>
+          reject(
+            attachEnding(
+              attachSpend(new Cancelled(cancelRequested() ?? group?.reason ?? 'asked to stop'), {
+                tokens: ctl.spentOnKill,
+                costUsd: null,
+              }),
+              CANCEL_ENDING,
+            ),
+          ),
+        );
+      });
+      // Through a promise, so a handler that throws rejects this turn - as it
+      // does under `agents()` - rather than throwing into whoever released it.
+      const go = (): void => finish(() => void Promise.resolve().then(produce).then(resolve, reject));
+      if (ctl.hold(label)) {
+        ctl.held.push(label);
+        releases.set(label, go);
+      } else {
+        setTimeout(go, ctl.delayMs);
+      }
+    });
+  };
+  return {
+    claude: (options) => {
+      const label = options.progress?.label ?? '(unlabelled)';
+      ctl.options.set(label, options);
+      return held(label, () => now.claude(options));
+    },
+    codex: (options) => {
+      ctl.options.set(options.schemaName, options);
+      return held(options.schemaName, () => now.codex(options));
+    },
+  };
+}
+
+/** Wait for `ready`, polling between event-loop turns, or fail saying what it waited for. */
+export async function until(ready: () => boolean, what: string, deadlineMs = 10_000): Promise<void> {
+  const end = Date.now() + deadlineMs;
+  while (!ready()) {
+    if (Date.now() > end) throw new Error(`waited ${deadlineMs}ms for ${what}`);
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
 }
 
 const RAW = Symbol('codex raw text');

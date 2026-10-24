@@ -5,7 +5,14 @@ import os from 'node:os';
 // The one import, and it points the other way from everything else here:
 // `cancel.ts` is a leaf that imports only this module's types, so the kill
 // mechanism lives beside the spawn rather than being threaded down to it.
-import { Cancelled, CANCEL_ENDING, cancelRequested, registerInterruptible } from '@src/cancel.js';
+import {
+  Cancelled,
+  CANCEL_ENDING,
+  cancelRequested,
+  currentTurnGroup,
+  registerInterruptible,
+  stopReason,
+} from '@src/cancel.js';
 // The other exception: what a child prints is redacted of every key this
 // process could have put in its environment (#223) - a vendor's 401 quotes the
 // key it was sent, and everything below hands stdout and stderr to a log.
@@ -323,7 +330,9 @@ export function run(bin: string, args: readonly string[], options: RunOptions = 
     // loop's own handlers, any one of which could plausibly decide to have
     // another go; refusing here means the next agent child does not start at
     // all, rather than every layer in between having to remember not to.
-    const stopped = interruptible === true ? cancelRequested() : null;
+    // `stopReason`, not the latch alone: a review seat whose group was stopped
+    // by a sibling's ceiling must not start either (#403).
+    const stopped = interruptible === true ? stopReason() : null;
     if (stopped !== null) {
       reject(new Cancelled(stopped));
       return;
@@ -400,6 +409,7 @@ export function run(bin: string, args: readonly string[], options: RunOptions = 
     };
 
     if (interruptible === true) {
+      const group = currentTurnGroup();
       unregister = registerInterruptible(() => {
         child.kill('SIGKILL');
         // Rejected here rather than left to `close`, for the reason the timeout
@@ -410,7 +420,12 @@ export function run(bin: string, args: readonly string[], options: RunOptions = 
         // matching English - a turn that failed may be worth retrying, and a
         // turn somebody stopped never is.
         settle(() =>
-          reject(attachEnding(new Cancelled(cancelRequested() ?? 'asked to stop'), CANCEL_ENDING)),
+          reject(
+            attachEnding(
+              new Cancelled(cancelRequested() ?? group?.reason ?? 'asked to stop'),
+              CANCEL_ENDING,
+            ),
+          ),
         );
       });
     }

@@ -1691,6 +1691,11 @@ export function reportRoles(cfg: Config): void {
     );
     log.info(`Verifiers: ${seated.join(' ')}`);
   }
+  // Only when seats can overlap (#403): at 1 they run one after another, and a
+  // run that never raised it prints what it always has.
+  if ((finders.length > 0 || verifiers.length > 0) && cfg.review.maxParallel > 1) {
+    log.info(`Parallel: up to ${cfg.review.maxParallel} seat turns at once`);
+  }
   for (const warning of roleWarnings(cfg)) log.warn(warning);
 }
 
@@ -1741,7 +1746,7 @@ function reportResolvedRoles(cfg: Config): void {
  * as a recommendation.
  */
 function reportReviewSeats(cfg: Config): void {
-  const { quorum, unconfirmedP0 } = cfg.review;
+  const { quorum, unconfirmedP0, maxParallel } = cfg.review;
   const finders = readFinders(cfg);
   const verifiers = readVerifiers(cfg);
   if (finders.length === 0 && verifiers.length === 0) return;
@@ -1754,9 +1759,19 @@ function reportReviewSeats(cfg: Config): void {
     const width = Math.max(...rows.map(([label]) => label.length));
     for (const [label, text] of rows) log.info(`    ${label.padEnd(width)}  ${text}`);
   };
+  // How many of those turns may be live at once (#403). It changes no count of
+  // turns, only how many overlap - and with them, how far Codex turns, which
+  // report nothing in flight, can carry the run past budget.maxTokens.
+  const parallel: [string, string] = [
+    'parallel',
+    maxParallel === 1
+      ? '1 (one after another)'
+      : `${maxParallel} at once (Codex turns can overshoot budget.maxTokens by up to ${maxParallel} turns' spend)`,
+  ];
   if (finders.length > 0) {
     log.info('  review finders (each reviews every chunk; one extra turn per chunk per finder):');
-    print(finders.map((f): [string, string] => [`finder ${f.k}`, seat(f.setting, f.focus)]));
+    const rows = finders.map((f): [string, string] => [`finder ${f.k}`, seat(f.setting, f.focus)]);
+    print(verifiers.length === 0 ? [...rows, parallel] : rows);
   }
   if (verifiers.length === 0) return;
   log.info(
@@ -1769,6 +1784,7 @@ function reportReviewSeats(cfg: Config): void {
     quorum === null ? `${Math.floor(n / 2) + 1} of ${n} (a majority)` : `${quorum} of ${n}`,
   ]);
   rows.push(['unconfirmed P0', unconfirmedP0]);
+  rows.push(parallel);
   print(rows);
 }
 

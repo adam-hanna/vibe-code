@@ -9,7 +9,7 @@ import { Caret } from './Disclosure';
 import { clock, elapsed } from './format';
 import { censusByPhase, passLabel, phaseRound, questionsByPhase, shownRound, title, turnRound, unplacedQuestions } from './rounds';
 import type { BottomTab, Tab } from './where';
-import { findTurn, nowStatus, RAIL_TITLE, runningGate, turnGroup, verifyRow, verifyRowText } from './rail';
+import { findTurn, liveSeatsLine, nowStatus, RAIL_TITLE, runningGate, turnGroup, verifyRow, verifyRowText } from './rail';
 import type { RailState, VerifyRow } from './rail';
 import { RunningRow } from './RunningRow';
 import type { ArchiveView } from './model';
@@ -112,8 +112,13 @@ function status(kind: CycleKind, count: number): string {
  */
 type Draw = 'live' | 'settled' | 'done';
 
-const drawOf = (turn: Turn, runningId: number | null, settledId: number | null): Draw =>
-  turn.id === runningId ? 'live' : turn.id === settledId ? 'settled' : 'done';
+/**
+ * `live` for every turn still running, not only the newest (#403): review seats
+ * may overlap, and drawing the older ones as finished while they run would be
+ * the wrong measurement on screen. A run that never overlaps has one at most.
+ */
+const drawOf = (turn: Turn, liveIds: ReadonlySet<number>, settledId: number | null): Draw =>
+  liveIds.has(turn.id) ? 'live' : turn.id === settledId ? 'settled' : 'done';
 
 function Version({
   turn,
@@ -174,7 +179,8 @@ function Round({
   open,
   onToggle,
   onOpen,
-  runningId,
+  liveIds,
+  seats,
   settledId,
   now,
   archive,
@@ -189,7 +195,9 @@ function Round({
   onToggle: () => void;
   /** Where a count sends the reader. Undefined leaves every count inert. */
   onOpen?: OpenAt | undefined;
-  runningId: number | null;
+  liveIds: ReadonlySet<number>;
+  /** Which review seats are running in this round, when several are (#403). */
+  seats: string | null;
   settledId: number | null;
   now: number;
   archive: ArchiveView;
@@ -221,6 +229,9 @@ function Round({
             its own, so no chip: a replay files it under review round 0. */}
         {phaseRound(phase) !== null && <Badge className="font-mono normal-case tracking-normal">round {phaseRound(phase)}</Badge>}
       </button>
+      {/* Drawn folded as well as open, like the group's own count: several seats
+          running at once is the state of the round, not a detail of its body. */}
+      {seats !== null && <p className="m-0 mt-1 text-body-sm text-secondary">{seats}</p>}
 
       {open && (
         <>
@@ -258,7 +269,7 @@ function Round({
             <Version
               key={turn.id}
               turn={turn}
-              draw={drawOf(turn, runningId, settledId)}
+              draw={drawOf(turn, liveIds, settledId)}
               now={now}
               archive={archive}
             />
@@ -281,7 +292,7 @@ function Round({
               <Version
                 key={turn.id}
                 turn={turn}
-                draw={drawOf(turn, runningId, settledId)}
+                draw={drawOf(turn, liveIds, settledId)}
                 now={now}
                 archive={archive}
               />
@@ -303,7 +314,7 @@ function Round({
               questions={questions}
               turns={answerers}
               onOpen={onOpen}
-              runningId={runningId}
+              liveIds={liveIds}
               settledId={settledId}
               now={now}
               archive={archive}
@@ -350,7 +361,7 @@ function Questions({
   questions,
   turns,
   onOpen,
-  runningId,
+  liveIds,
   settledId,
   now,
   archive,
@@ -359,7 +370,7 @@ function Questions({
   /** The answerer's turns from this phase, which belong here rather than above. */
   turns: readonly Turn[];
   onOpen?: OpenAt | undefined;
-  runningId: number | null;
+  liveIds: ReadonlySet<number>;
   settledId: number | null;
   now: number;
   archive: ArchiveView;
@@ -409,7 +420,7 @@ function Questions({
       />
 
       {turns.map((turn) => (
-        <Version key={turn.id} turn={turn} draw={drawOf(turn, runningId, settledId)} now={now} archive={archive} />
+        <Version key={turn.id} turn={turn} draw={drawOf(turn, liveIds, settledId)} now={now} archive={archive} />
       ))}
 
       {/* Hi-fi 14: *"waiting on you is not stalled, and the column says so."* The
@@ -790,7 +801,9 @@ export function LoopColumn({
     });
   };
 
-  const runningId = run.running?.id ?? null;
+  const liveIds = new Set(run.live.map((t) => t.id));
+  // Several review seats running at once, said on the round they run in (#403).
+  const seatLine = liveSeatsLine(run);
   // Told, not worked out. `reduce` names the turn a gate opened after, so the
   // column does not have to decide that "the last one" is the right turn (#202).
   const settledId = run.gate?.turnId ?? null;
@@ -860,7 +873,8 @@ export function LoopColumn({
                   open={!shut.has(`p${String(phase.id)}`)}
                   onToggle={() => { toggle(`p${String(phase.id)}`); }}
                   onOpen={onOpen}
-                  runningId={runningId}
+                  liveIds={liveIds}
+                  seats={seatLine !== null && phase.turns.some((t) => liveIds.has(t.id)) ? seatLine : null}
                   settledId={settledId}
                   now={now}
                   archive={archive}
@@ -880,7 +894,7 @@ export function LoopColumn({
           questions={round}
           turns={[]}
           onOpen={onOpen}
-          runningId={runningId}
+          liveIds={liveIds}
           settledId={settledId}
           now={now}
           archive={archive}
@@ -1102,6 +1116,7 @@ function RunRail({
   archive: ArchiveView;
 }) {
   const currentTurn = run.running ?? findTurn(run, run.gate?.turnId ?? null);
+  const seatLine = liveSeatsLine(run);
   // A gate running with no turn open is the Code stage working: the gates are
   // drawn under Code and run between its turns (#409). Without this a resume
   // at `reviewing` drew Code complete and Code review not started while the
@@ -1164,6 +1179,9 @@ function RunRail({
         </div>
         <h2 className="mt-1.5 mb-0 text-section font-semibold text-display">{status.title}</h2>
         <p className="mt-1 mb-0 text-body-sm text-secondary" title={status.detail}>{status.detail}</p>
+        {/* Every seat running, when there are several (#403): the sentence above
+            can only speak for one of them. */}
+        {seatLine !== null && <p className="mt-1 mb-0 text-body-sm text-secondary">{seatLine}</p>}
         {statusTime !== null && (
           <span className={cn(FIGURE, 'mt-2 inline-flex items-center gap-1')} title="Elapsed time for the current turn, gate or preflight">
             <Clock size={13} aria-hidden="true" /> {statusTime}

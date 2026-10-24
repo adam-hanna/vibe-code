@@ -48,7 +48,7 @@ const SANDBOXES: readonly Sandbox[] = ['read-only', 'workspace-write', 'danger-f
 export const UNCONFIRMED_P0: readonly UnconfirmedP0[] = ['block', 'halt', 'demote'];
 
 /** The keys of the `review` section, in the order a message lists them. */
-const REVIEW_KEYS = ['finders', 'verifiers', 'quorum', 'unconfirmedP0'] as const;
+const REVIEW_KEYS = ['finders', 'verifiers', 'quorum', 'unconfirmedP0', 'maxParallel'] as const;
 
 /**
  * The agent CLI versions this build was tested against (#298).
@@ -272,7 +272,9 @@ export const DEFAULTS: Config = {
   // before the key existed. `block` is the owner's decision (2026-10-20): an
   // unconfirmed P0 still blocks unless somebody chooses otherwise. No
   // recommended set of seats ships until #388's measurement has been made.
-  review: { finders: [], verifiers: [], quorum: null, unconfirmedP0: 'block' },
+  // `maxParallel: 1` is today's order, one seat turn after another (#403): the
+  // groundwork rule, so nothing about a run changes until somebody raises it.
+  review: { finders: [], verifiers: [], quorum: null, unconfirmedP0: 'block', maxParallel: 1 },
   // On, by the owner's decision on #323: a terminal user is told once, at the
   // end of `vibe run`, `vibe plan` or `vibe doctor`, when npm has a newer vibe.
   // It is the one network request in `src/` - see `src/updatecheck.ts` for what
@@ -932,7 +934,7 @@ function validate(cfg: Config): void {
 function validateReview(review: unknown): void {
   const takes = `review takes ${REVIEW_KEYS.slice(0, -1).join(', ')} and ${REVIEW_KEYS[REVIEW_KEYS.length - 1] ?? ''}`;
   if (!isRecord(review)) {
-    throw new Error(`review must be an object with finders, verifiers, quorum and unconfirmedP0`);
+    throw new Error(`review must be an object with finders, verifiers, quorum, unconfirmedP0 and maxParallel`);
   }
   for (const key of Object.keys(review)) {
     if (!(REVIEW_KEYS as readonly string[]).includes(key)) {
@@ -978,6 +980,13 @@ function validateReview(review: unknown): void {
   const p0: unknown = review['unconfirmedP0'];
   if (typeof p0 !== 'string' || !UNCONFIRMED_P0.includes(p0 as UnconfirmedP0)) {
     throw new Error(`review.unconfirmedP0 must be one of ${UNCONFIRMED_P0.join(', ')}`);
+  }
+  // No upper bound: a cap would be a number nobody measured (#403).
+  const parallel: unknown = review['maxParallel'];
+  if (typeof parallel !== 'number' || !Number.isInteger(parallel) || parallel < 1) {
+    throw new Error(
+      'review.maxParallel must be a positive whole number of turns at once (1 runs them one after another)',
+    );
   }
 }
 
