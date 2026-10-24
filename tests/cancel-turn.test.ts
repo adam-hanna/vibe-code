@@ -11,8 +11,12 @@ import {
   cancelRequested,
   Cancelled,
   clearCancel,
+  inTurnGroup,
+  newTurnGroup,
   requestCancel,
   registerInterruptible,
+  sleepUnlessCancelled,
+  stopTurnGroup,
 } from '@src/cancel.js';
 import { decode } from '@src/protocol.js';
 import { run } from '@src/proc.js';
@@ -310,4 +314,87 @@ test('a stop pressed during preflight ends the run there, and buys no first turn
   assert.equal(code, EXIT.NEEDS_HUMAN);
   assert.equal(state.status, 'needs-input');
   clearCancel();
+});
+
+// ---- a turn group: the scoped kill a ceiling uses, never the latch (#403) --
+
+/** A child under watch: what it printed, and whether its promise has settled. */
+interface Watched {
+  out: string[];
+  promise: Promise<unknown>;
+  settled: boolean;
+}
+
+function watch(start: (onLine: (line: string) => void) => Promise<unknown>): Watched {
+  const w: Watched = { out: [], promise: Promise.resolve(), settled: false };
+  w.promise = start((l) => void w.out.push(l));
+  w.promise.then(
+    () => (w.settled = true),
+    () => (w.settled = true),
+  );
+  return w;
+}
+
+/**
+ * Wait for a child to print its first line, so a kill lands on a running child.
+ * Says which way it failed (#181): a child that ended before writing is a
+ * different finding from one that wrote nothing within the deadline.
+ */
+async function started(w: Watched, name: string): Promise<void> {
+  const end = Date.now() + 10_000;
+  while (!w.out.some((l) => l === 'up')) {
+    if (w.settled) throw new Error(`the ${name} child ended before it wrote anything`);
+    if (Date.now() > end) throw new Error(`the ${name} child wrote nothing within 10s`);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
+test('stopping a turn group kills its children only, and leaves the run uncancelled', async (t) => {
+  clearCancel();
+  const group = newTurnGroup();
+  const { bin, args } = sleeper();
+  const inside = watch((onLine) => inTurnGroup(group, () => run(bin, args, { interruptible: true, onLine })));
+  const outside = watch((onLine) => run(bin, args, { interruptible: true, onLine }));
+  const grouped = inside.promise;
+  const other = outside.promise;
+  // Whatever happens below, no sleeper outlives the case and no latch leaks out
+  // of it: a live child would keep this file's event loop open and turn any
+  // assertion failure into a hang.
+  t.after(async () => {
+    stopTurnGroup(group, 'test cleanup');
+    requestCancel('test cleanup');
+    await Promise.allSettled([grouped, other]);
+    clearCancel();
+  });
+  await Promise.all([started(inside, 'grouped'), started(outside, 'ungrouped')]);
+
+  assert.equal(stopTurnGroup(group, 'a sibling crossed the ceiling'), 1);
+  await assert.rejects(grouped, (err: unknown) => {
+    assert.ok(err instanceof Cancelled);
+    assert.match(err.message, /a sibling crossed the ceiling/);
+    return true;
+  });
+  assert.equal(cancelRequested(), null, 'a group stop set the run latch');
+
+  // The child outside the group is still running, and the run's own stop still
+  // reaches it.
+  assert.equal(requestCancel('the run is stopped'), 1);
+  await assert.rejects(other, (err: unknown) => err instanceof Cancelled);
+});
+
+test('a stopped group refuses a new child and cuts its waits short', async (t) => {
+  clearCancel();
+  t.after(() => clearCancel());
+  const group = newTurnGroup();
+  const { bin, args } = sleeper();
+  const waiting = inTurnGroup(group, () => sleepUnlessCancelled(60_000));
+  stopTurnGroup(group, 'stopped');
+  assert.equal(await waiting, false, 'a wait inside a stopped group slept on');
+
+  await assert.rejects(
+    inTurnGroup(group, () => run(bin, args, { interruptible: true })),
+    (err: unknown) => err instanceof Cancelled,
+  );
+  // Outside the group, nothing is refused.
+  assert.equal(await sleepUnlessCancelled(1), true);
 });

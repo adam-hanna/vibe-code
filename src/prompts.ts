@@ -2,6 +2,7 @@ import { describedRole, ROLES } from '@src/roles.js';
 import { EVIDENCE_RULE, REPRODUCER_RULE } from '@src/schemas.js';
 import { inspectedItems } from '@src/evidence.js';
 import { describeOutcome } from '@src/reproducer.js';
+import { movedByVote } from '@src/stored.js';
 import { authorOf, readEvidence, reproductionAt, severityChangesOf } from '@src/validate.js';
 import type { RoleTable } from '@src/roles.js';
 import type { EnvironmentFacts } from '@src/runtime.js';
@@ -945,7 +946,7 @@ export function revisePlanPrompt({
 
 An independent reviewer raised the following. Evaluate each P1 against the original task and repository evidence, then resolve the defect or explicitly rebut an incorrect finding. The reviewer's proposed remedy is advisory; use the simplest coherent approach that resolves a valid defect.
 
-${findings.map(formatFinding).join('\n\n')}${deferralNote(findings, 'planner')}
+${findings.map((f) => formatFinding(f) + voteNote(f)).join('\n\n')}${deferralNote(findings, 'planner')}
 
 For each P1: fix the plan, or, if you believe the finding is wrong, say so explicitly in the plan with your reasoning. Do not silently ignore one.
 
@@ -1322,6 +1323,93 @@ ${diff || '(empty diff)'}
 ## The plan this was implementing
 
 ${planMd}
+
+${block(BLOCK.json, RESPOND_WITH_JSON)}`;
+}
+
+/** What a critique verifier is shown of the plan (#405): the plan and the three lists it states. */
+export type VotePlan = Pick<Plan, 'plan_md' | 'assumptions' | 'out_of_scope' | 'acceptance_criteria'>;
+
+/**
+ * One critique verifier's prompt: is this one claimed defect in the plan real?
+ * (#405)
+ *
+ * `votePrompt`'s rules, asked of a plan instead of a diff. A prompt of its own
+ * rather than a branch inside `votePrompt`, whose output the review's
+ * verifiers are sent and `vote-basic.txt` pins byte for byte; and because the
+ * question is not the same one - *does this defect exist in this plan* covers a
+ * plan contradicting the repository, missing what the brief requires, getting
+ * a step wrong, or taking on what the brief rules out, none of which a diff can
+ * show.
+ *
+ * **What it is never told, by construction**, for `votePrompt`'s reason: it
+ * takes the claim's four fields and nothing else of the finding, so the id, the
+ * severity, `foundBy`, who raised it, how many did and every other ballot have
+ * no argument to arrive through.
+ */
+export function critiqueVotePrompt(
+  claim: VoteClaim,
+  task: string,
+  plan: VotePlan,
+  environment?: EnvironmentFacts | null,
+  roles: RoleTable = ROLES,
+  /** The repository's `REVIEW.md`, as `votePrompt` takes it (#389). Absent renders nothing. */
+  reviewMd?: ReviewStandards | undefined,
+  /**
+   * The run artifact holding the plan being voted on, `plan-<n>.json`, so a
+   * `not-real` that points at the plan's own text can cite something that
+   * resolves. `VOTE_EVIDENCE`'s example, `PLAN.md`, is written only once the
+   * plan loop ends, so during a critique it resolves to nothing.
+   */
+  planArtifact = 'plan-0.json',
+): string {
+  return `You are checking one claimed defect in an implementation plan, before any code is written. Someone critiquing the plan says the defect below exists in it. Decide whether it does.
+
+Read the repository as needed: a plan's claims about the code are only checkable against the code. The repository is yours to read, not to change.
+
+${environmentBlock(environment, 'reviewer', roles)}
+
+## How to vote
+
+Judge **whether the defect exists in this plan** - not how severe it is, and not whether it is worth fixing. Those are not your question. A defect here is the plan contradicting the repository, missing something the task requires, getting a step wrong, or putting in scope something the task rules out.
+
+- **\`real\`** - the defect the claim describes is there. You need no evidence beyond the claim's own; agreeing with what it points at is enough.
+- **\`not-real\`** - the claim is false of this plan. Give a concrete reason it is false, and evidence for that reason that a reader can open: the code, or the part of the plan, that shows it, cited the way a finding cites. A \`not-real\` vote whose evidence resolves to nothing is counted as \`cannot-tell\`.
+- **\`cannot-tell\`** - anything in between. If you are in doubt, this is your vote. It is not a failure; it keeps the claim standing, which is the right outcome when nobody can show it is wrong.${standardsSection(reviewMd, true)}
+
+## Evidence
+
+${VOTE_EVIDENCE}
+
+The plan below is the run artifact \`${planArtifact}\`. To cite the plan itself, cite it as an \`artifact\` with the path \`${planArtifact}\`; \`PLAN.md\` is not written until the plan is approved.
+
+## The claim
+
+### ${claim.title}
+
+${claim.detail}${citation(claim, '\n\n')}
+
+*Suggested fix:* ${claim.suggested_fix}
+
+## The task the plan is for
+
+${task}
+
+## The plan
+
+${plan.plan_md}
+
+## Assumptions the planner declared
+
+${formatAssumptions(plan.assumptions)}
+
+## Scope the plan declared
+
+${formatOutOfScope(plan.out_of_scope)}
+
+## The plan's acceptance criteria
+
+${formatAcceptanceCriteria(plan.acceptance_criteria)}
 
 ${block(BLOCK.json, RESPOND_WITH_JSON)}`;
 }
@@ -1798,6 +1886,20 @@ function provenNote(f: Finding): string {
   const outcome = reproductionAt(f, 'review');
   if (outcome === null) return '';
   return `\n\n*Reproducer:* ${describeOutcome(outcome)}`;
+}
+
+/**
+ * A plan finding the critique vote moved to P2 (#405), as the planner is shown
+ * it: non-blocking, and why - the tally, in FOLLOW-UPS.md's words.
+ *
+ * The planner's prompt only. `fixPrompt` shows a vote-moved review finding as a
+ * plain P2 and is not changed here; and empty for every other finding, so a
+ * revision with nothing the vote moved is byte-identical.
+ */
+function voteNote(f: Finding): string {
+  return movedByVote(f) && f.downgraded !== undefined
+    ? `\n\n*Unconfirmed by vote:* ${f.downgraded.reason} - non-blocking.`
+    : '';
 }
 
 function formatFinding(f: Finding): string {

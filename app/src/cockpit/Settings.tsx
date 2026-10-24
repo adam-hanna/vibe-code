@@ -40,7 +40,7 @@ import {
   toRow as toSeatRow,
   UNCONFIRMED_P0_CHOICES,
 } from './seatform';
-import type { Seat, SeatKind, SeatRow, TimeoutSettings } from './seatform';
+import type { Seat, SeatKind, SeatRow, SeatSection, TimeoutSettings } from './seatform';
 import type { Listing } from './models';
 import { RemoteAccess } from '../remote/RemoteAccess';
 import { SURFACE } from '../surface';
@@ -811,6 +811,7 @@ function ModelField({
  */
 function SeatList({
   kind,
+  section = 'review',
   seats,
   efforts,
   providers,
@@ -821,6 +822,8 @@ function SeatList({
   onSave,
 }: {
   kind: SeatKind;
+  /** The section the list is saved under (#405); the review's unless said. */
+  section?: SeatSection;
   seats: Seat[];
   efforts: readonly string[];
   providers: readonly string[];
@@ -850,10 +853,12 @@ function SeatList({
     // `savedJson` stands in for `seats`, whose identity changes every render.
   }, [savedJson, refusals]);
 
-  const noun = kind === 'finders' ? 'finder' : 'verifier';
+  // A critique row says so (#405), so its controls' labels never collide with
+  // the review's on the same page.
+  const noun = `${section === 'critique' ? 'critique ' : ''}${kind === 'finders' ? 'finder' : 'verifier'}`;
   const commit = (next: readonly SeatRow[]): void => {
-    const patch = seatsPatch(kind, next);
-    const sent = (patch['review'] as Record<string, unknown>)[kind];
+    const patch = seatsPatch(kind, next, section);
+    const sent = (patch[section] as Record<string, unknown>)[kind];
     // Leaving a row without changing it is not an edit.
     if (JSON.stringify(sent) === JSON.stringify(seats)) return;
     onSave(patch);
@@ -1045,11 +1050,16 @@ function SeatList({
  * saved verifiers, which are what the core checks it against.
  */
 function QuorumField({
+  id = 'review-quorum',
+  section = 'review',
   value,
   verifiers,
   disabled,
   onSave,
 }: {
+  /** The input's id, for its label: one per section on the page (#405). */
+  id?: string;
+  section?: SeatSection;
   value: number | null;
   verifiers: number;
   disabled: boolean;
@@ -1061,19 +1071,19 @@ function QuorumField({
   return (
     <>
       <input
-        id="review-quorum"
+        id={id}
         className={cn(S.num, 'w-28')}
         value={typed}
         placeholder="majority"
         inputMode="numeric"
         disabled={disabled}
-        aria-describedby="review-quorum-reading"
+        aria-describedby={`${id}-reading`}
         aria-invalid={reading.problem}
         {...focus}
         onChange={(e) => setTyped(e.target.value)}
         onBlur={() => {
           left();
-          if (typed.trim() !== inForce) onSave(quorumPatch(typed));
+          if (typed.trim() !== inForce) onSave(quorumPatch(typed, section));
         }}
         onKeyDown={(e) => {
           if (e.key === 'Enter') e.currentTarget.blur();
@@ -1081,7 +1091,7 @@ function QuorumField({
         }}
       />
       <span
-        id="review-quorum-reading"
+        id={`${id}-reading`}
         className={reading.problem ? 'rounded-sm bg-alarm px-2 py-0.5 text-body-sm text-primary' : 'text-body-sm text-secondary'}
       >
         {reading.text}
@@ -1574,6 +1584,7 @@ export function Settings({
   const [savedFrom, setSavedFrom] = useState<string | null>(null);
   // Said beside the quorum when removing a verifier put it back to a majority (#448).
   const [quorumReset, setQuorumReset] = useState<string | null>(null);
+  const [critiqueQuorumReset, setCritiqueQuorumReset] = useState<string | null>(null);
   useEffect(() => setSavedFrom(null), [scope, dir]);
   const [busy, setBusy] = useState(false);
   const [refusals, setRefusals] = useState(0);
@@ -1777,7 +1788,8 @@ export function Settings({
     codex?: { model?: string; timeoutMs?: unknown };
     instructions?: { text?: string };
     prompts?: unknown;
-    review?: { finders?: unknown; verifiers?: unknown; quorum?: unknown; unconfirmedP0?: unknown };
+    review?: { finders?: unknown; verifiers?: unknown; quorum?: unknown; unconfirmedP0?: unknown; maxParallel?: unknown };
+    critique?: { finders?: unknown; verifiers?: unknown; quorum?: unknown; unconfirmedP0?: unknown };
   };
   const gates = effective.gates ?? {};
   const loop = effective.loop ?? {};
@@ -1789,6 +1801,7 @@ export function Settings({
   const verify = effective.verify ?? {};
   const roles = effective.roles ?? {};
   const review = effective.review ?? {};
+  const critique = effective.critique ?? {};
   // What a seat's blank model means: its agent's own setting, as the role rows read it.
   const inheritedModel = (provider: string): string | undefined =>
     provider === 'claude' || provider === 'codex' ? effective[provider]?.model : undefined;
@@ -3034,6 +3047,23 @@ export function Settings({
             more than half of them. A P2 or P3 is never voted on.
           </span>
         </div>
+        {/* #403. The core refuses anything but a whole number from 1, and the
+            field puts back what is in force when a save is refused. */}
+        <div className={S.row}>
+          <label className={S.label} htmlFor="review-maxParallel">
+            parallel turns {source('review', 'maxParallel')}
+          </label>
+          <NumberField
+            id="review-maxParallel"
+            value={typeof review.maxParallel === 'number' ? review.maxParallel : undefined}
+            disabled={busy}
+            onSave={(n) => save({ review: { maxParallel: n } })}
+          />
+          <span className={S.hint}>
+            how many finder or verifier turns may run at once. 1 runs them one after another. Codex
+            reports no spend mid-turn, so N at once can pass the token ceiling by up to N turns.
+          </span>
+        </div>
         <div className={S.block}>
           <span className={S.label}>
             a P0 the vote does not confirm {source('review', 'unconfirmedP0')}
@@ -3057,6 +3087,95 @@ export function Settings({
         {scope === 'project' && (
           <ReviewMdNote dir={dir} baseRef={typeof git['baseRef'] === 'string' ? git['baseRef'] : null} />
         )}
+      </section>
+
+      {/* ---- more critique seats, and a vote (#405) ---------------------- */}
+      <section className={S.block}>
+        <h3 className={S.h}>who else critiques the plan, and who votes</h3>
+        {/* The review's panel, for the plan critique, saved under `critique`.
+            What each costs is said in turns; nothing says how accurate either
+            is, because nothing has measured it. */}
+        <p className={S.note}>
+          Finders are critics in addition to the one above, each critiquing every version of the
+          plan after it without seeing the others&apos; findings: one extra turn per plan round per
+          finder. A finder starts fresh every round and does not have earlier rounds&apos; findings.
+          Verifiers vote on each blocking plan finding that was not deferred, each seeing only the
+          claim, never who raised it or how the others voted: one extra turn per such finding per
+          verifier, every plan round. A P1 the vote does not confirm is moved to P2; a vote that
+          cannot tell keeps it blocking.
+        </p>
+        <h4 className={S.h4}>finders</h4>
+        <SeatList
+          kind="finders"
+          section="critique"
+          seats={readSeats(critique.finders)}
+          efforts={frame.efforts}
+          providers={frame.providers}
+          models={models}
+          inherited={inheritedModel}
+          timeouts={effective}
+          busy={busy}
+          onSave={save}
+        />
+        <h4 className={S.h4}>verifiers</h4>
+        <SeatList
+          kind="verifiers"
+          section="critique"
+          seats={readSeats(critique.verifiers)}
+          efforts={frame.efforts}
+          providers={frame.providers}
+          models={models}
+          inherited={inheritedModel}
+          timeouts={effective}
+          busy={busy}
+          onSave={(patch) => {
+            // The review's rule (#448), for the critique's quorum.
+            const saved = typeof critique.quorum === 'number' ? critique.quorum : null;
+            const kept = keepQuorumLegal(patch, saved, 'critique');
+            setCritiqueQuorumReset(kept.reset && saved !== null ? `was ${String(saved)}; reset to a majority with that change` : null);
+            save(kept.patch);
+          }}
+        />
+        <div className={S.row}>
+          <label className={S.label} htmlFor="critique-quorum">
+            quorum {source('critique', 'quorum')}
+          </label>
+          <QuorumField
+            id="critique-quorum"
+            section="critique"
+            value={typeof critique.quorum === 'number' ? critique.quorum : null}
+            verifiers={readSeats(critique.verifiers).length}
+            disabled={busy}
+            onSave={(patch) => {
+              setCritiqueQuorumReset(null);
+              save(patch);
+            }}
+          />
+          {critiqueQuorumReset !== null && <span className={S.hint}>{critiqueQuorumReset}</span>}
+          <span className={S.hint}>
+            how many verifiers must say a plan finding is real. Blank means a majority of the
+            verifiers — more than half of them.
+          </span>
+        </div>
+        <div className={S.block}>
+          <span className={S.label}>
+            a P0 the vote does not confirm {source('critique', 'unconfirmedP0')}
+          </span>
+          {UNCONFIRMED_P0_CHOICES.map((choice) => (
+            <label key={choice.value} className={cn(S.radio, 'max-w-none')}>
+              <input
+                type="radio"
+                name="critique-unconfirmed-p0"
+                checked={critique.unconfirmedP0 === choice.value}
+                disabled={busy}
+                onChange={() => save({ critique: { unconfirmedP0: choice.value } })}
+              />
+              <span>
+                <code>{choice.value}</code> — {choice.meaning}
+              </span>
+            </label>
+          ))}
+        </div>
       </section>
 
       {/* ---- what every turn is told ------------------------------------- */}

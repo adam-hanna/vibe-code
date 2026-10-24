@@ -29,7 +29,7 @@ import type {
   GatesConfig,
   LoadedConfig,
   PromptOverrides,
-  ReviewConfig,
+  CritiqueConfig,
   Sandbox,
   UnconfirmedP0,
   VerifyConfig,
@@ -44,11 +44,14 @@ export { EFFORTS };
 
 const SANDBOXES: readonly Sandbox[] = ['read-only', 'workspace-write', 'danger-full-access'];
 
-/** What `review.unconfirmedP0` may say (#388): the owner's three, 2026-10-20. */
+/** What `review.unconfirmedP0` and `critique.unconfirmedP0` may say (#388): the owner's three, 2026-10-20. */
 export const UNCONFIRMED_P0: readonly UnconfirmedP0[] = ['block', 'halt', 'demote'];
 
-/** The keys of the `review` section, in the order a message lists them. */
-const REVIEW_KEYS = ['finders', 'verifiers', 'quorum', 'unconfirmedP0'] as const;
+/** The keys of the `critique` section (#405), in the order a message lists them. */
+const CRITIQUE_KEYS = ['finders', 'verifiers', 'quorum', 'unconfirmedP0'] as const;
+
+/** The keys of the `review` section: `critique`'s, and the bound on seats at once (#403). */
+const REVIEW_KEYS = [...CRITIQUE_KEYS, 'maxParallel'] as const;
 
 /**
  * The agent CLI versions this build was tested against (#298).
@@ -272,7 +275,15 @@ export const DEFAULTS: Config = {
   // before the key existed. `block` is the owner's decision (2026-10-20): an
   // unconfirmed P0 still blocks unless somebody chooses otherwise. No
   // recommended set of seats ships until #388's measurement has been made.
-  review: { finders: [], verifiers: [], quorum: null, unconfirmedP0: 'block' },
+  // `maxParallel: 1` is today's order, one seat turn after another (#403): the
+  // groundwork rule, so nothing about a run changes until somebody raises it.
+  review: { finders: [], verifiers: [], quorum: null, unconfirmedP0: 'block', maxParallel: 1 },
+  // The same panel for the plan critique (#405), read by `planPhase` when either
+  // list is non-empty. Empty, so a default plan loop is byte-identical to one
+  // from before the key existed, and `block` for the reason `review`'s is. No
+  // recommended panel ships: nothing has measured how often a critique finding
+  // is wrong.
+  critique: { finders: [], verifiers: [], quorum: null, unconfirmedP0: 'block' },
   // On, by the owner's decision on #323: a terminal user is told once, at the
   // end of `vibe run`, `vibe plan` or `vibe doctor`, when npm has a newer vibe.
   // It is the one network request in `src/` - see `src/updatecheck.ts` for what
@@ -377,12 +388,12 @@ function mergeGates(base: GatesConfig, override: unknown): GatesConfig {
  * whole, so a project's `finders` replaces the global file's list rather than
  * appending to it, and a `quorum` the project does not name is left standing.
  */
-function mergeReview(base: ReviewConfig, override: unknown): ReviewConfig {
+function mergeReview<T extends CritiqueConfig>(base: T, override: unknown): T {
   if (override === undefined) return base;
-  if (!isRecord(override)) return override as ReviewConfig;
+  if (!isRecord(override)) return override as T;
   const out: Record<string, unknown> = { ...base };
   for (const [key, value] of Object.entries(override)) setOwn(out, key, value);
-  return out as unknown as ReviewConfig;
+  return out as unknown as T;
 }
 
 export function mergeConfig(base: Config, override: unknown): Config {
@@ -403,6 +414,9 @@ export function mergeConfig(base: Config, override: unknown): Config {
     prompts: mergePrompts(base.prompts, override['prompts']),
     instructions: mergeInstructions(base.instructions, override['instructions']),
     review: mergeReview(base.review, override['review']),
+    // `review`'s merge, for the same reason: a project's list replaces the
+    // global one whole (#405).
+    critique: mergeReview(base.critique, override['critique']),
     updates: mergeSection(base.updates, override['updates']),
   };
 }
@@ -572,6 +586,7 @@ const SECTIONS = [
   'prompts',
   'instructions',
   'review',
+  'critique',
   'updates',
 ] as const;
 
@@ -914,11 +929,13 @@ function validate(cfg: Config): void {
   // instruction is a good one, and a length limit would be a number with
   // nothing behind it - the same answer `validatePrompts` gives (#273).
   if (typeof cfg.instructions.text !== 'string') throw new Error('instructions.text must be a string');
-  validateReview(cfg.review);
+  validateSeats('review', cfg.review);
+  validateSeats('critique', cfg.critique);
 }
 
 /**
- * The `review` section (#388), refused by name and by index.
+ * The `review` section (#388), or the `critique` section (#405), refused by
+ * name and by index.
  *
  * Each seat goes through `roleSetting`, the one reader `roles.<role>` uses, so
  * what a seat may say and what a role may say cannot drift apart - only the
@@ -928,23 +945,29 @@ function validate(cfg: Config): void {
  * The quorum is checked against the list in the same config, which is why it
  * is refused after the seats are read: "2 but there are only 1 verifiers" is
  * only a true sentence about a list that is itself legal.
+ *
+ * One function for both sections, with the section's name the only thing that
+ * changes in a message: the two take the same four keys, and two copies of the
+ * refusals would be two answers to what a legal seat is.
  */
-function validateReview(review: unknown): void {
-  const takes = `review takes ${REVIEW_KEYS.slice(0, -1).join(', ')} and ${REVIEW_KEYS[REVIEW_KEYS.length - 1] ?? ''}`;
-  if (!isRecord(review)) {
-    throw new Error(`review must be an object with finders, verifiers, quorum and unconfirmedP0`);
+function validateSeats(section: 'review' | 'critique', value: unknown): void {
+  const keys: readonly string[] = section === 'review' ? REVIEW_KEYS : CRITIQUE_KEYS;
+  const listed = `${keys.slice(0, -1).join(', ')} and ${keys[keys.length - 1] ?? ''}`;
+  const takes = `${section} takes ${listed}`;
+  if (!isRecord(value)) {
+    throw new Error(`${section} must be an object with ${listed}`);
   }
-  for (const key of Object.keys(review)) {
-    if (!(REVIEW_KEYS as readonly string[]).includes(key)) {
-      throw new Error(`review.${key} is not a setting; ${takes}`);
+  for (const key of Object.keys(value)) {
+    if (!keys.includes(key)) {
+      throw new Error(`${section}.${key} is not a setting; ${takes}`);
     }
   }
-  const finders: unknown = review['finders'];
-  const verifiers: unknown = review['verifiers'];
-  if (!Array.isArray(finders)) throw new Error('review.finders must be a list of seats, or [] for none');
-  if (!Array.isArray(verifiers)) throw new Error('review.verifiers must be a list of seats, or [] for none');
+  const finders: unknown = value['finders'];
+  const verifiers: unknown = value['verifiers'];
+  if (!Array.isArray(finders)) throw new Error(`${section}.finders must be a list of seats, or [] for none`);
+  if (!Array.isArray(verifiers)) throw new Error(`${section}.verifiers must be a list of seats, or [] for none`);
   finders.forEach((entry: unknown, i) => {
-    const where = `review.finders[${i}]`;
+    const where = `${section}.finders[${i}]`;
     roleSetting(where, entry, { keys: FINDER_KEYS, noun: 'a finder' });
     if (isRecord(entry) && Object.prototype.hasOwnProperty.call(entry, 'focus')) {
       const focus = entry['focus'];
@@ -959,25 +982,35 @@ function validateReview(review: unknown): void {
     }
   });
   verifiers.forEach((entry: unknown, i) => {
-    roleSetting(`review.verifiers[${i}]`, entry, { noun: 'a verifier' });
+    roleSetting(`${section}.verifiers[${i}]`, entry, { noun: 'a verifier' });
   });
-  const quorum: unknown = review['quorum'];
+  const quorum: unknown = value['quorum'];
   if (quorum !== null) {
     if (typeof quorum !== 'number' || !Number.isInteger(quorum) || quorum < 1) {
-      throw new Error('review.quorum must be a positive whole number of verifiers, or null for a majority');
+      throw new Error(`${section}.quorum must be a positive whole number of verifiers, or null for a majority`);
     }
     if (verifiers.length === 0) {
       throw new Error(
-        `review.quorum is ${quorum} but review.verifiers is empty; a quorum needs verifiers to count`,
+        `${section}.quorum is ${quorum} but ${section}.verifiers is empty; a quorum needs verifiers to count`,
       );
     }
     if (quorum > verifiers.length) {
-      throw new Error(`review.quorum is ${quorum} but there are only ${verifiers.length} verifiers`);
+      throw new Error(`${section}.quorum is ${quorum} but there are only ${verifiers.length} verifiers`);
     }
   }
-  const p0: unknown = review['unconfirmedP0'];
+  const p0: unknown = value['unconfirmedP0'];
   if (typeof p0 !== 'string' || !UNCONFIRMED_P0.includes(p0 as UnconfirmedP0)) {
-    throw new Error(`review.unconfirmedP0 must be one of ${UNCONFIRMED_P0.join(', ')}`);
+    throw new Error(`${section}.unconfirmedP0 must be one of ${UNCONFIRMED_P0.join(', ')}`);
+  }
+  // Only the review's seats can overlap (#403); the critique's run in sequence
+  // until #452 unifies the runners, so it takes no bound.
+  if (section !== 'review') return;
+  // No upper bound: a cap would be a number nobody measured (#403).
+  const parallel: unknown = value['maxParallel'];
+  if (typeof parallel !== 'number' || !Number.isInteger(parallel) || parallel < 1) {
+    throw new Error(
+      'review.maxParallel must be a positive whole number of turns at once (1 runs them one after another)',
+    );
   }
 }
 

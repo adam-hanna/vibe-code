@@ -95,6 +95,17 @@ describe('removing verifiers below a saved quorum', () => {
   test('the verifiers list is the one that resets it', () => {
     expect(settings).toMatch(/kind="verifiers"[\s\S]*?keepQuorumLegal\(patch, saved\)/);
   });
+
+  test("the critique's quorum is held to the same rule, under its own section (#405)", () => {
+    const patch = { critique: { verifiers: [{ provider: 'codex' }] } };
+    expect(keepQuorumLegal(patch, 2, 'critique')).toEqual({
+      patch: { critique: { verifiers: [{ provider: 'codex' }], quorum: null } },
+      reset: true,
+    });
+    // A critique save never touches the review's quorum, and the reverse.
+    expect(keepQuorumLegal(patch, 2).reset).toBe(false);
+    expect(settings).toMatch(/section="critique"[\s\S]*?keepQuorumLegal\(patch, saved, 'critique'\)/);
+  });
 });
 
 describe("a finder's focus", () => {

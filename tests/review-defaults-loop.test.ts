@@ -83,7 +83,7 @@ test('verifiers add one vote turn per blocking finding per verifier, and nothing
     {
       ...committing(),
       ...verifying(state),
-      review: { finders: [], verifiers: ['codex', { provider: 'claude', effort: 'high' }], quorum: 2, unconfirmedP0: 'halt' },
+      review: { finders: [], verifiers: ['codex', { provider: 'claude', effort: 'high' }], quorum: 2, unconfirmedP0: 'halt', maxParallel: 1 },
     },
   );
   const base = handlers(state);

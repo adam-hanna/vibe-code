@@ -849,6 +849,19 @@ export interface Config {
    */
   review: ReviewConfig;
   /**
+   * More critique seats than the one critic, and a vote before a plan finding
+   * blocks (#405). The same four keys as `review`, validated by the same code
+   * under `critique.` paths, and read by `planPhase` when either list is
+   * non-empty.
+   *
+   * A section of its own rather than a reuse of `review`, by the owner's
+   * decision: the panel for a plan may differ from the panel for a diff, or be
+   * none at all - a plan vote is one turn per blocking finding per verifier,
+   * while a review round's votes scale with what the diff turned up. Settable
+   * in the global file as `review` is.
+   */
+  critique: CritiqueConfig;
+  /**
    * Whether a terminal `vibe run`, `vibe plan` or `vibe doctor` ends by saying
    * that npm has a newer vibe (#323). The only setting that reaches the
    * network; `src/updatecheck.ts` says what is sent. Read only by the terminal
@@ -881,7 +894,18 @@ export interface ReviewConfig {
   /** How many `real` votes confirm a finding; null is a majority, floor(n/2)+1. */
   quorum: number | null;
   unconfirmedP0: UnconfirmedP0;
+  /**
+   * How many finder or verifier turns may be live at once in a round (#403).
+   * `1` runs them one after another, which is the order of every run before it.
+   */
+  maxParallel: number;
 }
+
+/**
+ * The `critique` section (#405): `review`'s shape, for the plan critique, less
+ * `maxParallel` - its seats run in sequence until #452. See `Config.critique`.
+ */
+export type CritiqueConfig = Omit<ReviewConfig, 'maxParallel'>;
 
 /** Block name to replacement text. Open-ended keys, checked against the real list. */
 export type PromptOverrides = Readonly<Record<string, string>>;
@@ -1666,9 +1690,15 @@ export interface TestChanges {
  * One turn's observed-but-uncharged spend. See `RunState.inFlight`.
  *
  * Keyed by `label` plus `provider` wherever it is looked up, which is unique
- * among live turns: the only concurrency is `withConcurrentCompaction`, and it
+ * among live turns. There are two sources of concurrency. `withConcurrentCompaction`
  * pairs Claude's `compact` with a Codex critique or review turn, so the pair
- * differs on both axes.
+ * differs on both axes. A review seat group (`runSeatGroup`, #403) runs up to
+ * `review.maxParallel` finder or verifier turns at once, and their labels -
+ * `review-<r>-f<k>[-part<i>]` and `vote-<r>-<n>-v<k>` - are unique within a
+ * round, so the key stays unique there too. `saveState` stays safe with several
+ * live: it is synchronous and atomic, and it writes the one in-memory
+ * `RunState` of the one run this process holds, so no write can interleave
+ * inside another or lose a charge.
  *
  * `tokens` absent means the provider reports no figure while a turn is in
  * flight, which is true of Codex: its stream carries usage only on

@@ -16,7 +16,8 @@
  * one. Neither replaces the core's answer.
  *
  * Finders are run since #388 Part B, and the verifiers, the quorum and
- * `unconfirmedP0` since Part C.
+ * `unconfirmedP0` since Part C. The plan critique's panel (#405) is the same
+ * form saved under `critique` (`SeatSection`).
  */
 
 /** A seat as the core holds it. Mirrors `RoleSetting` / `FinderSeat` in `src/`. */
@@ -30,6 +31,13 @@ export interface Seat {
 }
 
 export type SeatKind = 'finders' | 'verifiers';
+
+/**
+ * Which section a seat list is saved under: the review's (#388) or the plan
+ * critique's (#405). The two take the same four keys, so one form serves both,
+ * and every review call leaves it at its default.
+ */
+export type SeatSection = 'review' | 'critique';
 
 /** One row as it is being typed - every field a string until it is sent. */
 export interface SeatRow {
@@ -134,16 +142,20 @@ export function toSeat(row: SeatRow, kind: SeatKind): Record<string, unknown> {
 }
 
 /** The patch for one list: every ready row, in order. `[]` is legal and means none. */
-export function seatsPatch(kind: SeatKind, rows: readonly SeatRow[]): Record<string, unknown> {
-  return { review: { [kind]: rows.filter(ready).map((r) => toSeat(r, kind)) } };
+export function seatsPatch(
+  kind: SeatKind,
+  rows: readonly SeatRow[],
+  section: SeatSection = 'review',
+): Record<string, unknown> {
+  return { [section]: { [kind]: rows.filter(ready).map((r) => toSeat(r, kind)) } };
 }
 
 /** The quorum field's text as the core wants it: blank is a majority (`null`). */
-export function quorumPatch(text: string): Record<string, unknown> {
+export function quorumPatch(text: string, section: SeatSection = 'review'): Record<string, unknown> {
   const t = text.trim();
-  if (t === '') return { review: { quorum: null } };
+  if (t === '') return { [section]: { quorum: null } };
   const n = Number(t);
-  return { review: { quorum: Number.isFinite(n) ? n : t } };
+  return { [section]: { quorum: Number.isFinite(n) ? n : t } };
 }
 
 /** The three things an unconfirmed P0 may do, each with its one line (#388, owner 2026-10-20). */
@@ -245,17 +257,18 @@ export function quorumReading(text: string, verifiers: number): { text: string; 
  * same patch instead: two saves would have the first refused, and blocking the
  * remove would make a person clear a field before they could take a row away.
  * `reset` says it happened, so the screen can say so rather than change a
- * setting silently.
+ * setting silently. The critique's quorum (#405) is held to the same rule.
  */
 export function keepQuorumLegal(
   patch: Record<string, unknown>,
   quorum: number | null,
+  section: SeatSection = 'review',
 ): { patch: Record<string, unknown>; reset: boolean } {
-  const review = patch['review'];
-  if (quorum === null || typeof review !== 'object' || review === null) return { patch, reset: false };
-  const verifiers = (review as Record<string, unknown>)['verifiers'];
+  const seats = patch[section];
+  if (quorum === null || typeof seats !== 'object' || seats === null) return { patch, reset: false };
+  const verifiers = (seats as Record<string, unknown>)['verifiers'];
   if (!Array.isArray(verifiers) || quorum <= verifiers.length) return { patch, reset: false };
-  return { patch: { ...patch, review: { ...review, quorum: null } }, reset: true };
+  return { patch: { ...patch, [section]: { ...seats, quorum: null } }, reset: true };
 }
 
 /**

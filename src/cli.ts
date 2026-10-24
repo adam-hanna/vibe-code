@@ -41,6 +41,7 @@ import type { RaiseProblem, RequestedMove, RequestedMoves } from '@src/raise.js'
 import { assertUsableRunId } from '@src/stored.js';
 import { chooseBase, Escalation, EXIT, orchestrate, voteMovedFollowUps, writeEscalation } from '@src/orchestrator.js';
 import { readTally } from '@src/vote.js';
+import { authorOf } from '@src/validate.js';
 import type { ExitCode } from '@src/orchestrator.js';
 import {
   codexConversations,
@@ -1671,27 +1672,37 @@ export function reportRoles(cfg: Config): void {
   // changed role, and only when there are any: a run that seats none prints
   // what it always has.
   const finders = readFinders(cfg);
-  if (finders.length > 0) {
-    const seated = finders.map(
-      ({ setting }) =>
-        `${setting.provider}` +
-        `${setting.model === undefined ? '' : `@${setting.model}`}` +
-        `${setting.effort === undefined ? '' : `/${setting.effort}`}`,
-    );
-    log.info(`Finders: ${seated.join(' ')}`);
-  }
+  if (finders.length > 0) log.info(`Finders: ${finders.map(({ setting }) => spelled(setting)).join(' ')}`);
   // The verifiers (#388 Part C), the same way: only when there are any.
   const verifiers = readVerifiers(cfg);
-  if (verifiers.length > 0) {
-    const seated = verifiers.map(
-      ({ setting }) =>
-        `${setting.provider}` +
-        `${setting.model === undefined ? '' : `@${setting.model}`}` +
-        `${setting.effort === undefined ? '' : `/${setting.effort}`}`,
-    );
-    log.info(`Verifiers: ${seated.join(' ')}`);
+  if (verifiers.length > 0) log.info(`Verifiers: ${verifiers.map(({ setting }) => spelled(setting)).join(' ')}`);
+  // The plan critique's seats (#405), the same way and only when there are any.
+  const critiqueFinders = readFinders(cfg, 'critique');
+  if (critiqueFinders.length > 0) {
+    log.info(`Critique finders: ${critiqueFinders.map(({ setting }) => spelled(setting)).join(' ')}`);
+  }
+  const critiqueVerifiers = readVerifiers(cfg, 'critique');
+  if (critiqueVerifiers.length > 0) {
+    log.info(`Critique verifiers: ${critiqueVerifiers.map(({ setting }) => spelled(setting)).join(' ')}`);
+    // And the vote's policy, which decides what an unconfirmed plan finding
+    // does - said before the first turn, as doctor says it (#405).
+    log.info(`Critique vote: ${quorumText(cfg.critique.quorum, critiqueVerifiers.length)}, unconfirmed P0 ${cfg.critique.unconfirmedP0}`);
+  }
+  // Only when seats can overlap (#403): at 1 they run one after another, and a
+  // run that never raised it prints what it always has.
+  if ((finders.length > 0 || verifiers.length > 0) && cfg.review.maxParallel > 1) {
+    log.info(`Parallel: up to ${cfg.review.maxParallel} seat turns at once`);
   }
   for (const warning of roleWarnings(cfg)) log.warn(warning);
+}
+
+/** A seat in a changed role's spelling: `provider@model/effort`, each part only when named. */
+function spelled(setting: RoleSetting): string {
+  return (
+    `${setting.provider}` +
+    `${setting.model === undefined ? '' : `@${setting.model}`}` +
+    `${setting.effort === undefined ? '' : `/${setting.effort}`}`
+  );
 }
 
 /**
@@ -1741,10 +1752,42 @@ function reportResolvedRoles(cfg: Config): void {
  * as a recommendation.
  */
 function reportReviewSeats(cfg: Config): void {
-  const { quorum, unconfirmedP0 } = cfg.review;
-  const finders = readFinders(cfg);
-  const verifiers = readVerifiers(cfg);
+  reportSeatSection(cfg, 'review', {
+    finders: '  review finders (each reviews every chunk; one extra turn per chunk per finder):',
+    verifiers:
+      '  review verifiers (each votes on every blocking finding not reproduced; one extra turn per such finding per verifier):',
+  });
+}
+
+/**
+ * The plan critique's seats (#405), `reportReviewSeats`' block for `critique`:
+ * nothing at all when it names none. A critique finder is one turn per plan
+ * round, since a plan is never split, and a critique verifier one turn per
+ * blocking plan finding per round.
+ */
+function reportCritiqueSeats(cfg: Config): void {
+  reportSeatSection(cfg, 'critique', {
+    finders: '  critique finders (each critiques every plan round; one extra turn per plan round per finder):',
+    verifiers:
+      '  critique verifiers (each votes on every blocking plan finding not deferred; one extra turn per such finding per verifier):',
+  });
+}
+
+/** A quorum over `n` verifiers as doctor prints it: the majority is said as the definition it is. */
+function quorumText(quorum: number | null, n: number): string {
+  return quorum === null ? `${Math.floor(n / 2) + 1} of ${n} (a majority)` : `${quorum} of ${n}`;
+}
+
+/** One section's seats, quorum and unconfirmed P0, under the headings its caller words. */
+function reportSeatSection(
+  cfg: Config,
+  section: 'review' | 'critique',
+  headings: { finders: string; verifiers: string },
+): void {
+  const finders = readFinders(cfg, section);
+  const verifiers = readVerifiers(cfg, section);
   if (finders.length === 0 && verifiers.length === 0) return;
+  const { quorum, unconfirmedP0 } = cfg[section];
   const seat = (setting: RoleSetting, focus?: string): string => {
     const r = seatResolved(setting, cfg);
     const shown = focus === undefined ? '' : `  focus: ${JSON.stringify(focus)}`;
@@ -1754,21 +1797,32 @@ function reportReviewSeats(cfg: Config): void {
     const width = Math.max(...rows.map(([label]) => label.length));
     for (const [label, text] of rows) log.info(`    ${label.padEnd(width)}  ${text}`);
   };
+  // How many of those turns may be live at once (#403). It changes no count of
+  // turns, only how many overlap - and with them, how far Codex turns, which
+  // report nothing in flight, can carry the run past budget.maxTokens.
+  // The review's alone: the critique's seats run in sequence until #452.
+  const maxParallel = section === 'review' ? cfg.review.maxParallel : null;
+  const parallel: [string, string] | null =
+    maxParallel === null
+      ? null
+      : [
+          'parallel',
+          maxParallel === 1
+            ? '1 (one after another)'
+            : `${maxParallel} at once (Codex turns can overshoot budget.maxTokens by up to ${maxParallel} turns' spend)`,
+        ];
   if (finders.length > 0) {
-    log.info('  review finders (each reviews every chunk; one extra turn per chunk per finder):');
-    print(finders.map((f): [string, string] => [`finder ${f.k}`, seat(f.setting, f.focus)]));
+    log.info(headings.finders);
+    const rows = finders.map((f): [string, string] => [`finder ${f.k}`, seat(f.setting, f.focus)]);
+    print(verifiers.length === 0 && parallel !== null ? [...rows, parallel] : rows);
   }
   if (verifiers.length === 0) return;
-  log.info(
-    '  review verifiers (each votes on every blocking finding not reproduced; one extra turn per such finding per verifier):',
-  );
+  log.info(headings.verifiers);
   const rows: [string, string][] = verifiers.map((v): [string, string] => [`verifier ${v.k}`, seat(v.setting)]);
   const n = verifiers.length;
-  rows.push([
-    'quorum',
-    quorum === null ? `${Math.floor(n / 2) + 1} of ${n} (a majority)` : `${quorum} of ${n}`,
-  ]);
+  rows.push(['quorum', quorumText(quorum, n)]);
   rows.push(['unconfirmed P0', unconfirmedP0]);
+  if (parallel !== null) rows.push(parallel);
   print(rows);
 }
 
@@ -2808,24 +2862,41 @@ function reportTestChanges(state: RunState): void {
  */
 export function reportUnconfirmedByVote(state: RunState): void {
   const moved = voteMovedFollowUps(state);
-  if (moved.length === 0) return;
-  log.warn(
-    `${moved.length} blocking finding(s) the review vote did not confirm - no longer blocking, ` +
-      'and listed as unconfirmed by vote in FOLLOW-UPS.md:',
-  );
-  for (const f of moved) {
-    const t = readTally(f.votes);
-    const from: unknown = f.downgraded?.from;
-    const was = typeof from === 'string' && from.length > 0 ? `, was ${from}` : '';
-    const said =
-      t === null
-        ? 'votes unreadable'
-        : `${t.n - t.real} of ${t.n} verifier(s) did not confirm ` +
-          `(${t.notReal} not real, ${t.cannotTell} could not tell; quorum ${t.quorum})`;
-    log.info(`  - \`${f.id}\` ${f.title} - ${said}${was}`);
+  // Split by who raised it (#405): a finding the critic raised was moved by the
+  // critique's vote, and saying "the review vote" of it would name the wrong
+  // panel. Everything else keeps the sentence it had.
+  const plan = moved.filter((f) => authorOf(f) === 'critic');
+  const review = moved.filter((f) => authorOf(f) !== 'critic');
+  if (review.length > 0) {
+    log.warn(
+      `${review.length} blocking finding(s) the review vote did not confirm - no longer blocking, ` +
+        'and listed as unconfirmed by vote in FOLLOW-UPS.md:',
+    );
+    for (const f of review) log.info(unconfirmedLine(f));
   }
+  if (plan.length > 0) {
+    log.warn(
+      `${plan.length} blocking plan finding(s) the critique vote did not confirm - no longer blocking, ` +
+        'and listed as unconfirmed by vote in FOLLOW-UPS.md:',
+    );
+    for (const f of plan) log.info(unconfirmedLine(f));
+  }
+  if (moved.length === 0) return;
   const file = path.join(state.dir, 'FOLLOW-UPS.md');
   log.info(existsSync(file) ? `  Detail: ${file}` : '  FOLLOW-UPS.md was not written.');
+}
+
+/** One finding the vote moved, with its tally read from its recorded votes. */
+function unconfirmedLine(f: Finding): string {
+  const t = readTally(f.votes);
+  const from: unknown = f.downgraded?.from;
+  const was = typeof from === 'string' && from.length > 0 ? `, was ${from}` : '';
+  const said =
+    t === null
+      ? 'votes unreadable'
+      : `${t.n - t.real} of ${t.n} verifier(s) did not confirm ` +
+        `(${t.notReal} not real, ${t.cannotTell} could not tell; quorum ${t.quorum})`;
+  return `  - \`${f.id}\` ${f.title} - ${said}${was}`;
 }
 
 /**
@@ -2975,18 +3046,43 @@ async function reportReviewMdPreview(targetDir: string, cfg: LoadedConfig): Prom
  * a test without spawning real agents.
  */
 export function reportReviewFinders(state: RunState): void {
+  reportFinders(state, 'review', 'review_finders_merged', 'Finders:  ', 'review round');
+}
+
+/**
+ * The plan critique's finders (#405), `reportReviewFinders`' line for the
+ * critique: the `critique`-phase finder charges, and the last
+ * `critique_finders_merged`. Nothing at all on a run that seated none.
+ */
+export function reportCritiqueFinders(state: RunState): void {
+  reportFinders(state, 'critique', 'critique_finders_merged', 'Critique finders: ', 'plan critique round');
+}
+
+/**
+ * One phase's finder line. Only that phase's charges count (#405): a review
+ * line that also counted critique finders' turns would claim the review spent
+ * them.
+ */
+function reportFinders(
+  state: RunState,
+  phase: 'review' | 'critique',
+  mergeEvent: string,
+  prefix: string,
+  noun: string,
+): void {
   let turns = 0;
   let failed = 0;
   let tokens = 0;
   for (const t of chargedTurns(state)) {
-    if (seatOf(t.label)?.finder === undefined) continue;
+    const seat = seatOf(t.label);
+    if (seat?.finder === undefined || seat.phase !== phase) continue;
     turns += 1;
     if (t.failed) failed += 1;
     const spent = t.data['tokens'];
     if (typeof spent === 'number' && Number.isFinite(spent)) tokens += spent;
   }
   let merge: Record<string, unknown> | null = null;
-  for (const e of state.events) if (e.type === 'review_finders_merged') merge = e;
+  for (const e of state.events) if (e.type === mergeEvent) merge = e;
   if (turns === 0 && merge === null) return;
 
   const cost =
@@ -2997,10 +3093,10 @@ export function reportReviewFinders(state: RunState): void {
   const reported = merge?.['reported'];
   const seats = merge?.['finders'];
   if (merge === null || typeof round !== 'number' || typeof reported !== 'number' || typeof seats !== 'number') {
-    log.info(`Finders:  ${cost}; no review round completed its merge.`);
+    log.info(`${prefix}${cost}; no ${noun} completed its merge.`);
     return;
   }
-  log.info(`Finders:  review round ${round + 1}: ${reported} of ${seats} reported; ${cost}.`);
+  log.info(`${prefix}${noun} ${round + 1}: ${reported} of ${seats} reported; ${cost}.`);
 }
 /**
  * What the review vote cost and what it came to (#388 Part C), as one summary
@@ -3013,18 +3109,35 @@ export function reportReviewFinders(state: RunState): void {
  * from an attempt whose votes were thrown away.
  */
 export function reportReviewVotes(state: RunState): void {
+  reportVotes(state, 'review', 'review_votes_tallied', 'Votes:    ', 'review round');
+}
+
+/** The plan critique's vote (#405), `reportReviewVotes`' line for the critique. */
+export function reportCritiqueVotes(state: RunState): void {
+  reportVotes(state, 'critique', 'critique_votes_tallied', 'Critique votes: ', 'plan critique round');
+}
+
+/** One phase's vote line, counting only that phase's vote charges (#405). */
+function reportVotes(
+  state: RunState,
+  phase: 'review' | 'critique',
+  tallyEvent: string,
+  prefix: string,
+  noun: string,
+): void {
   let turns = 0;
   let failed = 0;
   let tokens = 0;
   for (const t of chargedTurns(state)) {
-    if (seatOf(t.label)?.verifier === undefined) continue;
+    const seat = seatOf(t.label);
+    if (seat?.verifier === undefined || seat.phase !== phase) continue;
     turns += 1;
     if (t.failed) failed += 1;
     const spent = t.data['tokens'];
     if (typeof spent === 'number' && Number.isFinite(spent)) tokens += spent;
   }
   let last: Record<string, unknown> | null = null;
-  for (const e of state.events) if (e.type === 'review_votes_tallied') last = e;
+  for (const e of state.events) if (e.type === tallyEvent) last = e;
   if (turns === 0 && last === null) return;
 
   const cost =
@@ -3041,11 +3154,11 @@ export function reportReviewVotes(state: RunState): void {
   const unconfirmed = n('unconfirmed');
   const undecided = n('undecided');
   if (round === null || findings === null || confirmed === null || unconfirmed === null || undecided === null) {
-    log.info(`Votes:    ${cost}; no review round completed its tally.`);
+    log.info(`${prefix}${cost}; no ${noun} completed its tally.`);
     return;
   }
   log.info(
-    `Votes:    review round ${round + 1}: ${findings} finding(s) voted on - ${confirmed} confirmed, ` +
+    `${prefix}${noun} ${round + 1}: ${findings} finding(s) voted on - ${confirmed} confirmed, ` +
       `${unconfirmed} unconfirmed, ${undecided} undecided; ${cost}.`,
   );
 }
@@ -3152,6 +3265,8 @@ function summary(state: RunState, started: number, recovery?: RecoveryReport): v
   reportReviewMd(state);
   reportReviewFinders(state);
   reportReviewVotes(state);
+  reportCritiqueFinders(state);
+  reportCritiqueVotes(state);
   reportUnconfirmedByVote(state);
   if (state.sessionRotations > 0) log.info(`Compacted: ${state.sessionRotations} time(s)`);
   // A record of what `forkedFrom` holds, never a computation over it: the totals
@@ -3393,11 +3508,13 @@ async function cmdDoctor(args: readonly string[]): Promise<ExitCode> {
     log.info(`  claude ${shownModel(cfg.claude.model, 'claude')}/${cfg.claude.effort} - codex ${shownModel(cfg.codex.model, 'codex')}/${cfg.codex.effort}`);
     reportResolvedRoles(cfg);
     reportReviewSeats(cfg);
+    reportCritiqueSeats(cfg);
     // Which MCP servers each role reaches and how each provider enforces it
     // (#138), in the words `src/mcp.ts` keeps for every surface that says it.
     log.info('  mcp:');
     const table = rolesFor(cfg);
-    for (const line of describeMcp(table, readFinders(cfg), readVerifiers(cfg))) log.info(`    ${line}`);
+    const critique = { finders: readFinders(cfg, 'critique'), verifiers: readVerifiers(cfg, 'critique') };
+    for (const line of describeMcp(table, readFinders(cfg), readVerifiers(cfg), critique)) log.info(`    ${line}`);
     const mcpBlocked = await mcpRefusals(cfg, table, {
       cwd: targetDir,
       repoDir: targetDir,

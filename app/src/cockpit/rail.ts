@@ -81,6 +81,42 @@ export function turnDetail(turn: Pick<Turn, 'role' | 'kind'>): string {
 }
 
 /**
+ * Which review seats are running now, when more than one is (#403).
+ *
+ * Null with one turn live or none, which is every run that does not raise
+ * `review.maxParallel`: the running row already says everything about one turn.
+ * With several, this names each of them in the words the frames carried - the
+ * finding a verifier is voting on and its seat number, a finder's number - and
+ * never a configured total, which the window was not told:
+ * *"verifiers voting · alpha: v1, v3 · beta: v2 running"*.
+ */
+export function liveSeatsLine(run: Run): string | null {
+  if (run.live.length < 2) return null;
+  const voting = new Map<string, string[]>();
+  const finders: string[] = [];
+  const other: string[] = [];
+  for (const turn of run.live) {
+    const seat = turn.seat;
+    if (turn.kind === 'vote' && seat?.verifier !== undefined) {
+      const finding = seat.finding ?? 'a finding';
+      voting.set(finding, [...(voting.get(finding) ?? []), `v${String(seat.verifier)}`]);
+    } else if (turn.kind === 'review' && seat?.finder !== undefined) {
+      finders.push(`f${String(seat.finder)}`);
+    } else {
+      other.push(turn.label ?? `${turn.role} · ${turn.kind}`);
+    }
+  }
+  const parts: string[] = [];
+  if (finders.length > 0) parts.push(`finders reviewing · ${finders.join(', ')}`);
+  if (voting.size > 0) {
+    const each = [...voting].map(([finding, seats]) => `${finding}: ${seats.join(', ')}`);
+    parts.push(`verifiers voting · ${each.join(' · ')}`);
+  }
+  if (other.length > 0) parts.push(other.join(', '));
+  return `${parts.join(' · ')} running`;
+}
+
+/**
  * The gate running now while no turn is, or null (#409).
  *
  * **The stretch the window used to call idle.** A resume at `reviewing` re-runs
