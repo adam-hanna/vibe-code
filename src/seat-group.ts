@@ -41,6 +41,12 @@ export async function runSeatGroup(
   limit: number,
   tasks: readonly (() => Promise<void>)[],
 ): Promise<void> {
+  // Fail closed: a bound that is not a whole number from 1 would start no
+  // worker at all, and the round would go on as though every seat had run.
+  // `validateReview` keeps this off every supported path; this is the backstop.
+  if (!Number.isInteger(limit) || limit < 1) {
+    throw new Error(`review.maxParallel is ${String(limit)}; it must be a whole number of turns from 1`);
+  }
   const group = newTurnGroup();
   let next = 0;
   let running = 0;
@@ -69,7 +75,7 @@ export async function runSeatGroup(
 
   // Workers never reject - every task's rejection is caught above - so this is
   // `allSettled` in effect: it returns once every started task has settled.
-  await Promise.all(Array.from({ length: Math.max(1, Math.min(limit, tasks.length)) }, worker));
+  await Promise.all(Array.from({ length: Math.min(limit, tasks.length) }, worker));
 
   const failed = failure as { err: unknown; live: number } | null;
   if (failed === null) return;

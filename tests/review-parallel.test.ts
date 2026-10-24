@@ -1,10 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { clearCancel, cancelRequested, requestCancel } from '@src/cancel.js';
 import { execute } from '@src/cli.js';
-import { DEFAULTS } from '@src/config.js';
+import { DEFAULTS, loadConfig } from '@src/config.js';
 import * as log from '@src/log.js';
 import type { Narration } from '@src/log.js';
 import { fmtTokens } from '@src/charge.js';
@@ -383,10 +384,31 @@ function record(state: RunState): unknown[] {
   return state.events.map(({ at: _at, ...rest }) => JSON.parse(normal(state, JSON.stringify(rest))) as unknown);
 }
 
-test('maxParallel 1 is the run without the key, label for label and byte for byte', async () => {
+/** The `review` section a project file with no `maxParallel` loads to - the key truly absent. */
+function loadedWithoutKey(seats: Partial<ReviewConfig>): ReviewConfig {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'vibe-parallel-nokey-'));
+  writeFileSync(path.join(dir, 'vibe.config.json'), JSON.stringify({ review: seats }));
+  const review = loadConfig(dir).review;
+  assert.equal(Object.prototype.hasOwnProperty.call(seats, 'maxParallel'), false);
+  return review;
+}
+
+test('maxParallel 1 runs every seat one after another, as a file without the key does', async () => {
   const seats = { finders: ['codex'], verifiers: ['codex', 'claude', 'codex'] } as Partial<ReviewConfig>;
-  const absent = await plain(config({ p1Tolerance: 0 }, { review: { ...DEFAULTS.review, ...seats } }), 'vibe-parallel-absent-');
+  const absent = await plain(config({ p1Tolerance: 0 }, { review: loadedWithoutKey(seats) }), 'vibe-parallel-absent-');
   const one = await plain(withReview({ ...seats, maxParallel: 1 }), 'vibe-parallel-explicit-one-');
+  // What a sequential round dispatches, written out rather than compared with
+  // itself: the reviewer, then the finder, then for each finding voted on every
+  // verifier in turn - finding 1 to v1, v2, v3, then finding 2.
+  const seatCalls = one.calls.filter((l) => /^(review-0|vote-0-)/.test(l));
+  const voted = [...new Set(seatCalls.flatMap((l) => /^vote-0-(\d+)-v\d+$/.exec(l)?.[1] ?? []))];
+  assert.ok(voted.length > 0, 'nothing was voted on, so the order proves nothing');
+  assert.deepEqual(seatCalls, [
+    'review-0',
+    'review-0-f1',
+    ...voted.flatMap((n) => [1, 2, 3].map((k) => `vote-0-${n}-v${String(k)}`)),
+  ]);
+  assert.deepEqual(voted, [...voted].sort((a, b) => Number(a) - Number(b)));
   assert.deepEqual(one.calls, absent.calls);
   assert.deepEqual(one.prompts, absent.prompts);
   assert.deepEqual(record(one.state), record(absent.state));
@@ -428,4 +450,17 @@ test('above 1, a seat turn says its label when it starts and says when it finish
   // The reviewer itself is not a seat, and is unchanged.
   const reviewer = seen.find((n) => n.id === 'turn_started' && n.data?.['kind'] === 'review');
   assert.deepEqual(reviewer?.data, { role: 'reviewer', kind: 'review', round: 0 });
+});
+
+test('a bound that is not a whole number from 1 is refused, never read as no seats at all', async () => {
+  const { runSeatGroup } = await import('@src/seat-group.js');
+  const state = run('vibe-parallel-badbound-');
+  let ran = 0;
+  for (const bad of [Number.NaN, 0, 1.5, undefined as unknown as number]) {
+    await assert.rejects(
+      runSeatGroup(state, bad, [() => Promise.resolve(void (ran += 1))]),
+      /review\.maxParallel is .*; it must be a whole number of turns from 1/,
+    );
+  }
+  assert.equal(ran, 0);
 });

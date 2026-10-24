@@ -1730,9 +1730,11 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
         // column rather than guessed into one. It is still in the output pane,
         // which is where an unrecognised thing belongs.
         if (kind === undefined) return next;
-        // A new phase closes whatever turn was still open. The loop does not
-        // narrate a turn ending, so the next thing starting is the signal - and
-        // it is a true one, because turns within a run never overlap.
+        // A new phase closes whatever turn was still open - every live turn,
+        // labelled review seats included (#403). The loop narrates no end for an
+        // unlabelled turn, so the next thing starting is the signal; and seats
+        // that overlap all belong to one phase, so a new phase means none of
+        // them is running any more.
         const closed = endRunning(next, at);
         const round = num(data['round']);
         // Kept when a later phase carries none, rather than cleared: the base is
