@@ -900,8 +900,11 @@ rebutted. #393's record is now kept for the plan side too.
   `reproducer` is always null, because nothing reproduces a plan finding.
 - **Order against the save.** `recordDispositions`' order: the record is written after the plan
   parses and before the one `saveState` that persists the plan and consumes the findings it
-  answers. A revision is therefore never consumed without its record. A death in between revises
-  again and records again, and the scorecard reads the last event per label.
+  answers. A revision is therefore never consumed without its record. A death in between leaves
+  the findings pending, and the resume revises them in a new plan round (`revisePlan` advances
+  `planRound` again), so the redo is `revise-<n+1>`, not `revise-<n>`. The scorecard keeps the last
+  event per label, so it counts both records. Nothing between the record and the save awaits, so
+  the window is a few synchronous statements wide; the double count is stated, not guarded.
 - **Attribution.** Every seat in `foundBy` when critique finders ran. Otherwise the stamp
   `state.criticSeat` (round, provider, model or `"default"`), which the critique callback writes
   beside `plan-critique-<n>.json`, `state.reviewSeat`'s pattern. A resume that moved
