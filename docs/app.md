@@ -79,7 +79,7 @@ For each vendor, the pilot and every run use either your **subscription** (the C
 | Tab | What it shows |
 |---|---|
 | Plans | Every version of the plan, one section per round. |
-| Plan critique | The critic's report for each plan round, with each finding's evidence. With [critique finders and verifiers](./configuration#critique), opening a finding shows which seats raised it and how each verifier voted and why. |
+| Plan critique | The critic's report for each plan round, with each finding's evidence. With [critique finders and verifiers](./configuration#critique), opening a finding shows which seats raised it and how each verifier voted and why. Opening a finding also shows what the planner's next revision said it did with it, and whether the next critique raised it again. |
 | Code review | The reviewer's report for each round, and what happened to each finding afterwards. Opening a finding shows which seats raised it, how each verifier voted and why, and what the fixer said it did with it. |
 | Code | What each round changed, from the commit it made, and the whole change so far. |
 | Questions | The run's questions, which you answer in place. |

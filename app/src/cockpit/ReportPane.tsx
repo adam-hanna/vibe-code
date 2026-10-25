@@ -5,13 +5,13 @@ import { Button } from '@/ui/button';
 import { cn } from '@/lib/utils';
 import { Counts } from './Counts';
 import { Caret, Section } from './Disclosure';
-import { ballotLine, foundByLine, ofKind, outcomeFor, readDispositions, readReport, votesLine } from './artifacts';
+import { ballotLine, foundByLine, ofKind, outcomeFor, readDispositions, readReport, revisionRan, votesLine } from './artifacts';
 import { SEVERITIES, gateSentence } from './model';
 import { DOCUMENT, EMPTY, FILE, HEAD, LABEL, NOTE, PANE } from './pane';
 import { useArtifact, useArtifacts, noText } from './useArtifacts';
 import { sizeOf } from './PlansPane';
 import type { Severity } from '../design';
-import type { Classified, FullFinding } from './artifacts';
+import type { Answerer, Classified, FullFinding } from './artifacts';
 import type { Census, FinderMerge, FindingRow, FixDispositionsFrame } from './model';
 import type { RoundCard } from './rounds';
 import { shownRound } from './rounds';
@@ -366,6 +366,7 @@ function ReportBody({
   dispositions = null,
   nextReview = null,
   notRecorded = false,
+  by = 'fixer',
 }: {
   dir: string;
   runId: string;
@@ -381,6 +382,8 @@ function ReportBody({
   nextReview?: Classified | null;
   /** The fix round answering this review ran and recorded no dispositions. */
   notRecorded?: boolean;
+  /** Who answered the round: the fixer for a review, the planner for a critique (#457). */
+  by?: Answerer;
 }) {
   const { read, failure, loading } = useArtifact(dir, runId, name, revision);
   const missing = noText(read, failure);
@@ -389,7 +392,14 @@ function ReportBody({
   const file = fixed.read?.kind === 'text' ? readDispositions(fixed.read.text) : null;
   const raised =
     next.read?.kind === 'text' ? new Set(readReport(next.read.text)?.findings.map((f) => f.id) ?? []) : null;
-  const answering = { listed: dispositions?.round ?? null, file, unrecorded: notRecorded, raised };
+  const answering = {
+    listed: dispositions?.round ?? null,
+    file,
+    unrecorded: notRecorded,
+    raised,
+    // Absent for the fixer, so a review's outcome is built exactly as before.
+    ...(by === 'planner' ? { by } : {}),
+  };
 
   if (loading && read === null && missing === null) {
     return <p className={NOTE}>reading {name}…</p>;
@@ -517,21 +527,27 @@ export function ReportPane({
   const reports = ofKind(entries, kind);
   // Classified out of the listing, never composed from a round: the fix round
   // that answers `code-review-<n>.json` is `n + 1`, and so is the next review.
+  // A critique the same way (#457): the revision answering
+  // `plan-critique-<n>.json` writes `plan-dispositions-<n + 1>.json`, and the
+  // critique of that revision is `plan-critique-<n + 1>.json`.
+  const answers = kind === 'review' ? 'dispositions' : 'plan-dispositions';
   const answering = (round: number | null): Classified | null =>
-    kind !== 'review' || round === null
-      ? null
-      : (ofKind(entries, 'dispositions').find((c) => c.round === round + 1) ?? null);
+    round === null ? null : (ofKind(entries, answers).find((c) => c.round === round + 1) ?? null);
   const nextReviewOf = (round: number | null): Classified | null =>
-    kind !== 'review' || round === null ? null : (reports.find((c) => c.round === round + 1) ?? null);
+    round === null ? null : (reports.find((c) => c.round === round + 1) ?? null);
   // A round that ran and recorded nothing: the frame that says its answer could
   // not be read, or - for a run from before #393, or an archive opened without
   // its frames - the round's report with no dispositions file beside it.
-  const unrecordedFor = (round: number | null): boolean =>
-    kind === 'review' &&
-    round !== null &&
-    // The last frame for the round: a round redone after a stop says again.
-    (fixDispositions.filter((d) => d.answers === round).at(-1)?.recorded === false ||
-      ofKind(entries, 'fix-report').some((c) => c.round === round + 1));
+  // A critique's, from the listing alone (`revisionRan`, #457).
+  const unrecordedFor = (round: number | null): boolean => {
+    if (round === null) return false;
+    if (kind === 'critique') return revisionRan(entries, round);
+    return (
+      // The last frame for the round: a round redone after a stop says again.
+      fixDispositions.filter((d) => d.answers === round).at(-1)?.recorded === false ||
+      ofKind(entries, 'fix-report').some((c) => c.round === round + 1)
+    );
+  };
   const [open, setOpen] = useState<string | null>(null);
   /** See `PlansPane`: the pane follows the run until the reader touches it. */
   const touched = useRef(false);
@@ -632,6 +648,7 @@ export function ReportPane({
             dispositions={answering(report.round)}
             nextReview={nextReviewOf(report.round)}
             notRecorded={unrecordedFor(report.round)}
+            by={kind === 'review' ? 'fixer' : 'planner'}
           />
         </Section>
       ))}
