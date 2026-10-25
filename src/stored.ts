@@ -1445,14 +1445,8 @@ function readReviewCoverage(raw: unknown, ctx: ReadContext): ReviewCoverage | un
 }
 
 /**
- * What the last review round did to the judge, or nothing at all (#112).
- *
- * Dropped whole rather than repaired, for `readReviewCoverage`'s reason one
- * function up and a sharper one: a verdict is the reviewer's word, and a
- * repaired entry would be a word nobody said. A count that is neither a
- * non-negative integer nor null is not something the writer produces - null is
- * how it says "not counted" - so it is damage rather than a value to coerce.
- * The repair is still logged, so the corruption is visible.
+ * One verdict as stored: `unjudged`, or a justified flag with its reason, or
+ * null for anything else, which each caller treats as damage in its own way.
  */
 function readJudgeVerdict(raw: unknown): JudgeFile['verdict'] | null {
   if (raw === 'unjudged') return 'unjudged';
@@ -1465,8 +1459,8 @@ function readJudgeVerdict(raw: unknown): JudgeFile['verdict'] | null {
 /**
  * Every seat's verdict on one judge file (#404), entry by entry.
  *
- * Repaired rather than dropped whole, unlike the record around it, because the
- * file's combined `verdict` stands on its own: it was decided when the round
+ * Repaired rather than dropped whole, unlike the `readTestChanges` record it
+ * sits in, because the file's combined `verdict` stands on its own: it was decided when the round
  * ran, from the whole list, and is never recomputed here from what survived. A
  * malformed entry is dropped and said; a value that is not a list drops the key.
  */
@@ -1496,6 +1490,16 @@ function readSeatVerdicts(raw: unknown, ctx: ReadContext, at: string): JudgeSeat
   return out;
 }
 
+/**
+ * What the last review round did to the judge, or nothing at all (#112).
+ *
+ * Dropped whole rather than repaired, for `readReviewCoverage`'s reason above
+ * and a sharper one: a verdict is the reviewer's word, and a
+ * repaired entry would be a word nobody said. A count that is neither a
+ * non-negative integer nor null is not something the writer produces - null is
+ * how it says "not counted" - so it is damage rather than a value to coerce.
+ * The repair is still logged, so the corruption is visible.
+ */
 function readTestChanges(raw: unknown, ctx: ReadContext): TestChanges | undefined {
   if (raw === undefined) return undefined;
   const drop = (): undefined => {
