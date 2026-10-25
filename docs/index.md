@@ -18,10 +18,10 @@ hero:
 
 A planner writes a plan and a critic attacks it, until the plan has no blocking findings. Then an implementer writes the code, vibe runs your tests itself, and a reviewer reviews the diff, until that is clean too.
 
-By default Claude plans and implements, and Codex critiques, reviews and answers the planner's questions. Each of those roles can be seated on either Claude or Codex, with its own model and effort: see [`roles`](./configuration#roles). The review can also seat more finders and a vote of verifiers: see [`review`](./configuration#review).
+By default Claude plans and implements, and Codex critiques, reviews and answers the planner's questions. Each of those roles can be seated on either Claude or Codex, with its own model and effort: see [`roles`](./configuration#roles). The plan critique and the review can each seat more finders and a vote of verifiers: see [`critique`](./configuration#critique) and [`review`](./configuration#review).
 
 ```
-PLAN ──> CRITIQUE ──blocking?──> REVISE ─┐
+PLAN ──> CRITIQUE ──blocking?──> REVISE ─┐        the critic, any finders, and a vote
   │         │ clear                   └──┘
   │         v
   │      IMPLEMENT

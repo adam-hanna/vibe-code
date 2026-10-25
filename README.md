@@ -4,14 +4,14 @@
 
 A planner writes a plan and a critic attacks it, until the plan has no blocking findings. Then an implementer writes the code, vibe runs your tests, and a reviewer reviews the diff, until that is clean too. vibe stops only when it actually needs you.
 
-By default Claude plans and implements, and Codex critiques, reviews and answers the planner's questions. Each of those roles can be seated on either Claude or Codex, with its own model and effort: see [`roles`](https://adam-hanna.github.io/vibe-code/configuration.html#roles). The review can also seat more **finders**, which review the diff independently of the reviewer and of each other, and **verifiers**, which vote on each blocking finding before it can block: see [`review`](https://adam-hanna.github.io/vibe-code/configuration.html#review).
+By default Claude plans and implements, and Codex critiques, reviews and answers the planner's questions. Each of those roles can be seated on either Claude or Codex, with its own model and effort: see [`roles`](https://adam-hanna.github.io/vibe-code/configuration.html#roles). The plan critique and the review can each seat more **finders**, which look independently of the critic or reviewer and of each other, and **verifiers**, which vote on each blocking finding before it can block: see [`critique`](https://adam-hanna.github.io/vibe-code/configuration.html#critique) and [`review`](https://adam-hanna.github.io/vibe-code/configuration.html#review).
 
 **Documentation:** https://adam-hanna.github.io/vibe-code/
 
 ![The vibe desktop app: projects and runs on the left, the pilot chat in the middle, the run's status on the right](docs/images/app-pilot.png)
 
 ```
-PLAN ──> CRITIQUE ──blocking?──> REVISE ─┐
+PLAN ──> CRITIQUE ──blocking?──> REVISE ─┐        the critic, any finders, and a vote
   │         │ clear                   └──┘
   │         v
   │      IMPLEMENT
@@ -98,6 +98,7 @@ Put a `vibe.config.json` in the repository. Flags override it. `vibe.config.exam
 | `roles` | Which agent (Claude or Codex), model and effort holds each job: planner, critic, answerer, implementer and reviewer. |
 | `review.finders`, `review.verifiers` | More seats that review the diff, and seats that vote on each blocking finding before it blocks. Both empty by default, which is one reviewer and no vote. The reviewer keeps its conversation from round to round; the other finders start fresh every round. |
 | `critique.finders`, `critique.verifiers` | The same for the plan critique: more seats that critique each version of the plan, and seats that vote on each blocking plan finding before it blocks. Both empty by default, which is one critic and no vote. The critic keeps its conversation; the other finders start fresh every round. |
+| `review.maxParallel`, `critique.maxParallel` | How many finder or verifier turns may run at once. `1` by default, one after another. Raising it makes a round faster, not cheaper, and Codex turns at once can overshoot `budget.maxTokens` by up to that many turns' spend. |
 | `budget.maxTokens` | A ceiling for the whole run, across both agents. |
 | `loop.maxPlanRounds`, `loop.maxReviewRounds` | How many rounds before vibe stops and asks. |
 | `gates` | Where the loop pauses for you: `auto`, `step` (the app only) or `stop`. |
@@ -109,7 +110,7 @@ Settings for every project go in `~/.config/vibe/config.json` (`%APPDATA%\vibe\c
 
 ## What a run leaves behind
 
-Everything goes in `.vibe/runs/<run-id>/` in the repository: `PLAN.md`, every plan revision and critique, every code review, what the fixer said it did with each review finding, `state.json`, and a `transcript.log`. `FOLLOW-UPS.md` is the one to read afterwards: it lists what the critic or the reviewer said belongs in another change, and any finding the verifiers' vote moved to P2.
+Everything goes in `.vibe/runs/<run-id>/` in the repository: `PLAN.md`, every plan revision and critique, every code review, what the planner said it did with each critique finding and what the fixer said it did with each review finding, `state.json`, and a `transcript.log`. `FOLLOW-UPS.md` is the one to read afterwards: it lists what the critic or the reviewer said belongs in another change, and any finding the verifiers' vote moved to P2.
 
 When a round changes a test file or `vibe.config.json`, the reviewer is shown each one and must say whether the change was justified. Each file's status, the lines added and removed, and the verdict are recorded under `testChanges` in `state.json` and in that round's `code-review-<n>.json`. A file the reviewer left out is recorded as `unjudged`. None of this stops a run, but the end-of-run summary names any file that was not judged justified.
 
