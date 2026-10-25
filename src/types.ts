@@ -1706,8 +1706,24 @@ export interface JudgeVerdict {
  *
  * `'unjudged'` is the fail-closed answer: the file was listed and no verdict
  * for it came back from the part that showed it. It is never read as justified.
+ *
+ * `verdicts` exists only in a round that seated review finders (#404): one
+ * entry per seat that reported, in config order, and `verdict` is then their
+ * combination, failing closed (`combineVerdicts`). In every other round the key
+ * is omitted - never `undefined` - so that record is byte-for-byte what it was.
  */
 export interface JudgeFile extends FileChange {
+  verdict: JudgeVerdict | 'unjudged';
+  verdicts?: JudgeSeatVerdict[];
+}
+
+/** One seat's verdict on a judge file, when a round seated finders (#404). */
+export interface JudgeSeatVerdict {
+  /** `roles.reviewer` or `review.finders[<k-1>]`, as `FinderReport.seat`. */
+  seat: string;
+  provider: AgentProvider;
+  /** The configured model, or `"default"` - never a resolved guess. */
+  model: string;
   verdict: JudgeVerdict | 'unjudged';
 }
 

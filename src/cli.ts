@@ -88,12 +88,15 @@ import type {
   ConfigOverrides,
   Effort,
   Finding,
+  JudgeFile,
+  JudgeSeatVerdict,
   LoadedConfig,
   RunEvent,
   RunState,
   RunSummary,
 } from '@src/types.js';
 import { findGateScratch } from '@src/artifacts.js';
+import { disagreements } from '@src/judge.js';
 
 const USAGE = `
 vibe - automated plan/critique/implement/review loop (Claude Code + Codex)
@@ -2830,20 +2833,45 @@ function reportGates(state: RunState): void {
  * justified or none was touched - a list of fine edits at the end of a run is
  * noise that teaches people to skip the line that matters. The exit code does
  * not move for this; the issue's decision is record and surface, never block.
+ *
+ * In a round that seated finders (#404) each "not justified" file is followed
+ * by who said what - `<seat> <provider>/<model>`, the naming `foundBy` uses -
+ * and the line says how many files the seats disagreed on. Without finders the
+ * line is exactly what it was.
+ *
+ * Exported for the reason `reportDeferred` is.
  */
-function reportTestChanges(state: RunState): void {
+export function reportTestChanges(state: RunState): void {
   const record = state.testChanges;
   if (record === undefined) return;
-  const named = (files: readonly { path: string }[]): string =>
-    files.map((f) => `\`${f.path}\``).join(', ');
+  const seated = record.files.some((f) => f.verdicts !== undefined);
+  const seat = (v: JudgeSeatVerdict): string => `${v.seat} ${v.provider}/${v.model}`;
+  const said = (f: JudgeFile): string => {
+    const by = (keep: (v: JudgeSeatVerdict) => boolean): string[] =>
+      (f.verdicts ?? []).filter(keep).map(seat);
+    const groups: [string, string[]][] = [
+      ['not justified by', by((v) => v.verdict !== 'unjudged' && !v.verdict.justified)],
+      ['justified by', by((v) => v.verdict !== 'unjudged' && v.verdict.justified)],
+      ['unjudged by', by((v) => v.verdict === 'unjudged')],
+    ];
+    const text = groups
+      .filter(([, seats]) => seats.length > 0)
+      .map(([words, seats]) => `${words} ${seats.join(', ')}`)
+      .join('; ');
+    return text === '' ? '' : ` (${text})`;
+  };
+  const named = (files: readonly JudgeFile[], bySeat = false): string =>
+    files.map((f) => `\`${f.path}\`${bySeat ? said(f) : ''}`).join(', ');
   const unjudged = record.files.filter((f) => f.verdict === 'unjudged');
   const rejected = record.files.filter((f) => f.verdict !== 'unjudged' && !f.verdict.justified);
   if (unjudged.length === 0 && rejected.length === 0) return;
   const parts: string[] = [];
-  if (rejected.length > 0) parts.push(`not justified: ${named(rejected)}`);
+  if (rejected.length > 0) parts.push(`not justified: ${named(rejected, seated)}`);
   if (unjudged.length > 0) parts.push(`unjudged: ${named(unjudged)}`);
+  const split = seated ? `The seats disagreed on ${disagreements(record.files)} file(s). ` : '';
   log.warn(
     `Review round ${record.round} changed the run's own tests or config - ${parts.join('; ')}. ` +
+      split +
       'The reasons are in state.json under testChanges and in the round\'s code-review artifact.',
   );
 }

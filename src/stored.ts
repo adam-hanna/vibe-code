@@ -33,6 +33,7 @@ import type {
   ReviewSeat,
   FileChangeStatus,
   JudgeFile,
+  JudgeSeatVerdict,
   TestChanges,
   UnaddressedFinding,
   RoundClaim,
@@ -1444,10 +1445,56 @@ function readReviewCoverage(raw: unknown, ctx: ReadContext): ReviewCoverage | un
 }
 
 /**
+ * One verdict as stored: `unjudged`, or a justified flag with its reason, or
+ * null for anything else, which each caller treats as damage in its own way.
+ */
+function readJudgeVerdict(raw: unknown): JudgeFile['verdict'] | null {
+  if (raw === 'unjudged') return 'unjudged';
+  if (isRecord(raw) && typeof raw['justified'] === 'boolean' && isString(raw['reason'])) {
+    return { justified: raw['justified'], reason: raw['reason'] };
+  }
+  return null;
+}
+
+/**
+ * Every seat's verdict on one judge file (#404), entry by entry.
+ *
+ * Repaired rather than dropped whole, unlike the `readTestChanges` record it
+ * sits in, because the file's combined `verdict` stands on its own: it was decided when the round
+ * ran, from the whole list, and is never recomputed here from what survived. A
+ * malformed entry is dropped and said; a value that is not a list drops the key.
+ */
+function readSeatVerdicts(raw: unknown, ctx: ReadContext, at: string): JudgeSeatVerdict[] | undefined {
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw)) {
+    ctx.repairs.dropped('testChanges', at);
+    return undefined;
+  }
+  const out: JudgeSeatVerdict[] = [];
+  for (const [j, entry] of (raw as unknown[]).entries()) {
+    const provider = isRecord(entry) ? enumOf(entry['provider'], PROVIDERS) : null;
+    const verdict = isRecord(entry) ? readJudgeVerdict(entry['verdict']) : null;
+    if (
+      !isRecord(entry) ||
+      !isString(entry['seat']) ||
+      provider === null ||
+      !isString(entry['model']) ||
+      entry['model'] === '' ||
+      verdict === null
+    ) {
+      ctx.repairs.dropped('testChanges', `${at}[${j}]`);
+      continue;
+    }
+    out.push({ seat: entry['seat'], provider, model: entry['model'], verdict });
+  }
+  return out;
+}
+
+/**
  * What the last review round did to the judge, or nothing at all (#112).
  *
- * Dropped whole rather than repaired, for `readReviewCoverage`'s reason one
- * function up and a sharper one: a verdict is the reviewer's word, and a
+ * Dropped whole rather than repaired, for `readReviewCoverage`'s reason above
+ * and a sharper one: a verdict is the reviewer's word, and a
  * repaired entry would be a word nobody said. A count that is neither a
  * non-negative integer nor null is not something the writer produces - null is
  * how it says "not counted" - so it is damage rather than a value to coerce.
@@ -1470,7 +1517,7 @@ function readTestChanges(raw: unknown, ctx: ReadContext): TestChanges | undefine
   }
   const count = (v: unknown): v is number | null => v === null || isCounter(v);
   const files: JudgeFile[] = [];
-  for (const entry of raw['files'] as unknown[]) {
+  for (const [i, entry] of (raw['files'] as unknown[]).entries()) {
     if (!isRecord(entry)) return drop();
     const status = enumOf(entry['status'], FILE_CHANGE_STATUSES);
     const file = entry['path'];
@@ -1487,18 +1534,18 @@ function readTestChanges(raw: unknown, ctx: ReadContext): TestChanges | undefine
     ) {
       return drop();
     }
-    let read: JudgeFile['verdict'];
-    if (verdict === 'unjudged') read = 'unjudged';
-    else if (
-      isRecord(verdict) &&
-      typeof verdict['justified'] === 'boolean' &&
-      isString(verdict['reason'])
-    ) {
-      read = { justified: verdict['justified'], reason: verdict['reason'] };
-    } else {
-      return drop();
-    }
-    files.push({ path: file, oldPath, status, added, removed, verdict: read });
+    const read = readJudgeVerdict(verdict);
+    if (read === null) return drop();
+    const seats = readSeatVerdicts(entry['verdicts'], ctx, `testChanges.files[${i}].verdicts`);
+    files.push({
+      path: file,
+      oldPath,
+      status,
+      added,
+      removed,
+      verdict: read,
+      ...(seats === undefined ? {} : { verdicts: seats }),
+    });
   }
   return { round: raw['round'], patterns: [...(raw['patterns'] as string[])], files };
 }

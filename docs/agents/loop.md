@@ -406,6 +406,11 @@ is that such an edit can no longer pass in silence. `src/judge.ts` decides which
   field. `test_changes_judged` is narration with no event, because the record is already durable
   in two places. It is said at `warn` only when a file is unjudged or not justified.
 
+A round with review finders records every reporting seat's verdict, not only the reviewer's
+(#404): each file gains `verdicts`, one entry per seat in config order, and `verdict` becomes
+their combination, failing closed (the rule is under the finders, below). A round with no
+finders has no `verdicts` key anywhere, so its record is byte-for-byte what it was.
+
 **Nothing under `.vibe/runs/` is read through a link, and there is one predicate for all
 three levels.** `linkageOf` in `src/run.ts` is `lstat(...).isSymbolicLink()`, which is true of
 a POSIX symlink, a Node `'junction'` and an `mklink /J` junction alike — one measurement, no
@@ -557,9 +562,21 @@ of them at once (#403; `1`, the default, is one after another) - see *Seats at o
   id. `foundBy` keeps the id each finder used, which is also the id its own downgrade events
   name. After the merge the pipeline is unchanged: `proveFindings`, then the artifact once, then
   `recordPendingFindings`.
-- **The first finder owns `reviewCoverage` and `testChanges`** (decision 6). Additional
-  finders' test verdicts are dropped: two judges' verdicts on one file would need a rule for
-  disagreeing, and inventing one is out of scope.
+- **The first finder owns `reviewCoverage`** (decision 6).
+- **Every seat's test verdict is kept, and combined failing closed** (#404, which supplies the
+  rule decision 6 declined to invent). Per file, over the seats that reported - the reviewer and
+  every finder that did not fail: any *not justified* makes it not justified; otherwise any
+  *unjudged* makes it unjudged; only a unanimous *justified* is justified. A dissent is never
+  outvoted, because a verdict is one judge's statement about the judge, and #112 records it
+  rather than adjudicating it; a majority waving a rewritten assertion through is the silence
+  the record exists to break. A failed finder contributes nothing, as it contributes no
+  findings, so it cannot make a file unjudged. Each seat's verdicts are attached per diff part
+  by `attachVerdicts`, so "first wins" still holds within a seat. The combined record is written,
+  and `test_changes_judged` said with `seats` and `disagreed`, only after the finders return;
+  until then `state.testChanges` is the reviewer's own, so a stop during the finders leaves
+  what a round without them would have. `disagreed` counts files where one seat said justified
+  and another not justified. The end-of-run warning names each not-justified file's seats as
+  `<seat> <provider>/<model>`.
 - **A failed additional finder does not end the round** (decision 7). An `Escalation` or a
   `Cancelled` propagates as it would for the first finder; anything else is recorded as
   `review_finder_failed` and that finder contributes nothing. Losing an extra seat can only leave
@@ -681,7 +698,12 @@ are written once. The descriptor holds the rest:
 | `maxParallel`, `setting` | `cfg.review.maxParallel` | `cfg.critique.maxParallel` |
 
 The sentences and `data` of the merged and tallied events come from the descriptor, so each
-phase keeps its own words and keys byte for byte. A finder's parts are always a list: the
+phase keeps its own words and keys byte for byte. A `FinderPhase` may also name an `extra`, a
+reading of each part's output that the runner keeps per part in the finder's slot without
+interpreting it (#404): the review sets `parseTestVerdicts`, the critique sets none.
+`runFinderSeats` returns `{ report, slots }` - the merged report and the reporting finders'
+slots in config order - and both callers unwrap `report`; only the review reads `slots`, to
+combine the test verdicts itself. A finder's parts are always a list: the
 review's chunks and the critique's single turn have the same shape, and more than one part is
 merged by `mergeReviewReports`. The step line is `<holder> <doing> (finder <k>)`, and a seat's
 `turn_started` and `turn_finished` carry the phase's `kind` (`review` or `critique`), or `vote`.
