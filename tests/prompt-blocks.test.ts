@@ -51,6 +51,7 @@ const CONSTANT: Readonly<Record<string, string>> = {
   'a deferred finding': 'DEFERRED_MARK',
   'simple solution': 'SIMPLE_SOLUTION',
   stall: 'STALL_STEP_BACK',
+  'plan dispositions': 'PLAN_DISPOSITIONS',
 };
 
 /** The source of one function, from its signature to the next top-level one. */

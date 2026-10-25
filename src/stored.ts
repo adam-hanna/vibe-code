@@ -1504,14 +1504,15 @@ function readTestChanges(raw: unknown, ctx: ReadContext): TestChanges | undefine
 }
 
 /**
- * The seat that took the last recorded review round's turn, or nothing (#393).
+ * The seat that took the last recorded review round's turn (#393), or critique
+ * round's turn (#453), or nothing.
  *
  * Dropped whole rather than repaired, for `readTestChanges`'s reason: a
- * fix's dispositions are credited to this seat, and a repaired value would
+ * round's dispositions are credited to this seat, and a repaired value would
  * credit a seat nobody recorded. `isCounter` rather than `isPositiveInt`,
- * because round 0 is the first review round's own number.
+ * because round 0 is the first round's own number.
  */
-function readReviewSeat(raw: unknown, ctx: ReadContext): ReviewSeat | undefined {
+function readRoundSeat(raw: unknown, ctx: ReadContext, field: 'reviewSeat' | 'criticSeat'): ReviewSeat | undefined {
   if (raw === undefined) return undefined;
   if (
     !isRecord(raw) ||
@@ -1521,7 +1522,7 @@ function readReviewSeat(raw: unknown, ctx: ReadContext): ReviewSeat | undefined 
     !isString(raw['model']) ||
     raw['model'] === ''
   ) {
-    ctx.repairs.dropped('reviewSeat', 'reviewSeat');
+    ctx.repairs.dropped(field, field);
     return undefined;
   }
   return { round: raw['round'], provider: raw['provider'], model: raw['model'] };
@@ -2150,7 +2151,10 @@ const READERS = {
   testChanges: (raw, ctx) => readTestChanges(raw, ctx),
   // Absent stays absent: a run from before #393, or one that has not recorded a
   // review round. A damaged value is dropped, so its round credits no seat.
-  reviewSeat: (raw, ctx) => readReviewSeat(raw, ctx),
+  reviewSeat: (raw, ctx) => readRoundSeat(raw, ctx, 'reviewSeat'),
+  // The same for a critique round (#453): absent on a run from before it, or
+  // one that has not recorded a critique; damaged is dropped, crediting nobody.
+  criticSeat: (raw, ctx) => readRoundSeat(raw, ctx, 'criticSeat'),
   // Absent stays absent: no fix round is in flight. A damaged marker is dropped,
   // which resumes the way every run did before it existed - a new round.
   fixInFlight: (raw, ctx) => {

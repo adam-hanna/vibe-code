@@ -1,0 +1,90 @@
+Revise your plan. This is revision round 1.
+
+## Simplest complete solution
+
+Deliver the simplest complete solution to the user's stated task. Reuse existing
+mechanisms and conventions. Every added abstraction, dependency, configuration
+option, fallback, or special case must serve a concrete requirement or a
+demonstrated failure in a supported path. Speculative future needs and personal
+architectural preferences do not justify enlarging this change.
+
+Investigate broadly; change what is necessary for a coherent, correct solution.
+A repair may need several files to preserve one contract. Keep separable
+improvements as follow-ups. When added complexity causes defects, consider
+removing or simplifying it before adding another corrective layer.
+
+The original task and explicit user decisions define the goal. Check the plan
+against them too: a plan can drift. An approved plan and its acceptance criteria
+guide the work, but a demonstrated correctness or safety defect must still be
+reported. Explain a necessary departure; never silently enlarge or lower the bar.
+
+## Current plan of record
+
+# Widget
+
+Return the new string instead of the old one, and cover it with a test.
+
+## Review findings
+
+An independent reviewer raised the following. Evaluate each P1 against the original task and repository evidence, then resolve the defect or explicitly rebut an incorrect finding. The reviewer's proposed remedy is advisory; use the simplest coherent approach that resolves a valid defect.
+
+### [P1] Finding finding-one  `finding-one`
+Detail.
+
+*Suggested fix:* Fix it.
+*Cited:* external: harness fixture
+
+### [P1] Finding finding-two  `finding-two`
+Detail.
+
+*Suggested fix:* Fix it.
+*Cited:* external: harness fixture
+
+For each P1: fix the plan, or, if you believe the finding is wrong, say so explicitly in the plan with your reasoning. Do not silently ignore one.
+
+## Fix breadth
+
+Fix the cause, not the line.
+
+During initial implementation, apply these checks to each planned change; during
+revision or repair, apply them to the findings.
+
+- Before editing, evaluate each finding against the actual code, the original
+  task and the approved requirements. Verify its trigger and incorrect outcome;
+  reproduce it when practical. Evaluate the proposed remedy independently.
+  A suggested fix is advisory, not an instruction to adopt that design.
+- Decide what the underlying mistake is, then search for it in related paths.
+  Fix proven occurrences necessary to this task or its coherent repair. Keep
+  unrelated existing defects and separable improvements as follow-ups; looking
+  broadly does not authorise a repository-wide rewrite or a new abstraction.
+- Trace upstream inputs, producers, callers, ownership and assumptions, and
+  downstream consumers, serialised or persisted shapes, tests and documented
+  behaviour. Preserve the contract across affected sites in the same pass.
+- After each change, ask what it could break that previously worked. Narrowing a
+  condition to exclude a bad case often excludes good ones too.
+- Resolve valid defects with the simplest coherent repair. If added complexity
+  caused the defect, consider removing or simplifying it. Reject an incorrect
+  finding or unnecessary scope expansion with evidence; a valid defect still
+  needs resolving even when you reject the reviewer's proposed remedy.
+- In your report, state each finding's disposition (fixed, rebutted, or deferred)
+  and its reason, what you changed, **what else you
+  checked for the same class of problem**, and what you found. "Checked X and Y,
+  they were already correct" is useful; silence is not.
+
+## The boundary your current plan drew
+
+1. **Renaming the widget module**
+   - Why: Unrelated churn in a change about one string.
+
+`out_of_scope` is the whole boundary, not a delta: restate every item that still holds. Dropping one is a deliberate decision to take that work on - if you drop it, say so in the plan and explain why. Adding one is how you decline a finding that is real and worth doing but belongs in separate work.
+
+## The bar your current plan set
+
+1. **`widget()` returns the new string.** `returns-new`
+   - Check (command): npm test
+
+`acceptance_criteria` is the whole bar, not a delta: restate every criterion that still holds. Dropping one lowers the bar - if you drop it, say so in the plan and explain why it was never the right condition. Adding one is how a revision answers a finding that the plan's definition of done was incomplete.
+
+Return the **complete revised plan**, not a diff or a summary of changes - the plan is consumed standalone by the implementer. Keep `assumptions` current: remove any that were resolved, add any the revision introduced.
+
+Respond with JSON matching the required schema. No prose outside the JSON.

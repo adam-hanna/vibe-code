@@ -48,7 +48,7 @@ import type { RunSummary } from '@src/types.js';
  * Bumped when a field here changes meaning, so a reader can refuse a shape it does not know.
  *
  * Still 1 after `turns.byKind` and `turns.unplaced` arrived (#114), and after
- * `findings.outcomes` (#393): adding a field changes the meaning of none that
+ * `findings.outcomes` (#393), and after `findings.critiqueOutcomes` (#453): adding a field changes the meaning of none that
  * were already here, and a reader that does not know the new ones can ignore
  * them.
  */
@@ -177,6 +177,43 @@ export interface FixOutcomes {
   excluded: Tally;
 }
 
+/**
+ * Critique findings by what the planner did with them, from `plan_dispositions`
+ * events (#453). `FixOutcomes` for the plan side: only findings a critic raised
+ * are scored, and a rebuttal is the planner's call, not a verdict on the critic.
+ */
+export interface CritiqueOutcomes {
+  /**
+   * Findings revisions (`revise-N`): matched where dispositions were recorded,
+   * measured where either that or the unreadable warning was, and unmeasured
+   * where neither was - every run recorded before #453, and a revision that
+   * stopped before its record.
+   */
+  rounds: Measure;
+  /** Revisions whose dispositions could not be read: `plan_dispositions_unreadable`. */
+  unreadable: number;
+  /** Each scored finding once per revision, by id - never once per seat. */
+  total: DispositionRow;
+  /** The severity the planner was shown, each finding once. */
+  bySeverity: Record<string, DispositionRow>;
+  /** Keyed `provider/model`; a finding several seats raised counts in each. */
+  bySeat: Record<string, DispositionRow>;
+  /** Scored findings no seat could be credited with: counted in `total` only. */
+  unattributed: number;
+  /**
+   * Rebutted findings the next critique raised again under the same id, over
+   * the rebutted findings whose next critique recorded the comparison
+   * (`critique_rebuttal_disputed`). Same id only, so it undercounts: a finding
+   * raised again under a new id, as a memoryless finder's `<id>-f<k>` is, is
+   * not seen.
+   */
+  rebuttals: Measure;
+  /** By the finding's vote outcome: `confirmed`, `unconfirmed`, `undecided` or `not voted`. */
+  byVote: Record<string, DispositionRow>;
+  /** Findings recorded but not scored, by who raised them. */
+  excluded: Tally;
+}
+
 export interface Scorecard {
   version: number;
   archive: {
@@ -230,6 +267,8 @@ export interface Scorecard {
     byKinds: Tally;
     /** What the fixer did with each review finding (#393). */
     outcomes: FixOutcomes;
+    /** What the planner did with each critique finding (#453). */
+    critiqueOutcomes: CritiqueOutcomes;
   };
   turns: {
     total: number;
@@ -281,8 +320,9 @@ export const UNMEASURABLE: readonly { dimension: string; why: string }[] = [
     dimension: 'finding precision',
     why:
       'finding_downgraded gives the UNGROUNDED rate, not the WRONG rate - a finding can be perfectly ' +
-      'grounded and false, which is #44. The nearest proxy is the fixer\'s rebuttal rate - rebutted by the fixer ' +
-      'above, over the findings it was shown - and it is not precision: the fixer can be wrong too, and a ' +
+      'grounded and false, which is #44. The nearest proxies are the fixer\'s rebuttal rate for review findings ' +
+      'and the planner\'s for critique findings - rebutted by the fixer and rebutted by the planner above, over ' +
+      'the findings each was shown - and neither is precision: the fixer can be wrong too, and so can the planner, and a ' +
       'rebuttal records what happened, not a verdict',
   },
   {
@@ -325,6 +365,20 @@ function observe(m: Measure, value: boolean | null): void {
 
 function row(): DispositionRow {
   return { of: 0, fixed: 0, rebutted: 0, deferred: 0, notAddressed: 0 };
+}
+
+function critiqueOutcomes(): CritiqueOutcomes {
+  return {
+    rounds: measure(),
+    unreadable: 0,
+    total: row(),
+    bySeverity: {},
+    bySeat: {},
+    unattributed: 0,
+    rebuttals: measure(),
+    byVote: {},
+    excluded: {},
+  };
 }
 
 function outcomes(): FixOutcomes {
@@ -393,7 +447,7 @@ export function scoreArchive(targetDir: string): Scorecard {
     rounds: { plan: census(), question: census(), review: census(), verify: census() },
     finalFix: measure(),
     gates: { recorded: measure(), byName: {}, attempts: {}, repeatedFailure: measure() },
-    findings: { downgraded: 0, byFrom: {}, byKinds: {}, outcomes: outcomes() },
+    findings: { downgraded: 0, byFrom: {}, byKinds: {}, outcomes: outcomes(), critiqueOutcomes: critiqueOutcomes() },
     turns: { total: 0, byLabel: {}, inert: measure(), byKind: {}, unplaced: 0 },
     questions: {
       asking: measure(),
@@ -522,6 +576,7 @@ function countRun(
   countGates(card, raw['gateOutcomes']);
   countQuestions(card, raw);
   countOutcomes(card.findings.outcomes, raw, events, runDir);
+  countCritiqueOutcomes(card.findings.critiqueOutcomes, events);
 }
 
 /** The labels of review fix turns - never `verify-fix-N`, whose one finding is a gate failure. */
@@ -624,6 +679,89 @@ function countOutcomes(
         if (next === undefined) next = round === null ? null : reviewedIds(runDir, round);
         observe(out.raisedAgain, next === null ? null : next.has(id));
       }
+    }
+  }
+}
+
+/** The labels of findings revisions - never `revise-qN`, which answers questions, not a critique. */
+const REVISE_LABEL = /^revise-\d+$/;
+
+const VOTE_OUTCOMES = new Set(['confirmed', 'unconfirmed', 'undecided']);
+
+/**
+ * One run's findings revisions, by what the planner did with each critique
+ * finding (#453). The population and the last-event-per-label rule are
+ * `countOutcomes`'; whether a rebuttal was raised again is read from the
+ * `critique_rebuttal_disputed` event of the critique that judged that
+ * revision's plan, and a rebuttal with no such event is unmeasured.
+ */
+function countCritiqueOutcomes(out: CritiqueOutcomes, events: readonly unknown[]): void {
+  const labels = new Set<string>();
+  const recorded = new Map<string, Record<string, unknown>>();
+  const unreadable = new Set<string>();
+  // The last comparison per critique round, for the same reason as the last
+  // event per label: a critique redone after a stop records it again.
+  const compared = new Map<number, Set<string>>();
+  for (const e of events) {
+    if (!isRecord(e)) continue;
+    const type = e['type'];
+    if (type === 'critique_rebuttal_disputed') {
+      const round = counter(e['round']);
+      const disputed = e['disputed'];
+      if (round !== null && Array.isArray(disputed)) {
+        compared.set(round, new Set(disputed.filter((x): x is string => typeof x === 'string')));
+      }
+      continue;
+    }
+    const label = e['label'];
+    if (typeof label !== 'string' || !REVISE_LABEL.test(label)) continue;
+    if (type === 'claude_turn' || type === 'codex_turn') labels.add(label);
+    else if (type === 'plan_dispositions') {
+      labels.add(label);
+      recorded.set(label, e);
+      unreadable.delete(label);
+    } else if (type === 'plan_dispositions_unreadable') {
+      labels.add(label);
+      unreadable.add(label);
+      recorded.delete(label);
+    }
+  }
+  for (const label of labels) {
+    if (recorded.has(label)) observe(out.rounds, true);
+    else if (unreadable.has(label)) {
+      observe(out.rounds, false);
+      out.unreadable += 1;
+    } else observe(out.rounds, null);
+  }
+
+  for (const e of recorded.values()) {
+    const round = counter(e['round']);
+    const disputed = round === null ? undefined : compared.get(round);
+    const list = Array.isArray(e['dispositions']) ? e['dispositions'] : [];
+    const seen = new Set<string>();
+    for (const d of list) {
+      if (!isRecord(d)) continue;
+      const id = d['id'];
+      const severity = d['severity'];
+      const disposition = d['disposition'];
+      const raisedBy = d['raisedBy'];
+      if (typeof id !== 'string' || typeof severity !== 'string' || typeof disposition !== 'string') continue;
+      if (!DISPOSITIONS.has(disposition) || !SEVERITIES.has(severity)) continue;
+      if (raisedBy !== 'critic') {
+        bump(out.excluded, typeof raisedBy === 'string' ? raisedBy : 'not recorded');
+        continue;
+      }
+      if (seen.has(id)) continue;
+      seen.add(id);
+
+      tallyRow(out.total, disposition);
+      tallyRow((out.bySeverity[severity] ??= row()), disposition);
+      const seats = seatKeys(d['seats']);
+      if (seats.length === 0) out.unattributed += 1;
+      for (const key of seats) tallyRow((out.bySeat[key] ??= row()), disposition);
+      const vote = d['vote'];
+      tallyRow((out.byVote[typeof vote === 'string' && VOTE_OUTCOMES.has(vote) ? vote : 'not voted'] ??= row()), disposition);
+      if (disposition === 'rebutted') observe(out.rebuttals, disputed === undefined ? null : disputed.has(id));
     }
   }
 }
@@ -871,6 +1009,7 @@ export function renderScorecard(card: Scorecard): string[] {
   }
 
   renderOutcomes(out, card.findings.outcomes);
+  renderCritiqueOutcomes(out, card.findings.critiqueOutcomes);
 
   out.push('', 'Questions');
   out.push(`  ${pad('runs that asked')} ${rate(card.questions.asking, 'run', 'runs')}`);
@@ -931,9 +1070,61 @@ function renderOutcomes(out: string[], o: FixOutcomes): void {
   }
 }
 
-function describeRow(r: DispositionRow): string {
+/**
+ * The planner's dispositions (#453), in `renderOutcomes`' terms: every figure
+ * beside the others and its `of`, no percentage anywhere, and "rebutted by the
+ * planner", because a rebuttal is the planner's call and not a verdict.
+ */
+function renderCritiqueOutcomes(out: string[], o: CritiqueOutcomes): void {
+  out.push('', "Critique findings, by what the planner did  (critic findings only; a rebuttal is the planner's call, not a verdict)");
+  const rounds = o.rounds.measured + o.rounds.unmeasured;
+  if (rounds === 0) {
+    out.push(`  ${pad('plan revisions')} no findings revision in any run`);
+    return;
+  }
+  const missing = rounds - o.rounds.matched;
+  const why = `${o.unreadable} unreadable, ${o.rounds.unmeasured} recorded nothing`;
+  if (o.rounds.matched === 0) {
+    out.push(`  ${pad('plan revisions')} dispositions not recorded for any of ${rounds} plan revision(s) (${why})`);
+    return;
+  }
+  out.push(
+    `  ${pad('plan revisions')} dispositions recorded for ${o.rounds.matched} of ${rounds} plan revision(s)` +
+      (missing === 0 ? '' : `; not recorded for ${missing} (${why})`),
+  );
+  out.push(`  ${pad('all seats')} ${describeRow(o.total, 'planner')}`);
+  for (const [seat, r] of Object.entries(o.bySeat).sort((a, b) => b[1].of - a[1].of || a[0].localeCompare(b[0]))) {
+    out.push(`  ${pad(seat)} ${describeRow(r, 'planner')}`);
+  }
+  if (o.unattributed > 0) out.push(`  ${pad('credited to no seat')} ${o.unattributed}`);
+  for (const [sev, r] of Object.entries(o.bySeverity).sort((a, b) => a[0].localeCompare(b[0]))) {
+    out.push(`  ${pad(sev)} ${describeRow(r, 'planner')}`);
+  }
+  const rebutted = o.rebuttals.measured + o.rebuttals.unmeasured;
+  if (rebutted > 0) {
+    // "Could not say" rather than "no later critique": a missing comparison is
+    // also a critique that stopped before recording it, and the two are not
+    // told apart here.
+    out.push(
+      `  ${pad('rebutted, raised again')} ${o.rebuttals.matched} raised again under the same id, ` +
+        `${o.rebuttals.measured - o.rebuttals.matched} not raised again, of ${rebutted} rebutted` +
+        (o.rebuttals.unmeasured === 0 ? '' : ` (${o.rebuttals.unmeasured} could not say: no later critique recorded the comparison)`) +
+        ' - same id only: a finding raised again under a new id, including a memoryless finder\'s renamed ' +
+        '`<id>-f<k>`, is not detected, so this undercounts',
+    );
+  }
+  for (const key of ['confirmed', 'unconfirmed', 'undecided', 'not voted']) {
+    const r = o.byVote[key];
+    if (r !== undefined) out.push(`  ${pad(key === 'not voted' ? key : `vote ${key}`)} ${describeRow(r, 'planner')}`);
+  }
+  if (Object.keys(o.excluded).length > 0) {
+    out.push(`  ${pad('not scored, raised by')} ${sorted(o.excluded).map(([who, n]) => `${who} ${n}`).join(', ')}`);
+  }
+}
+
+function describeRow(r: DispositionRow, who: 'fixer' | 'planner' = 'fixer'): string {
   return (
-    `${r.fixed} fixed, ${r.rebutted} rebutted by the fixer, ${r.deferred} deferred, ` +
+    `${r.fixed} fixed, ${r.rebutted} rebutted by the ${who}, ${r.deferred} deferred, ` +
     `${r.notAddressed} not addressed, of ${r.of}`
   );
 }
