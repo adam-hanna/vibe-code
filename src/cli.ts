@@ -1693,6 +1693,11 @@ export function reportRoles(cfg: Config): void {
   if ((finders.length > 0 || verifiers.length > 0) && cfg.review.maxParallel > 1) {
     log.info(`Parallel: up to ${cfg.review.maxParallel} seat turns at once`);
   }
+  // The critique's own bound (#452), on the same rule: said only when its seats
+  // can overlap.
+  if ((critiqueFinders.length > 0 || critiqueVerifiers.length > 0) && cfg.critique.maxParallel > 1) {
+    log.info(`Critique parallel: up to ${cfg.critique.maxParallel} seat turns at once`);
+  }
   for (const warning of roleWarnings(cfg)) log.warn(warning);
 }
 
@@ -1799,22 +1804,19 @@ function reportSeatSection(
   };
   // How many of those turns may be live at once (#403). It changes no count of
   // turns, only how many overlap - and with them, how far Codex turns, which
-  // report nothing in flight, can carry the run past budget.maxTokens.
-  // The review's alone: the critique's seats run in sequence until #452.
-  const maxParallel = section === 'review' ? cfg.review.maxParallel : null;
-  const parallel: [string, string] | null =
-    maxParallel === null
-      ? null
-      : [
-          'parallel',
-          maxParallel === 1
-            ? '1 (one after another)'
-            : `${maxParallel} at once (Codex turns can overshoot budget.maxTokens by up to ${maxParallel} turns' spend)`,
-        ];
+  // report nothing in flight, can carry the run past budget.maxTokens. Each
+  // section's own (#452).
+  const { maxParallel } = cfg[section];
+  const parallel: [string, string] = [
+    'parallel',
+    maxParallel === 1
+      ? '1 (one after another)'
+      : `${maxParallel} at once (Codex turns can overshoot budget.maxTokens by up to ${maxParallel} turns' spend)`,
+  ];
   if (finders.length > 0) {
     log.info(headings.finders);
     const rows = finders.map((f): [string, string] => [`finder ${f.k}`, seat(f.setting, f.focus)]);
-    print(verifiers.length === 0 && parallel !== null ? [...rows, parallel] : rows);
+    print(verifiers.length === 0 ? [...rows, parallel] : rows);
   }
   if (verifiers.length === 0) return;
   log.info(headings.verifiers);
@@ -1822,7 +1824,7 @@ function reportSeatSection(
   const n = verifiers.length;
   rows.push(['quorum', quorumText(quorum, n)]);
   rows.push(['unconfirmed P0', unconfirmedP0]);
-  if (parallel !== null) rows.push(parallel);
+  rows.push(parallel);
   print(rows);
 }
 

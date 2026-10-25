@@ -1023,9 +1023,12 @@ const UNTHROTTLED: readonly ActivityObservation['source'][] = ['start', 'end', '
  * Keyed by label plus provider, which is unique among live turns. There are two
  * sources of concurrency: `withConcurrentCompaction` pairs Claude `compact` with
  * a Codex critique or review, so the pair differs on both axes; and a review
- * seat group (`runSeatGroup`, #403) runs up to `review.maxParallel` finder or
- * verifier turns at once, whose labels - `review-<r>-f<k>[-part<i>]` and
- * `vote-<r>-<n>-v<k>` - are unique within a round.
+ * or plan critique seat group (`runSeatGroup`, #403, #452) runs up to
+ * `review.maxParallel` or `critique.maxParallel` finder or verifier turns at
+ * once, whose labels - `review-<r>-f<k>[-part<i>]` and `vote-<r>-<n>-v<k>`, or
+ * `critique-<r>-f<k>` and `critique-<r>-vote-<n>-v<k>` - are unique within a
+ * round. A critique's group can be live beside a rotation, whose Claude label
+ * is none of those.
  */
 function mergeInFlight(state: RunState, turns: readonly InFlightTurn[]): void {
   if (turns.length === 0) return;

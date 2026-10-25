@@ -91,7 +91,9 @@ test('every label the orchestrator builds is one seatOf places', () => {
     at = path.dirname(at);
   }
   const source = readFileSync(path.join(at, 'src', 'orchestrator.ts'), 'utf8');
-  const found = [...source.matchAll(/label: (?:`([^`]+)`|'([^']+)')/g)].map(
+  // A seat runner's ballot label is a descriptor's `label: (n, k) => \`…\`` (#452),
+  // read here too, so the vote labels stay inside what this checks.
+  const found = [...source.matchAll(/label: (?:\(n, k\) => )?(?:`([^`]+)`|'([^']+)')/g)].map(
     (m) => m[1] ?? m[2] ?? '',
   );
   assert.ok(found.length >= 7, 'the label sites moved — this test is reading the wrong thing');

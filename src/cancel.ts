@@ -49,9 +49,9 @@ import type { ChildEnding } from '@src/proc.js';
  *
  * ## A turn group is the one kill that is not the latch (#403)
  *
- * Review seats may run several at once (`review.maxParallel`), and when one of
- * them crosses a ceiling the others have to die with it - but that is not a
- * stop. A ceiling is an `Escalation` with its own reason and its own exit code,
+ * Review and plan critique seats may run several at once (`review.maxParallel`,
+ * `critique.maxParallel`), and when one of them crosses a ceiling the others
+ * have to die with it - but that is not a stop. A ceiling is an `Escalation` with its own reason and its own exit code,
  * and setting the latch here would end the run as *"The run was stopped"*, the
  * wrong sentence about the wrong thing. So a group is a second, scoped set:
  * every child and wait registered while a group's task is running joins it as

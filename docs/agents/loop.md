@@ -654,6 +654,41 @@ the gate. With `review.verifiers: []` nothing runs: no turn, no `votes` key, no 
   Both agents were already probed on every run. A seat's turn that fails mid-turn names its own
   line (`TurnRequest.seatPath`), not `roles.reviewer`.
 
+### One finder runner and one vote runner, for two phases (#452)
+
+The review's finders and vote (#388) and the plan critique's (#405) are one mechanism:
+`runFinderSeats` and `runVoteSeats`, module-level in `src/orchestrator.ts`. #405 first built the
+critique's beside the review's, because #403 was rewriting the review's at the time, and the two
+had already drifted (the review's through `runSeatGroup` with labelled frames, the critique's in
+plain loops). Each runner takes a phase descriptor, `FinderPhase` or `VotePhase`, of data and
+small callbacks, so the shared code never asks which phase it is running for. Running a seat,
+absorbing its failure, merging in config order, filling ballot slots and tallying them in order
+are written once. The descriptor holds the rest:
+
+| | Review (built in `runReview`) | Critique (`critiqueFinderPhase`, `critiqueVotePhase`) |
+|---|---|---|
+| `role`, first seat | `reviewer`, `roles.reviewer` | `critic`, `roles.critic` |
+| `round` | `state.reviewRound` | `state.planRound` |
+| `parts` (a finder's turns) | one per diff chunk, `review-<n>-f<k>[-part<i>]` | one, `critique-<n>-f<k>` |
+| finder prompt | `withFocus(reviewPromptFor(i, false, false), focus)` | `withFocus(critiquePromptFor(…, false), focus)` |
+| `table` | `seatTable(roles, setting)`, and `VOTE_SCHEMA` for a verifier | `seatTable(roles, setting, undefined, 'critic')`, `PLAN_VOTE_SCHEMA` for a verifier |
+| `failed`, `merged` | `review_finder_failed`, `review_finders_merged` (data has `parts`) | `critique_finder_failed`, `critique_finders_merged` |
+| `exempt` from the vote | a P0/P1 whose reproducer reproduced | a P0/P1 marked `defer: true` |
+| vote `prompt` | `votePrompt`, with the diff parts its evidence cites | `critiqueVotePrompt`, with the plan and `plan-<n>.json` |
+| vote `label` | `vote-<n>-<i>-v<k>` | `critique-<n>-vote-<i>-v<k>` |
+| `tallied` | `review_votes_tallied`, `…; N reproduced, not voted` | `critique_votes_tallied`, `…; N deferred, not voted` only when N > 0 |
+| `quorum`, `unconfirmedP0` | `cfg.review.*` | `cfg.critique.*` |
+| `maxParallel`, `setting` | `cfg.review.maxParallel` | `cfg.critique.maxParallel` |
+
+The sentences and `data` of the merged and tallied events come from the descriptor, so each
+phase keeps its own words and keys byte for byte. A finder's parts are always a list: the
+review's chunks and the critique's single turn have the same shape, and more than one part is
+merged by `mergeReviewReports`. The step line is `<holder> <doing> (finder <k>)`, and a seat's
+`turn_started` and `turn_finished` carry the phase's `kind` (`review` or `critique`), or `vote`.
+`seat-runners-pin.test.ts` pins a whole round of each phase at `maxParallel: 1`: every
+narration, event, label, prompt and artifact. It was recorded on the code from before the
+runners were unified, under `tests/fixtures/seat-runners-pin/`.
+
 ### Seats at once (#403)
 
 #388 ran the seats in sequence on purpose: several live children of one run first needed the
@@ -662,7 +697,16 @@ and `review.maxParallel` (a whole number from 1, default `1`) is the bound. At `
 here is the sequential order, byte for byte - labels, prompts, events, narration and artifacts -
 because the groundwork rule says the setting changes nothing until somebody raises it.
 
-- **What overlaps.** `roles.reviewer` reviews every part first, **alone**: it keeps a
+The plan critique has the same bound under its own name, `critique.maxParallel` (#452, default
+`1`), and everything below holds for its group as it does for the review's. It is a setting of
+its own, not a reuse of `review.maxParallel`: each section already has its own `quorum` and
+`unconfirmedP0`, the two panels can differ, and sharing the bound would silently have changed the
+critique for anyone who had already raised the review's. That is a behaviour change to an
+existing config, which the groundwork rule forbids. `runSeatGroup` takes the setting's name, so
+its backstop says which bound it refused.
+
+- **What overlaps.** `roles.reviewer` reviews every part first, **alone** (as `roles.critic`
+  critiques the plan first, alone): it keeps a
   conversation, it can rotate, and it already overlaps a compaction under
   `withConcurrentCompaction`; keeping it alone keeps all three paths exactly as they were. Then
   the finders run as one group, up to `maxParallel` at once - each finder's own parts still in
@@ -695,6 +739,14 @@ because the groundwork rule says the setting changes nothing until somebody rais
 - **A stop is the latch, unchanged.** `requestCancel` kills every registered child, so a stop
   with three verifiers live kills all three, `proc.ts` refuses a fourth, and the run ends
   `needs-input` with nothing tallied.
+- **A critique's group runs beside a rotation, and a group stop cannot reach it.** The critic,
+  the critique's finders and its vote all run inside `withConcurrentCompaction`'s callback, so a
+  rotation of the planner's conversation (`compact`) can be live beside the group. The rotation
+  is started from `planPhase`'s async context, before `runSeatGroup` creates the group, so it
+  never joins the group's `AsyncLocalStorage` scope: `stopTurnGroup` kills only the seats.
+  `withConcurrentCompaction` is unchanged. Its `allSettled` waits for the rotation to settle,
+  the seat group's error wins, and a ceiling the rotation crosses is outranked and said, so the
+  run records exactly one escalation (`critique-parallel.test.ts`).
 - **The two in-flight guards stay run-level.** `guardTurnSpend` now counts the run's spend plus
   every live turn's in-flight spend in the run's scope, not just its own; tripping it is still a
   run stop through the latch, and with several turns live its reason names the combined figure
@@ -721,20 +773,20 @@ because the groundwork rule says the setting changes nothing until somebody rais
 #388 gave the review its panel and marked the critique out of scope (⚑2). This gives the critique
 the same panel, under a `critique` section of its own: the owner may want a different panel for
 plans, or none, and a plan vote costs one turn per blocking finding per verifier while a review's
-scales with what the diff turned up. The section takes `review`'s four keys and is validated by the
-same `validateSeats` under `critique.` paths, merged by the same `mergeReview` (a project's list
+scales with what the diff turned up. The section takes `review`'s keys (four, and
+`maxParallel` since #452) and is validated by the same `validateSeats` under `critique.` paths, merged by the same `mergeReview` (a project's list
 replaces the global one whole), and read by `readFinders(cfg, 'critique')` and
 `readVerifiers(cfg, 'critique')`. With both lists empty a plan round is exactly what it was: no
 turn, no `foundBy`, no `votes`, no event, and the critic's prompt is `critique-round1.txt` byte for
 byte. Nothing here measures how often a critique finding is wrong, so it ships off and the docs say
 nothing about accuracy: the archive has no record of what the planner did with each finding.
 
-- **Beside the review's runners, not through them.** `runCritiqueFinders` and `runCritiqueVotes`
-  sit next to `runCritique`, built on the same shared modules (`mergeAcrossFinders`, `tally`,
-  `countBallot`, `failedBallot`, `applyVotes`, `groundVoteEvidence`, `parseVote`), because #403
-  was rewriting `runFinders` and `runVotes` in parallel. Unifying them is #452. Both run their
-  turns in sequence: `review.maxParallel` does not reach them, and the critique adopts #403's
-  `runSeatGroup` when the runners are unified.
+- **Through the review's runners** (#452). `critiqueFinderPhase` and `critiqueVotePhase` build
+  the descriptors `runFinderSeats` and `runVoteSeats` run, so the critique's seats share the
+  review's code for running a seat, absorbing its failure, merging and tallying (*One finder
+  runner and one vote runner* above). They run in a `runSeatGroup` bounded by
+  `critique.maxParallel`, never by `review.maxParallel`, and at `1`, the default, a plan round is
+  byte for byte what it was before #452.
 - **The order within a plan round.** Critic, then finders, then the merge, then the vote, then
   `refusePlaceholderPlan`, then `plan-critique-<n>.json`, `collectDeferred`, FOLLOW-UPS.md and
   `recordPendingFindings`, all inside `withConcurrentCompaction`'s callback; then the gate. The

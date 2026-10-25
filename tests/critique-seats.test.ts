@@ -218,3 +218,32 @@ test('under the defaults doctor prints no critique block', async () => {
   assert.equal(code, EXIT.OK);
   assert.equal(lines.some((l) => l.includes('critique finders') || l.includes('critique verifiers') || l.includes('critique finder')), false);
 });
+
+test("the startup says the critique's own bound only when its seats can overlap (#452)", () => {
+  const named = (out: readonly string[]): string[] => out.filter((l) => /parallel:/i.test(l));
+  const four = withCritique({ verifiers: ['codex', 'claude'], maxParallel: 4 });
+  assert.deepEqual(named(captured(() => reportRoles(four))), ['  Critique parallel: up to 4 seat turns at once']);
+  // At 1, and with no seats at 4, nothing; and the review's bound is not the critique's.
+  assert.deepEqual(named(captured(() => reportRoles(withCritique({ verifiers: ['codex'], maxParallel: 1 })))), []);
+  assert.deepEqual(named(captured(() => reportRoles(withCritique({ maxParallel: 4 })))), []);
+  const reviewOnly = withCritique({ verifiers: ['codex'] }, { review: { ...DEFAULTS.review, verifiers: ['codex'], maxParallel: 4 } });
+  assert.deepEqual(named(captured(() => reportRoles(reviewOnly))), ['  Parallel: up to 4 seat turns at once']);
+});
+
+test("doctor says how many critique seat turns may run at once, and what that costs (#452)", async () => {
+  const parallel = (lines: readonly string[]): string[] => lines.filter((l) => /^\s+parallel\s/.test(l));
+  const one = await doctor({ verifiers: ['codex', 'codex'] });
+  assert.equal(one.code, EXIT.OK);
+  const [row] = parallel(one.lines);
+  assert.match(row ?? '', /\s1 \(one after another\)$/);
+  const p0 = one.lines.findIndex((l) => /^\s+unconfirmed P0\s/.test(l));
+  assert.equal(one.lines.indexOf(row ?? ''), p0 + 1, 'the parallel row follows unconfirmed P0');
+
+  const four = await doctor({ finders: ['codex'], maxParallel: 4 });
+  assert.deepEqual(
+    parallel(four.lines).map((l) => l.trim()),
+    ["parallel  4 at once (Codex turns can overshoot budget.maxTokens by up to 4 turns' spend)"],
+  );
+  // And with no critique seats, no row.
+  assert.deepEqual(parallel((await doctor(undefined)).lines), []);
+});

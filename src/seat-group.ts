@@ -3,7 +3,8 @@ import { Escalation, EXIT, fmtTokens } from '@src/charge.js';
 import type { RunState } from '@src/types.js';
 
 /**
- * Run a round's finder or verifier turns, at most `limit` at once (#403).
+ * Run a review or plan critique round's finder or verifier turns, at most
+ * `limit` at once (#403, #452).
  *
  * ## What it decides, and what it deliberately does not
  *
@@ -40,12 +41,14 @@ export async function runSeatGroup(
   state: RunState,
   limit: number,
   tasks: readonly (() => Promise<void>)[],
+  /** The setting `limit` was read from, so the backstop below names the right one. */
+  setting: 'review.maxParallel' | 'critique.maxParallel',
 ): Promise<void> {
   // Fail closed: a bound that is not a whole number from 1 would start no
   // worker at all, and the round would go on as though every seat had run.
-  // `validateReview` keeps this off every supported path; this is the backstop.
+  // `validateSeats` keeps this off every supported path; this is the backstop.
   if (!Number.isInteger(limit) || limit < 1) {
-    throw new Error(`review.maxParallel is ${String(limit)}; it must be a whole number of turns from 1`);
+    throw new Error(`${setting} is ${String(limit)}; it must be a whole number of turns from 1`);
   }
   const group = newTurnGroup();
   let next = 0;

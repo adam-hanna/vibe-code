@@ -29,7 +29,7 @@ import type {
   GatesConfig,
   LoadedConfig,
   PromptOverrides,
-  CritiqueConfig,
+  ReviewConfig,
   Sandbox,
   UnconfirmedP0,
   VerifyConfig,
@@ -47,11 +47,12 @@ const SANDBOXES: readonly Sandbox[] = ['read-only', 'workspace-write', 'danger-f
 /** What `review.unconfirmedP0` and `critique.unconfirmedP0` may say (#388): the owner's three, 2026-10-20. */
 export const UNCONFIRMED_P0: readonly UnconfirmedP0[] = ['block', 'halt', 'demote'];
 
-/** The keys of the `critique` section (#405), in the order a message lists them. */
-const CRITIQUE_KEYS = ['finders', 'verifiers', 'quorum', 'unconfirmedP0'] as const;
-
-/** The keys of the `review` section: `critique`'s, and the bound on seats at once (#403). */
-const REVIEW_KEYS = [...CRITIQUE_KEYS, 'maxParallel'] as const;
+/**
+ * The keys of the `review` and `critique` sections (#388, #405), in the order a
+ * message lists them. One list since #452 gave the critique the bound on seats
+ * at once (#403) that the review already had.
+ */
+const SEAT_SECTION_KEYS = ['finders', 'verifiers', 'quorum', 'unconfirmedP0', 'maxParallel'] as const;
 
 /**
  * The agent CLI versions this build was tested against (#298).
@@ -282,8 +283,10 @@ export const DEFAULTS: Config = {
   // list is non-empty. Empty, so a default plan loop is byte-identical to one
   // from before the key existed, and `block` for the reason `review`'s is. No
   // recommended panel ships: nothing has measured how often a critique finding
-  // is wrong.
-  critique: { finders: [], verifiers: [], quorum: null, unconfirmedP0: 'block' },
+  // is wrong. `maxParallel: 1` for the review's reason (#452), and a setting of
+  // its own so that a config which already raised `review.maxParallel` keeps
+  // the critique it had.
+  critique: { finders: [], verifiers: [], quorum: null, unconfirmedP0: 'block', maxParallel: 1 },
   // On, by the owner's decision on #323: a terminal user is told once, at the
   // end of `vibe run`, `vibe plan` or `vibe doctor`, when npm has a newer vibe.
   // It is the one network request in `src/` - see `src/updatecheck.ts` for what
@@ -388,12 +391,12 @@ function mergeGates(base: GatesConfig, override: unknown): GatesConfig {
  * whole, so a project's `finders` replaces the global file's list rather than
  * appending to it, and a `quorum` the project does not name is left standing.
  */
-function mergeReview<T extends CritiqueConfig>(base: T, override: unknown): T {
+function mergeReview(base: ReviewConfig, override: unknown): ReviewConfig {
   if (override === undefined) return base;
-  if (!isRecord(override)) return override as T;
+  if (!isRecord(override)) return override as ReviewConfig;
   const out: Record<string, unknown> = { ...base };
   for (const [key, value] of Object.entries(override)) setOwn(out, key, value);
-  return out as unknown as T;
+  return out as unknown as ReviewConfig;
 }
 
 export function mergeConfig(base: Config, override: unknown): Config {
@@ -939,7 +942,7 @@ function validate(cfg: Config): void {
  *
  * Each seat goes through `roleSetting`, the one reader `roles.<role>` uses, so
  * what a seat may say and what a role may say cannot drift apart - only the
- * path in the message and the key list differ. A finder's `focus` is the one
+ * path in the message differs. A finder's `focus` is the one
  * key `roleSetting` permits without checking, so it is checked here.
  *
  * The quorum is checked against the list in the same config, which is why it
@@ -947,11 +950,11 @@ function validate(cfg: Config): void {
  * only a true sentence about a list that is itself legal.
  *
  * One function for both sections, with the section's name the only thing that
- * changes in a message: the two take the same four keys, and two copies of the
+ * changes in a message: the two take the same five keys, and two copies of the
  * refusals would be two answers to what a legal seat is.
  */
 function validateSeats(section: 'review' | 'critique', value: unknown): void {
-  const keys: readonly string[] = section === 'review' ? REVIEW_KEYS : CRITIQUE_KEYS;
+  const keys: readonly string[] = SEAT_SECTION_KEYS;
   const listed = `${keys.slice(0, -1).join(', ')} and ${keys[keys.length - 1] ?? ''}`;
   const takes = `${section} takes ${listed}`;
   if (!isRecord(value)) {
@@ -1002,14 +1005,12 @@ function validateSeats(section: 'review' | 'critique', value: unknown): void {
   if (typeof p0 !== 'string' || !UNCONFIRMED_P0.includes(p0 as UnconfirmedP0)) {
     throw new Error(`${section}.unconfirmedP0 must be one of ${UNCONFIRMED_P0.join(', ')}`);
   }
-  // Only the review's seats can overlap (#403); the critique's run in sequence
-  // until #452 unifies the runners, so it takes no bound.
-  if (section !== 'review') return;
-  // No upper bound: a cap would be a number nobody measured (#403).
+  // Each section's own bound (#403, #452). No upper bound: a cap would be a
+  // number nobody measured.
   const parallel: unknown = value['maxParallel'];
   if (typeof parallel !== 'number' || !Number.isInteger(parallel) || parallel < 1) {
     throw new Error(
-      'review.maxParallel must be a positive whole number of turns at once (1 runs them one after another)',
+      `${section}.maxParallel must be a positive whole number of turns at once (1 runs them one after another)`,
     );
   }
 }
