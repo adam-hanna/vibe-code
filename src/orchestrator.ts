@@ -139,12 +139,14 @@ import {
 import type { FixOutput, SaidDisposition } from '@src/validate.js';
 import {
   attachVerdicts,
+  combineVerdicts,
+  disagreements,
   judgeChanges,
   judgePatterns,
   recordedPatterns,
   testChangeCounts,
 } from '@src/judge.js';
-import type { RawVerdict } from '@src/judge.js';
+import type { RawVerdict, SeatJudgement } from '@src/judge.js';
 import {
   markOccupancyWarned,
   occupancyWarning,
@@ -1479,16 +1481,18 @@ async function planPhase(
         const merged =
           finders.length === 0
             ? critiqued
-            : await runFinderSeats(
-                state,
-                cfg,
-                cwd,
-                roles,
-                turns,
-                critiqueFinderPhase(state, cfg, plan, roles, planActivity),
-                finders,
-                critiqued,
-              );
+            : (
+                await runFinderSeats(
+                  state,
+                  cfg,
+                  cwd,
+                  roles,
+                  turns,
+                  critiqueFinderPhase(state, cfg, plan, roles, planActivity),
+                  finders,
+                  critiqued,
+                )
+              ).report;
         const verifiers = readVerifiers(cfg, 'critique');
         const voted =
           verifiers.length === 0
@@ -5330,7 +5334,7 @@ interface SeatEvent {
   data: Record<string, unknown>;
 }
 
-interface FinderPhase extends SeatPhase {
+interface FinderPhase<T = never> extends SeatPhase {
   /** The `kind` on a finder's `turn_started` and `turn_finished`. */
   kind: 'review' | 'critique';
   /** The step line's verb: `<holder> <doing> (finder <k>)`. */
@@ -5345,7 +5349,16 @@ interface FinderPhase extends SeatPhase {
   /** The event a failed finder records, and the noun its sentence opens with. */
   failed: { id: string; noun: string };
   merged: (m: { seats: number; reported: number; raised: number; merge: FinderMerge }) => SeatEvent;
+  /**
+   * A phase's own reading of each part's output, kept per part in the finder's
+   * slot (#404). The runner never interprets it: the review reads a finder's
+   * test verdicts through this and combines them itself; the critique sets none.
+   */
+  extra?: (structured: unknown) => T;
 }
+
+/** A reporting finder's slot: its report, and the phase's `extra` for each part, in part order (#404). */
+type FinderSlot<T> = FinderReport & { extras: T[] };
 
 /** What a round's vote came to, for the phase's tally sentence. */
 interface VoteTotals {
@@ -5417,21 +5430,22 @@ async function seatFinishing<T>(
  * in config order, so `foundBy`, the merged findings and the renamed `-f<k>`
  * ids are the same whichever finder finished first.
  */
-async function runFinderSeats(
+async function runFinderSeats<T = never>(
   state: RunState,
   cfg: Config,
   cwd: string,
   roles: RoleTable,
   turns: AgentTurns,
-  phase: FinderPhase,
+  phase: FinderPhase<T>,
   entries: readonly FinderEntry[],
   first: FindingsReport,
-): Promise<FindingsReport> {
+): Promise<{ report: FindingsReport; slots: FinderSlot<T>[] }> {
   const parallel = phase.maxParallel > 1;
-  const reported: (FinderReport | undefined)[] = entries.map(() => undefined);
+  const reported: (FinderSlot<T> | undefined)[] = entries.map(() => undefined);
   const tasks = entries.map((f, j) => async (): Promise<void> => {
     const table = phase.table(f);
     const reports: FindingsReport[] = [];
+    const extras: T[] = [];
     let label = '';
     try {
       for (const part of phase.parts(f)) {
@@ -5456,22 +5470,22 @@ async function runFinderSeats(
             table,
           ),
         );
-        // Judged by what this turn did, attributed to the role it played. A
-        // review finder's test verdicts are parsed by nothing here and so
-        // dropped: the first finder owns the round's `testChanges` and
-        // `reviewCoverage`, because two judges' verdicts on one file would need
-        // a rule for disagreeing, and inventing one is out of scope (#388
-        // decision 6).
+        // Judged by what this turn did, attributed to the role it played. What
+        // else the phase reads from the turn - a review finder's test verdicts
+        // - is kept beside the report, per part, and combined by the phase
+        // itself (#404). The first finder still owns `reviewCoverage`.
+        const structured = readStructured(outcome);
         reports.push(
           groundAndRecord(
             state,
             cwd,
             phase.role,
             table,
-            parseFindings(readStructured(outcome)),
+            parseFindings(structured),
             outcome.activity,
           ),
         );
+        if (phase.extra !== undefined) extras.push(phase.extra(structured));
       }
     } catch (err: unknown) {
       // A stop, a ceiling, a rate limit waited out past its cap: the round
@@ -5505,15 +5519,17 @@ async function runFinderSeats(
       provider: f.setting.provider,
       model: f.setting.model ?? 'default',
       report: reports.length === 1 && single !== undefined ? single : mergeReviewReports(reports),
+      extras,
     };
   });
   await runSeatGroup(state, phase.maxParallel, tasks, phase.setting);
 
   const holder = roles[phase.role];
+  // Config order, whatever order they finished in (#403 decision 3).
+  const slots = reported.filter((r): r is FinderSlot<T> => r !== undefined);
   const all: FinderReport[] = [
     { k: 0, seat: `roles.${phase.role}`, provider: holder.provider, model: holder.model ?? 'default', report: first },
-    // Config order, whatever order they finished in (#403 decision 3).
-    ...reported.filter((r): r is FinderReport => r !== undefined),
+    ...slots,
   ];
   const merge = mergeAcrossFinders(all);
   const seats = entries.length + 1;
@@ -5525,7 +5541,7 @@ async function runFinderSeats(
   // never a tally of failures.
   const said = phase.merged({ seats, reported: all.length, raised, merge });
   recordAndSay(state, 'info', said.id, said.message, said.data);
-  return merge.report;
+  return { report: merge.report, slots };
 }
 
 /**
@@ -6060,33 +6076,36 @@ async function runReview(
     }
   }
 
-  const testChanges = state.testChanges;
-  if (testChanges !== undefined) {
-    // Narration with no event, under `recordAndSay`'s rule: the fact is already
-    // durable in `state.testChanges` and in the round's artifact, and a census of
-    // a round is exactly what that rule keeps out of `state.events`. Warn only
-    // when something was not judged justified - a round that only added tests
-    // the reviewer accepted is information, not a caveat (#112).
-    const counts = testChangeCounts(testChanges.files);
+  // Narration with no event, under `recordAndSay`'s rule: the fact is already
+  // durable in `state.testChanges` and in the round's artifact, and a census of
+  // a round is exactly what that rule keeps out of `state.events`. Warn only
+  // when something was not judged justified - a round that only added tests
+  // the reviewer accepted is information, not a caveat (#112). `seated` only
+  // for a round with finders, whose record is every reporting seat's (#404).
+  const sayTestChanges = (tc: TestChanges, seated?: { seats: number; disagreed: number }): void => {
+    const counts = testChangeCounts(tc.files);
     const say = counts.notJustified + counts.unjudged > 0 ? log.warn : log.info;
     say(
-      `Review round ${testChanges.round}: ${counts.files} change(s) to the judge - ` +
+      `Review round ${tc.round}: ${counts.files} change(s) to the judge - ` +
         `${counts.justified} justified, ${counts.notJustified} not justified, ` +
-        `${counts.unjudged} unjudged`,
-      { id: 'test_changes_judged', data: { round: testChanges.round, ...counts } },
+        `${counts.unjudged} unjudged` +
+        (seated === undefined ? '' : `; ${seated.seats} seat(s), ${seated.disagreed} disagreed`),
+      { id: 'test_changes_judged', data: { round: tc.round, ...counts, ...(seated ?? {}) } },
     );
-  }
+  };
+  // With no additional finder, exactly the report of every round before #388:
+  // no extra turn, no `foundBy`, no event - and the judge record is the
+  // reviewer's, said here as it always was.
+  const finders = readFinders(cfg);
+  if (finders.length === 0 && state.testChanges !== undefined) sayTestChanges(state.testChanges);
 
   const [only] = reports;
   const first = reports.length === 1 && only !== undefined ? only : mergeReviewReports(reports);
-  // With no additional finder, exactly the report of every round before #388:
-  // no extra turn, no `foundBy`, no event.
-  const finders = readFinders(cfg);
   const round = state.reviewRound;
-  const merged =
+  const finderRun =
     finders.length === 0
-      ? first
-      : await runFinderSeats(
+      ? undefined
+      : await runFinderSeats<RawVerdict[]>(
           state,
           cfg,
           cwd,
@@ -6110,6 +6129,8 @@ async function runReview(
                 prompt: P.withFocus(reviewPromptFor(i, false, false), f.focus),
               })),
             failed: { id: 'review_finder_failed', noun: 'Review' },
+            // Each part's test verdicts, combined below with the reviewer's (#404).
+            extra: parseTestVerdicts,
             merged: ({ seats, reported, raised, merge }) => ({
               id: 'review_finders_merged',
               message:
@@ -6131,6 +6152,33 @@ async function runReview(
           finders,
           first,
         );
+  const merged = finderRun === undefined ? first : finderRun.report;
+  // Every reporting seat's verdicts, combined failing closed, and only then
+  // said (#404). Written after the finders: until here the record is the
+  // reviewer's own, from the loop above, so a stop during the finders leaves
+  // what a round without them would have. A finder that failed has no slot and
+  // contributes nothing. Each seat is attached from the reviewer's listed files
+  // part by part, since a finder was shown the same parts.
+  if (finderRun !== undefined && state.testChanges !== undefined) {
+    const judgements: SeatJudgement[] = [
+      {
+        seat: 'roles.reviewer',
+        provider: roles.reviewer.provider,
+        model: roles.reviewer.model ?? 'default',
+        files: attachVerdicts(listedPerPart, verdictsPerPart),
+      },
+      ...finderRun.slots.map((s) => ({
+        seat: s.seat,
+        provider: s.provider,
+        model: s.model,
+        files: attachVerdicts(listedPerPart, s.extras),
+      })),
+    ];
+    const combined = combineVerdicts(judgements);
+    state.testChanges = { ...state.testChanges, files: combined };
+    saveState(state);
+    sayTestChanges(state.testChanges, { seats: judgements.length, disagreed: disagreements(combined) });
+  }
   // Inside `runReview` and after the merge, which are two separate decisions
   // (#113).
   //
@@ -6224,6 +6272,9 @@ async function runReview(
           verifiers,
           proven,
         );
+  // Read here, after the finders, so the artifact carries the record
+  // `state.json` does - with finders, the combined one (#404).
+  const testChanges = state.testChanges;
   return {
     report: testChanges === undefined ? voted.report : { ...voted.report, testChanges },
     unconfirmedP0: voted.held,

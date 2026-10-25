@@ -33,6 +33,7 @@ import type {
   ReviewSeat,
   FileChangeStatus,
   JudgeFile,
+  JudgeSeatVerdict,
   TestChanges,
   UnaddressedFinding,
   RoundClaim,
@@ -1453,6 +1454,48 @@ function readReviewCoverage(raw: unknown, ctx: ReadContext): ReviewCoverage | un
  * how it says "not counted" - so it is damage rather than a value to coerce.
  * The repair is still logged, so the corruption is visible.
  */
+function readJudgeVerdict(raw: unknown): JudgeFile['verdict'] | null {
+  if (raw === 'unjudged') return 'unjudged';
+  if (isRecord(raw) && typeof raw['justified'] === 'boolean' && isString(raw['reason'])) {
+    return { justified: raw['justified'], reason: raw['reason'] };
+  }
+  return null;
+}
+
+/**
+ * Every seat's verdict on one judge file (#404), entry by entry.
+ *
+ * Repaired rather than dropped whole, unlike the record around it, because the
+ * file's combined `verdict` stands on its own: it was decided when the round
+ * ran, from the whole list, and is never recomputed here from what survived. A
+ * malformed entry is dropped and said; a value that is not a list drops the key.
+ */
+function readSeatVerdicts(raw: unknown, ctx: ReadContext, at: string): JudgeSeatVerdict[] | undefined {
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw)) {
+    ctx.repairs.dropped('testChanges', at);
+    return undefined;
+  }
+  const out: JudgeSeatVerdict[] = [];
+  for (const [j, entry] of (raw as unknown[]).entries()) {
+    const provider = isRecord(entry) ? enumOf(entry['provider'], PROVIDERS) : null;
+    const verdict = isRecord(entry) ? readJudgeVerdict(entry['verdict']) : null;
+    if (
+      !isRecord(entry) ||
+      !isString(entry['seat']) ||
+      provider === null ||
+      !isString(entry['model']) ||
+      entry['model'] === '' ||
+      verdict === null
+    ) {
+      ctx.repairs.dropped('testChanges', `${at}[${j}]`);
+      continue;
+    }
+    out.push({ seat: entry['seat'], provider, model: entry['model'], verdict });
+  }
+  return out;
+}
+
 function readTestChanges(raw: unknown, ctx: ReadContext): TestChanges | undefined {
   if (raw === undefined) return undefined;
   const drop = (): undefined => {
@@ -1470,7 +1513,7 @@ function readTestChanges(raw: unknown, ctx: ReadContext): TestChanges | undefine
   }
   const count = (v: unknown): v is number | null => v === null || isCounter(v);
   const files: JudgeFile[] = [];
-  for (const entry of raw['files'] as unknown[]) {
+  for (const [i, entry] of (raw['files'] as unknown[]).entries()) {
     if (!isRecord(entry)) return drop();
     const status = enumOf(entry['status'], FILE_CHANGE_STATUSES);
     const file = entry['path'];
@@ -1487,18 +1530,18 @@ function readTestChanges(raw: unknown, ctx: ReadContext): TestChanges | undefine
     ) {
       return drop();
     }
-    let read: JudgeFile['verdict'];
-    if (verdict === 'unjudged') read = 'unjudged';
-    else if (
-      isRecord(verdict) &&
-      typeof verdict['justified'] === 'boolean' &&
-      isString(verdict['reason'])
-    ) {
-      read = { justified: verdict['justified'], reason: verdict['reason'] };
-    } else {
-      return drop();
-    }
-    files.push({ path: file, oldPath, status, added, removed, verdict: read });
+    const read = readJudgeVerdict(verdict);
+    if (read === null) return drop();
+    const seats = readSeatVerdicts(entry['verdicts'], ctx, `testChanges.files[${i}].verdicts`);
+    files.push({
+      path: file,
+      oldPath,
+      status,
+      added,
+      removed,
+      verdict: read,
+      ...(seats === undefined ? {} : { verdicts: seats }),
+    });
   }
   return { round: raw['round'], patterns: [...(raw['patterns'] as string[])], files };
 }
