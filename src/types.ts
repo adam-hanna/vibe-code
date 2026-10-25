@@ -1291,7 +1291,45 @@ export interface FixDispositions {
   duplicates: string[];
 }
 
-/** Who took a review round's own turn. See `RunState.reviewSeat`. */
+/** The outcome of a finding's vote (#388 Part C, #405). */
+export type VoteOutcome = Votes['outcome'];
+
+/**
+ * One critique finding's disposition (#453): the review shape, plus the
+ * finding's vote outcome as stored in `plan-critique-<n>.json`.
+ *
+ * `vote` is null when the finding was not voted on, or its vote could not be
+ * read. `reproducer` is always null here: no reproducer runs in the plan phase,
+ * and the review phase's observation is never read for a plan finding.
+ */
+export interface PlanFindingDisposition extends FindingDisposition {
+  vote: VoteOutcome | null;
+}
+
+/**
+ * One findings revision's dispositions: `plan-dispositions-<round>.json` and
+ * the `plan_dispositions` event carry this shape (#453). The same fields as
+ * `FixDispositions`.
+ */
+export interface PlanDispositions {
+  /** The plan round, the number in `revise-<round>` and in `plan-<round>.json`. */
+  round: number;
+  /** `revise-<round>`. */
+  label: string;
+  /** The critique round it answers: `plan-critique-<answers>.json`. */
+  answers: number;
+  /** One per finding the planner was shown, in the order it was shown them. */
+  dispositions: PlanFindingDisposition[];
+  /** Ids the planner answered that were not in its prompt, dropped. */
+  dropped: string[];
+  /** Ids the planner answered more than once; the first answer was kept. */
+  duplicates: string[];
+}
+
+/**
+ * Who took a review or critique round's own turn. See `RunState.reviewSeat`
+ * and `RunState.criticSeat`.
+ */
 export interface ReviewSeat {
   round: number;
   provider: string;
@@ -2099,6 +2137,18 @@ export interface RunState {
    * before it existed, and a damaged value is dropped, never guessed.
    */
   reviewSeat?: ReviewSeat | undefined;
+  /**
+   * Who took the most recent critique round's own turn (#453): `roles.critic`'s
+   * provider and model as they were when that round's `plan-critique-<round>.json`
+   * was written, `round` being the raw `planRound` the artifact carries.
+   *
+   * The `reviewSeat` pattern for the plan side: a findings revision credits the
+   * critique's findings to this seat, and `resume_config` can change
+   * `roles.critic` between the critique and the revision. A revision that
+   * answers any other round credits nobody. Absent on every run recorded before
+   * it existed, and a damaged value is dropped, never guessed.
+   */
+  criticSeat?: ReviewSeat | undefined;
   /**
    * The review fix round whose turn has started and whose findings are not yet
    * consumed (#393): set with the round's increment, before the turn, and

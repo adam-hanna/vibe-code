@@ -20,8 +20,8 @@ import {
   groundVoteEvidence,
   refusePlaceholderPlan,
 } from '@src/evidence.js';
-import { FIX_SCHEMA, PLAN_VOTE_SCHEMA, VOTE_SCHEMA } from '@src/schemas.js';
-import { dispositionSummary, settleDispositions } from '@src/dispositions.js';
+import { FIX_SCHEMA, PLAN_VOTE_SCHEMA, REVISE_SCHEMA, VOTE_SCHEMA } from '@src/schemas.js';
+import { dispositionSummary, settleDispositions, settlePlanDispositions } from '@src/dispositions.js';
 import { countBallot, describeVotes, failedBallot, tally } from '@src/vote.js';
 import { describeOutcome, observe } from '@src/reproducer.js';
 import { gateMode } from '@src/gates.js';
@@ -126,6 +126,7 @@ import {
   parseAnswers,
   parseFindings,
   parseFixOutput,
+  parsePlanDispositions,
   parseTestVerdicts,
   parsePlan,
   parseVote,
@@ -135,7 +136,7 @@ import {
   SEVERITY_RANK,
   severityChangesOf,
 } from '@src/validate.js';
-import type { FixOutput } from '@src/validate.js';
+import type { FixOutput, SaidDisposition } from '@src/validate.js';
 import {
   attachVerdicts,
   judgeChanges,
@@ -398,6 +399,121 @@ function recordDispositions(
     { ...settled },
   );
   return settled;
+}
+
+/**
+ * A findings revision's dispositions, read from the same output its plan was
+ * (#453): the list when `parsePlanDispositions` accepts it, or why not.
+ *
+ * Read after `parsePlan` has accepted the plan half, so an unreadable plan has
+ * already failed the turn exactly as it always did; this only ever decides
+ * whether a plan that stands carries a record.
+ */
+type PlanDispositionsRead = { parsed: SaidDisposition[] } | { parsed: null; error: string };
+
+function readPlanDispositions(raw: unknown): PlanDispositionsRead {
+  try {
+    return { parsed: parsePlanDispositions(raw) };
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    return { parsed: null, error: message.split(/\r?\n/)[0] ?? '' };
+  }
+}
+
+/**
+ * A findings revision's dispositions on disk and in the event log, or the
+ * warning that there are none (#453). `recordDispositions` for the plan side,
+ * and the same rules: unreadable is never `not-addressed`, and an unreadable
+ * retry removes the earlier attempt's file.
+ *
+ * Called by `revisePlan` after the plan parses and before the state write that
+ * persists the plan and consumes the findings it answers - record, then
+ * consume, as both review fix sites do. A process that dies between the two
+ * revises again and records again, and the scorecard reads the last event per
+ * label. `round` is the revision's own, already advanced, and `answers` the
+ * critique round before it: `revise-<n>` answers `plan-critique-<n-1>.json`.
+ */
+function recordPlanDispositions(
+  state: RunState,
+  read: PlanDispositionsRead,
+  findings: readonly Finding[],
+  label: string,
+): void {
+  const round = state.planRound;
+  const answers = round - 1;
+  const name = `plan-dispositions-${round}.json`;
+  if (read.parsed === null) {
+    recordAndSay(
+      state,
+      'warn',
+      'plan_dispositions_unreadable',
+      `${label}: the planner's dispositions could not be read, so none are recorded for this revision - ` +
+        'the plan stands as written',
+      { round, label, answers, reason: read.error },
+    );
+    removeArtifact(state, name);
+    return;
+  }
+  const settled = settlePlanDispositions(findings, read.parsed, {
+    round,
+    label,
+    answers,
+    criticSeat: state.criticSeat,
+  });
+  artifact(state, name, settled);
+  recordAndSay(
+    state,
+    settled.dropped.length + settled.duplicates.length > 0 ? 'warn' : 'info',
+    'plan_dispositions',
+    dispositionSummary(settled, 'planner'),
+    { ...settled },
+  );
+}
+
+/**
+ * Which findings the planner rebutted in the revision this critique judged,
+ * and which of them the critique raised again under the same id (#453).
+ *
+ * Read from `plan-dispositions-<round>.json`, the record of the revision that
+ * wrote the plan this critique round judged; no file, an unreadable one, or no
+ * rebuttal in it records nothing. Same id only: a finding raised again under a
+ * new id - which a memoryless finder's `<id>-f<k>` always is - is not seen, so
+ * this undercounts disagreement and never invents it. Recorded here rather than
+ * on the next revision because a critique that approves has no next revision,
+ * and that is exactly the case where the rebuttal stood.
+ */
+function recordRebuttalsRaisedAgain(state: RunState, findings: readonly Finding[]): void {
+  if (state.planRound < 1) return;
+  const text = artifactText(state, `plan-dispositions-${state.planRound}.json`);
+  if (text === null) return;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return;
+  }
+  if (typeof parsed !== 'object' || parsed === null) return;
+  const list: unknown = (parsed as Record<string, unknown>)['dispositions'];
+  if (!Array.isArray(list)) return;
+  const rebutted: string[] = [];
+  for (const d of list as unknown[]) {
+    if (typeof d !== 'object' || d === null) continue;
+    const { id, disposition } = d as Record<string, unknown>;
+    if (typeof id === 'string' && disposition === 'rebutted' && !rebutted.includes(id)) rebutted.push(id);
+  }
+  if (rebutted.length === 0) return;
+  const raised = new Set(findings.map((f) => f.id));
+  const disputed = rebutted.filter((id) => raised.has(id));
+  const notRaisedAgain = rebutted.filter((id) => !raised.has(id));
+  recordAndSay(
+    state,
+    disputed.length > 0 ? 'warn' : 'info',
+    'critique_rebuttal_disputed',
+    `critique-${state.planRound}: ${String(disputed.length)} of ${String(rebutted.length)} finding(s) ` +
+      'rebutted by the planner raised again under the same id' +
+      (disputed.length > 0 ? `: ${disputed.join(', ')}` : ' - none raised again'),
+    { round: state.planRound, rebutted, disputed, notRaisedAgain },
+  );
 }
 
 /**
@@ -1402,6 +1518,16 @@ async function planPhase(
           );
         }
         artifact(state, `plan-critique-${state.planRound}.json`, found);
+        // Who took this round's own turn (#453), saved by
+        // `recordPendingFindings` below: the revision answering this round
+        // credits its findings to this seat, and a resume may move
+        // `roles.critic` in between. `state.reviewSeat`'s pattern.
+        state.criticSeat = {
+          round: state.planRound,
+          provider: roles.critic.provider,
+          model: roles.critic.model ?? 'default',
+        };
+        recordRebuttalsRaisedAgain(state, found.findings);
         collectDeferred(state, found.findings);
         writeFollowUps(state, plan);
         // In here for the same reason the artifact is: a budget escalation the
@@ -4549,12 +4675,22 @@ async function revisePlan(
       planInPrompt: state.plan !== null,
       cwd,
       label,
+      // The plan and a disposition per finding (#453), on the revision that
+      // answers a critique only: every other planner turn sends the role's own
+      // schema exactly as before.
+      ...(args.findings === undefined ? {} : { jsonSchema: REVISE_SCHEMA }),
     },
     turns,
     roles,
   );
 
-  const plan = parsePlan(readStructured(outcome));
+  const raw = readStructured(outcome);
+  // An unreadable plan fails the turn here, exactly as it always did. The
+  // dispositions are split off the same output and never reach the plan.
+  const plan = parsePlan(raw);
+  // Before the write below that persists the plan and consumes the findings it
+  // answers, so a revision is never consumed without its record (#453).
+  if (args.findings !== undefined) recordPlanDispositions(state, readPlanDispositions(raw), args.findings, label);
   state.plan = plan;
   // Consumed by the same write that persists the plan answering them, which is
   // the earliest instant at which a second revision would be buying work the

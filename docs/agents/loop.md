@@ -918,6 +918,79 @@ read it. Now it is data, and it is recorded per round.
   The second case covers a run from before #393. The decision is `outcomeFor`, a pure function. The finding row, the round
   card and the stats view are unchanged.
 
+## What the planner did with each critique finding (#453)
+
+`critique.verifiers` votes on whether a critique finding is real, but nothing measured how often
+one is wrong. The planner was told to "fix the plan, or say so explicitly in the plan", so a
+rebuttal was prose in `plan_md` with no finding id on it. The archive on 2026-10-23 held 74
+"rebut*" across 24 `plan-<n>.json` files, all prose, and 142 of the 151 P1s with a following
+critique simply stopped being raised, which says nothing about whether they were fixed or
+rebutted. #393's record is now kept for the plan side too.
+
+- **Only the findings revision is asked.** `revise-<n>` is sent `REVISE_SCHEMA`
+  (`src/schemas.ts`) as its per-turn `jsonSchema`. That is `PLAN_SCHEMA`'s properties in their
+  order, plus a required `dispositions: [{ id, disposition, reason }]` with `FIX_SCHEMA`'s enum
+  worded for a plan. It ends on `reason`, a non-null string, per the key-order note. The first
+  plan turn, an answers-only `revise-q<n>`, and every critique that approves send `PLAN_SCHEMA`
+  and the prompt they always did. `revisePlanPrompt`'s findings branch swaps "say so explicitly
+  in the plan" for the `plan dispositions` block (overridable under `prompts`): answer each id,
+  and still explain a rebuttal in the plan, because `plan_md` is what the implementer reads.
+  `revise-answers.txt` and `revise-findings.txt` pin both renderings against develop's.
+- **The plan keeps its shape.** The turn's output is read once. `parsePlan` reads the plan half
+  unchanged, and `parsePlanDispositions` reads the list. `plan-<n>.json`, `state.plan` and
+  everything downstream never see `dispositions`. An unreadable plan fails the turn as before. A
+  readable plan with an unreadable list stands: `plan_dispositions_unreadable` is narrated and
+  recorded, nothing is recorded as `not-addressed`, and a stale `plan-dispositions-<n>.json`
+  is removed. That is #393's rule. A readable list that leaves an id out records it
+  `not-addressed`. An id the planner was never shown is dropped, and a repeated id keeps its
+  first answer. The narration names both.
+- **Where it is recorded.** `plan-dispositions-<n>.json` and a `plan_dispositions` event, with
+  the same shape as `FixDispositions` plus a `vote` per finding. `<n>` is the revision's round,
+  the number in `revise-<n>` and in the `plan-<n>.json` it wrote. `answers` is `n-1`, because
+  `revise-<n>` answers `plan-critique-<n-1>.json`. Every finding the planner was shown is
+  answered, at every severity, including carried, human-raised and vibe-raised findings.
+  `reproducer` is always null, because nothing reproduces a plan finding.
+- **Order against the save.** `recordDispositions`' order: the record is written after the plan
+  parses and before the one `saveState` that persists the plan and consumes the findings it
+  answers. A revision is therefore never consumed without its record. A death in between leaves
+  the findings pending, and the resume revises them in a new plan round (`revisePlan` advances
+  `planRound` again), so the redo is `revise-<n+1>`, not `revise-<n>`. The scorecard keeps the last
+  event per label, so it counts both records. Nothing between the record and the save awaits, so
+  the window is a few synchronous statements wide; the double count is stated, not guarded.
+- **Attribution.** Every seat in `foundBy` when critique finders ran. Otherwise the stamp
+  `state.criticSeat` (round, provider, model or `"default"`), which the critique callback writes
+  beside `plan-critique-<n>.json`, `state.reviewSeat`'s pattern. A resume that moved
+  `roles.critic` therefore credits the model that looked. A stamp for another round, or none,
+  credits nobody. `settleDispositions` was generalized rather than copied: the author whose
+  findings fall back to the stamp, the seat name and the stamp are parameters. So the review path
+  is byte-identical, and only `raisedBy: 'critic'` reaches `roles.critic`. A person's and vibe's
+  findings (the placeholder refusal is one) are credited to nobody and excluded from every figure.
+- **The vote rides along.** Each disposition carries the finding's stored `votes.outcome`
+  (`confirmed | unconfirmed | undecided`), or null when it was not voted on or `readTally` cannot
+  read the record. It is never recounted. This is the cross-tab #405 shipped without.
+- **Raised again.** When the critique of plan `n` is recorded, still inside the callback,
+  `recordRebuttalsRaisedAgain` reads `plan-dispositions-<n>.json` and records
+  `critique_rebuttal_disputed` with the rebutted ids, those raised again under the **same id**
+  (`disputed`), and those not raised again. It is recorded at critique time because a critique
+  that approves has no next revision, and that is exactly when the rebuttal stood. Same id only:
+  a finding raised again under a new id is not seen, and memoryless finders rename ids
+  (`<id>-f<k>`), so for their findings this undercounts. It is never matched by title.
+- **Why the scorecard says "rebutted by the planner", and never precision.** For #393's
+  reason: a rebuttal is the planner's call, not a verdict, and the planner can be wrong too.
+  `vibe stats` prints "Critique findings, by what the planner did" beside the fixer's section:
+  - revisions recorded, unreadable and silent;
+  - rows by seat and by severity;
+  - rebutted and raised again against rebutted and not raised again, with the same-id caveat
+    in the line itself;
+  - the vote outcome × disposition rows.
+
+  Every figure stands beside its `of`, and no percentage is printed. A rebuttal whose next
+  critique recorded no comparison is "could not say", never "not raised again": a critique that
+  stopped before recording it looks the same. "Finding precision" stays in `UNMEASURABLE`,
+  naming both rebuttal rates as the nearest proxies.
+- **The window does not draw it yet.** The events and artifacts are durable. Neither the
+  findings pane nor the replay reads them.
+
 ## Non-blocking findings on a passing round (#425)
 
 Run `20261022-224848` passed its review with the verdict REVISE and two P2s in the task's own

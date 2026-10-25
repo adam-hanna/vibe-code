@@ -148,6 +148,12 @@ A review fix round, including the final one, returns its report and, for every f
 
 `vibe stats` totals these per reviewer seat and by severity, and the app shows each finding's outcome in the Code review tab. A `rebutted` is what the fixer said, not a verdict on the finding.
 
+### What the planner did with each critique finding
+
+A plan revision that answers a critique returns the revised plan and, for every finding it was shown, one of `fixed`, `rebutted`, `deferred` or `not-addressed`, with a reason. A rebuttal is still explained in the plan itself, because the plan is what the implementer reads. The answers go in `plan-dispositions-<n>.json`, credited to the seats that raised each finding and carrying the finding's vote outcome when [critique verifiers](./configuration#critique) voted on it. `plan-<n>.json` is the plan alone, as before. If the answers cannot be read, the plan is kept and nothing is recorded for that revision. A revision that answers only the planner's own questions is not asked.
+
+When the next critique raises a rebutted finding again under the same id, the run records it as disputed. `vibe stats` totals the planner's answers per critic seat, by severity and by vote outcome, and says how many rebutted findings were raised again. That count only notices the same id: a finding raised again under a new id, which a critique finder's always is, is not noticed, so it undercounts. A `rebutted` is what the planner said, not a verdict on the finding. The app does not show these yet.
+
 ### Changes to the run's own judge
 
 The tests and `vibe.config.json` decide whether a run passed, so a round that edits them is grading its own work. When a round changes a file matching `verify.testPaths`, or `vibe.config.json`, the reviewer is shown each one and must say whether the change was justified. A change is justified only when the test's claim is no longer the contract, and never because it makes the gate pass. Each file's status, its lines added and removed, and the verdict are recorded in `state.json` and the round's `code-review-<n>.json`. A file the reviewer did not address is recorded as `unjudged`. None of this stops the run, but the end-of-run summary names any file that was not judged justified.

@@ -54,6 +54,19 @@ const STALL_STEP_BACK =
   'is the problem (too broad, contradictory, or missing a decision only a person can make), say so ' +
   "plainly in the plan's open questions.";
 
+/**
+ * What a findings revision is asked to return beside the plan (#453): one
+ * disposition per finding it was shown, in `REVISE_SCHEMA`'s `dispositions`.
+ *
+ * A rebuttal is still explained in `plan_md`, because the implementer reads the
+ * plan and never the dispositions. Only the findings path carries it, so every
+ * other revision's prompt is the one it always was.
+ */
+const PLAN_DISPOSITIONS =
+  'For each finding listed above, answer its id in `dispositions`: `fixed`, `rebutted`, `deferred` ' +
+  'or `not-addressed`, with a sentence of reason. Use only those ids. Still explain a rebuttal in ' +
+  'the plan itself: `plan_md` is what the implementer reads, and `dispositions` is not shown to it.';
+
 /** The step-back's measured line, from `planStall`'s `{counts, fresh}`. Not overridable. */
 function stallCountsLine({ counts, fresh }: StallMeasure): string {
   const rounds = counts.map((c, i) =>
@@ -948,7 +961,9 @@ An independent reviewer raised the following. Evaluate each P1 against the origi
 
 ${findings.map((f) => formatFinding(f) + voteNote(f)).join('\n\n')}${deferralNote(findings, 'planner')}
 
-For each P1: fix the plan, or, if you believe the finding is wrong, say so explicitly in the plan with your reasoning. Do not silently ignore one.
+For each P1: fix the plan, or, if you believe the finding is wrong, rebut it. Do not silently ignore one.
+
+${block(BLOCK.planDispositions, PLAN_DISPOSITIONS)}
 
 ${block(BLOCK.fix, FIX_BREADTH)}`);
   }
@@ -2005,6 +2020,7 @@ const BLOCK = {
   deferred: 'a deferred finding',
   simple: 'simple solution',
   stall: 'stall',
+  planDispositions: 'plan dispositions',
 } as const;
 
 let installed: Readonly<Record<string, string>> = {};
@@ -2136,6 +2152,8 @@ export function promptBlocks(): readonly PromptBlock[] {
     of(BLOCK.deferred, ['planner', 'implementer'], DEFERRED_MARK),
     // Only the findings revision after a stall carries it (#394).
     of(BLOCK.stall, ['planner'], STALL_STEP_BACK),
+    // Only the revision answering a critique carries it (#453).
+    of(BLOCK.planDispositions, ['planner'], PLAN_DISPOSITIONS),
   ];
 }
 
