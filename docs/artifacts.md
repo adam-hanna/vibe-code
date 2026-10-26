@@ -11,6 +11,7 @@ Most files are conditional: a missing one means the run had nothing to put in it
 | `PLAN.md` | The approved plan. |
 | `plan-<n>.json` | Each plan round: the plan, its declared assumptions, open questions, out-of-scope list and acceptance criteria. |
 | `plan-critique-<n>.json` | The critic's findings on each plan round. |
+| `plan-dispositions-<n>.json` | What the plan revision of round `<n>` said it did with each critique finding it was given: `fixed`, `rebutted`, `deferred` or `not-addressed`, with its reason, the seats that raised the finding, and the finding's vote outcome when it was voted on. It answers `plan-critique-<n-1>.json`. Missing when the planner's answer could not be read, and for a revision that answered only questions. |
 | `answers-<n>.json` | The answerer's answers to the planner's questions, one file per question round. |
 | `implementation-report.md` | What the implementer says it did, under five fixed headings. It is handed to the reviewer as a claim, not as evidence. |
 | `fix-report-<n>.md`, `verify-fix-<n>.md` | The same report after a review fix round, or after a verification repair. |
@@ -19,8 +20,8 @@ Most files are conditional: a missing one means the run had nothing to put in it
 | `verify-<review>-<verify>-<gate>-<attempt>.log` | The full output of every attempt of a gate that did not pass cleanly. |
 | `artifacts/<gate>/round-<n>/` | Files a failing gate's `artifacts` setting copied. |
 | `reproducers/<finding-id>/` | A reviewer's reproducer test, kept after it is removed from the working tree. |
-| `NEEDS-INPUT.md` | Written when the run stops for you. Renamed `answered-<n>.md` once a resume has read your answers. |
-| `ASSUMED.md` | Questions the run proceeded on with the planner's own answer, which you did not answer yourself. |
+| `NEEDS-INPUT.md` | Written when the run stops for you. Renamed `answered-<n>.md` once a resume has read your answers, or `stalled-<n>.md` when the stop reported findings. When the run is carrying assumptions (questions it continued past on the planner's fallback), it lists them under `## Assumptions the run is already making`: write your decision under an assumption's **Your decision:** to settle it, or leave it empty to keep the fallback. |
+| `ASSUMED.md` | Questions the run proceeded on with the planner's own answer, which you did not answer or decide yourself. When you answered anything during the run, it ends with `## Your answers in this run`, listing those answers without matching them to the assumptions, so you can check whether one already settles an assumption. |
 | `REPHRASED.md` | Questions the run treated as ones already asked or answered, with the score that matched them. If two entries are not the same question, that is worth reporting as a bug. |
 | `OUTSTANDING.md` | P1 findings carried under `loop.p1Tolerance`: fixed in a final round that is deliberately not re-reviewed. |
 | `FOLLOW-UPS.md` | Findings the critic or the reviewer said belong in a different change, review findings the verifiers' vote moved to P2 (marked *Unconfirmed by vote*), and the plan's declared out-of-scope work. **The file to read after a clean run.** |

@@ -73,7 +73,9 @@ Two rules the cockpit inherits from the design and must not quietly drop:
 - **While a gate is held there is no live card, and the turn before it is still drawn.** An
   `ask` closes the running turn, exactly as `phase_started`, `turn_started`, `gate_stopped`
   and `result` do — a gate holds *between* things, so nothing is executing while one is
-  outstanding. Leaving it open was not cosmetic: a run held overnight drew `5h40m · last
+  outstanding. (Since #403 a `turn_started` that carries a `label` closes only unlabelled turns,
+  so review seats running at once stay live side by side, each drawn live; `ask`, a phase and a
+  `result` still close every one. See `core-and-window.md`.) Leaving it open was not cosmetic: a run held overnight drew `5h40m · last
   activity 5h39m ago` on a turn that took a minute, two inches above a footer correctly
   saying the loop was waiting for a human. The card said kill it and the footer said press
   continue. The turn stays on screen with its measurements — that is what a person is
@@ -266,7 +268,8 @@ they are waiting on. Four things in it are worth carrying:
   findings pane was a `<button>` that set an `open` id nothing rendered, so the cursor promised
   a disclosure that did not exist. What is behind that fold is the **provenance** — author,
   citations, severity history, reproducer outcomes, and since #388 and #393 which seats found it,
-  the vote and what the fixer did with it — and what stays out is the severity, the
+  the vote and what the fixer did with it (or, on a critique since #457, what the planner's
+  revision did with it, read from `plan-dispositions-<n+1>.json` by the same join) — and what stays out is the severity, the
   title and the id, which are what make a list of findings scannable.
 
 - **No issue number reaches the screen, and `copy.test.ts` is the gate.** Seven components
@@ -1196,6 +1199,20 @@ they are waiting on. Four things in it are worth carrying:
   and a command; a saved row always is, so emptying it reaches the core and is refused in its
   words. `artifacts` stays file-only and survives a save. A command holding `\"` gets a
   warning showing what the shell would receive, because that is almost always a paste from JSON.
+- **The review seats say what a blank field comes to, read from the config** (#448). The
+  seats are `SeatList` over `app/src/cockpit/seatform.ts`, `GateList`'s shape. A blank
+  minutes field shows the number it takes, by `seatResolved`'s rule in `src/roles.ts`:
+  `claude.planTimeoutMs` for a Claude seat and `codex.timeoutMs` for a Codex seat. When that
+  value cannot be read, the key is named and no number is shown. The quorum shows its count as
+  it is typed (`2 of 3 (a majority)`, `quorumFor`'s `floor(n/2)+1`). The two quorums the core
+  refuses are said beside the field, and the patch still sends what was typed. **Removing a
+  verifier below a saved quorum resets the quorum to a majority in the same patch, and says
+  so beside it.** The core checks the quorum against the list in the same config, so the
+  remove on its own was refused and the row came back. Blocking the remove would make a person
+  clear one field before they could take a row away. A finder's focus is a textarea on its own
+  row, because squeezed into a column it showed three characters. The example chips add a
+  phrase to it and the field stays free text, because `withFocus` hands it over as prose. The
+  pane is capped at 96rem rather than 1024px; prose keeps its own measure through `S.note`.
 - **The four caps and the tolerance are a form now, and P0 is stated as having no setting.**
   Every one was reachable only as a `--max-*` flag. `gate()` refuses a round with any P0
   before it looks at the tolerance at all — *P0 findings are never carried forward* — so a run

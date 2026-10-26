@@ -62,7 +62,7 @@ RWQuhvL0pAwsF/uy5/v58+NPKkXROME+9UFiSw/z0DvfoC9/AW5BzmFp
 
 The left sidebar lists your **projects** (each is a repository) and, under each, its **runs**. Clicking a run opens it. That is only a read: it never starts or resumes anything, and it costs nothing. A finished run is drawn exactly as it looked while it ran. Pin a run to keep it at the top, or rename it. Renaming changes only the label shown here, never the run's record.
 
-The middle is the **pilot** and the run's tabs. The right-hand **run column** shows the loop: four groups (plan, plan critique, code, review), a card for each round with its severity counts, the turn running now with its elapsed time and token count, and a footer saying what the run is doing or how it ended. Click a round's counts to open its findings.
+The middle is the **pilot** and the run's tabs. The right-hand **run column** shows the loop: four groups (plan, plan critique, code, review), a card for each round with its severity counts, the turn running now with its elapsed time and token count (when finders or verifiers run at once, every one of them, with a line naming which seats are critiquing, reviewing or voting), and a footer saying what the run is doing or how it ended. Click a round's counts to open its findings.
 
 ## The pilot
 
@@ -79,7 +79,7 @@ For each vendor, the pilot and every run use either your **subscription** (the C
 | Tab | What it shows |
 |---|---|
 | Plans | Every version of the plan, one section per round. |
-| Plan critique | The critic's report for each plan round, with each finding's evidence. |
+| Plan critique | The critic's report for each plan round, with each finding's evidence. With [critique finders and verifiers](./configuration#critique), opening a finding shows which seats raised it and how each verifier voted and why. Opening a finding also shows what the planner's next revision said it did with it, and whether the next critique raised it again. |
 | Code review | The reviewer's report for each round, and what happened to each finding afterwards. Opening a finding shows which seats raised it, how each verifier voted and why, and what the fixer said it did with it. |
 | Code | What each round changed, from the commit it made, and the whole change so far. |
 | Questions | The run's questions, which you answer in place. |
@@ -111,7 +111,7 @@ When you quit while runs are going, the app lists them and asks first. Each one 
 
 Settings has two doors. The ⚙ at the foot of the left bar edits your **settings for all projects**: models, budgets, round caps, `auth`, the pilot's permissions and the type size. The ⚙ on a project's row edits that project's **`vibe.config.json`**: its verification gates, worktree settings and anything it overrides. Each value shows where it comes from: the default, your settings for all projects, or this project. Model pickers list what each CLI says it offers today, and you can always type a name.
 
-Under the roles, Settings edits the review's [finders and verifiers](./configuration#review), the quorum and what a P0 the vote did not confirm does. In a project's settings, a note says whether the repository has a [`REVIEW.md`](./how-it-works#the-repository-s-review-standards-review-md) at the commit the next run would start from.
+Under the roles, Settings edits the review's [finders and verifiers](./configuration#review) and, in a section of its own, the plan critique's [finders and verifiers](./configuration#critique). Each has its quorum, what a P0 the vote did not confirm does, and how many of its turns may run at once. In a project's settings, a note says whether the repository has a [`REVIEW.md`](./how-it-works#the-repository-s-review-standards-review-md) at the commit the next run would start from.
 
 Settings also shows the standing prompt blocks every turn receives, and lets you override them per project. See [`prompts`](./configuration#prompts).
 

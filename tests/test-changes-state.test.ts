@@ -131,3 +131,77 @@ test('a record a real review round wrote comes back from disk unchanged, with no
   assert.deepEqual(resumed.testChanges, state.testChanges);
   assert.equal(resumed.events.some((e) => e.type === 'state_repaired'), false);
 });
+
+// ---- every seat's verdict (#404) -------------------------------------------
+
+/** The record a round with finders wrote: the combined verdict, then each seat's. */
+const seated: TestChanges = {
+  round: 1,
+  patterns: ['**/tests/**', 'vibe.config.json'],
+  files: [
+    {
+      path: 'tests/a.test.ts',
+      oldPath: null,
+      status: 'modified',
+      added: 1,
+      removed: 3,
+      verdict: { justified: false, reason: 'rewrites an assertion' },
+      verdicts: [
+        { seat: 'roles.reviewer', provider: 'codex', model: 'default', verdict: { justified: true, reason: 'fine' } },
+        {
+          seat: 'review.finders[0]',
+          provider: 'claude',
+          model: 'opus',
+          verdict: { justified: false, reason: 'rewrites an assertion' },
+        },
+        { seat: 'review.finders[1]', provider: 'codex', model: 'default', verdict: 'unjudged' },
+      ],
+    },
+  ],
+};
+
+test('a record with every seat’s verdict survives the round trip intact, key order included', () => {
+  const { state, repairs } = read({ ...widest(), testChanges: seated });
+  assert.deepEqual(repairs, []);
+  assert.deepEqual(state.testChanges, seated);
+  assert.equal(JSON.stringify(state.testChanges), JSON.stringify(seated));
+});
+
+test('a malformed seat verdict is dropped and said, and the combined verdict stands as stored', () => {
+  const [file] = seated.files;
+  assert.ok(file?.verdicts !== undefined);
+  const [good, , last] = file.verdicts;
+  for (const bad of [
+    'nonsense',
+    { ...good, provider: 'gemini' },
+    { ...good, model: '' },
+    { ...good, seat: 3 },
+    { ...good, verdict: 'justified' },
+    { ...good, verdict: { justified: 'yes', reason: 'x' } },
+  ]) {
+    const { state, repairs } = read({
+      ...widest(),
+      testChanges: { ...seated, files: [{ ...file, verdicts: [good, bad, last] }] },
+    });
+    const [kept] = state.testChanges?.files ?? [];
+    // Never recomputed from what survived: the dissent that was dropped still decides.
+    assert.deepEqual(kept?.verdict, file.verdict, JSON.stringify(bad));
+    assert.deepEqual(kept?.verdicts, [good, last], JSON.stringify(bad));
+    assert.deepEqual(repairs.map((r) => [r.field, r.droppedPaths]), [
+      ['testChanges', ['testChanges.files[0].verdicts[1]']],
+    ]);
+  }
+});
+
+test('a verdicts value that is not a list drops the key, keeps the verdict, and is said', () => {
+  const [file] = seated.files;
+  assert.ok(file !== undefined);
+  for (const bad of [null, 'all', { seat: 'roles.reviewer' }]) {
+    const { state, repairs } = read({ ...widest(), testChanges: { ...seated, files: [{ ...file, verdicts: bad }] } });
+    const [kept] = state.testChanges?.files ?? [];
+    assert.ok(kept !== undefined, JSON.stringify(bad));
+    assert.equal('verdicts' in kept, false, JSON.stringify(bad));
+    assert.deepEqual(kept.verdict, file.verdict);
+    assert.deepEqual(repairs.map((r) => [r.field, r.droppedPaths]), [['testChanges', ['testChanges.files[0].verdicts']]]);
+  }
+});

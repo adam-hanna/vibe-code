@@ -11,9 +11,13 @@
  * the enum, a quorum above the number of verifiers, an empty focus - arrive
  * through the refusal banner in the core's own words, and a second copy of
  * those rules here would be a second answer to *what is a legal seat*.
+ * `quorumReading` (#448) says the quorum's two refusals where it is typed, and
+ * still sends what was typed; `keepQuorumLegal` keeps a remove from tripping
+ * one. Neither replaces the core's answer.
  *
  * Finders are run since #388 Part B, and the verifiers, the quorum and
- * `unconfirmedP0` since Part C.
+ * `unconfirmedP0` since Part C. The plan critique's panel (#405) is the same
+ * form saved under `critique` (`SeatSection`).
  */
 
 /** A seat as the core holds it. Mirrors `RoleSetting` / `FinderSeat` in `src/`. */
@@ -27,6 +31,13 @@ export interface Seat {
 }
 
 export type SeatKind = 'finders' | 'verifiers';
+
+/**
+ * Which section a seat list is saved under: the review's (#388) or the plan
+ * critique's (#405). The two take the same four keys, so one form serves both,
+ * and every review call leaves it at its default.
+ */
+export type SeatSection = 'review' | 'critique';
 
 /** One row as it is being typed - every field a string until it is sent. */
 export interface SeatRow {
@@ -131,16 +142,48 @@ export function toSeat(row: SeatRow, kind: SeatKind): Record<string, unknown> {
 }
 
 /** The patch for one list: every ready row, in order. `[]` is legal and means none. */
-export function seatsPatch(kind: SeatKind, rows: readonly SeatRow[]): Record<string, unknown> {
-  return { review: { [kind]: rows.filter(ready).map((r) => toSeat(r, kind)) } };
+export function seatsPatch(
+  kind: SeatKind,
+  rows: readonly SeatRow[],
+  section: SeatSection = 'review',
+): Record<string, unknown> {
+  return { [section]: { [kind]: rows.filter(ready).map((r) => toSeat(r, kind)) } };
+}
+
+/**
+ * "Use the default" for the review's finders (#447): the core deletes the key
+ * when a patch says `null` for it, so the file follows the default again -
+ * which moves with the reviewer - rather than holding a copy of today's seat.
+ * The review's alone: the critique's panel has no default to return to.
+ */
+export const USE_DEFAULT_FINDERS: Record<string, unknown> = { review: { finders: null } };
+
+/**
+ * Where the review's finders come from, for the file being edited (#447):
+ * `named` when that file sets `review.finders`, `inherited` when only the
+ * settings for all projects do (a project view), and `default` when neither
+ * does and the list in force is the one the core resolved. Named means the key
+ * is there, `[]` included - `inFile`'s test - and the seat itself is never
+ * read here: it comes from the effective config, so no default is restated.
+ */
+export function findersDefaultState(
+  scope: 'project' | 'global',
+  raw: Record<string, unknown>,
+  globalRaw: Record<string, unknown>,
+): 'default' | 'inherited' | 'named' {
+  const names = (file: Record<string, unknown>): boolean =>
+    (file['review'] as Record<string, unknown> | undefined)?.['finders'] !== undefined;
+  if (names(raw)) return 'named';
+  if (scope === 'project' && names(globalRaw)) return 'inherited';
+  return 'default';
 }
 
 /** The quorum field's text as the core wants it: blank is a majority (`null`). */
-export function quorumPatch(text: string): Record<string, unknown> {
+export function quorumPatch(text: string, section: SeatSection = 'review'): Record<string, unknown> {
   const t = text.trim();
-  if (t === '') return { review: { quorum: null } };
+  if (t === '') return { [section]: { quorum: null } };
   const n = Number(t);
-  return { review: { quorum: Number.isFinite(n) ? n : t } };
+  return { [section]: { quorum: Number.isFinite(n) ? n : t } };
 }
 
 /** The three things an unconfirmed P0 may do, each with its one line (#388, owner 2026-10-20). */
@@ -149,3 +192,129 @@ export const UNCONFIRMED_P0_CHOICES: readonly { value: string; meaning: string }
   { value: 'halt', meaning: 'the run stops and asks you, showing every vote and its reason' },
   { value: 'demote', meaning: 'it is moved to P2, as an unconfirmed P1 is' },
 ];
+
+/**
+ * What a blank minutes field means for a seat on `provider` (#448), read from
+ * the effective config rather than written here.
+ *
+ * The rule is `seatResolved`'s in `src/roles.ts`, which is what a run and
+ * `vibe doctor` use: a seat's own `timeoutMs`, or else the limit a read-only
+ * turn on its provider gets - `claude.planTimeoutMs` for Claude and
+ * `codex.timeoutMs` for Codex. The placeholder said `agent's`, which named
+ * neither the key nor the number. When the number cannot be read the key is
+ * still named and the figure is left out, never guessed.
+ */
+export interface InheritedTimeout {
+  /** The config key a blank field takes, or null when no agent is chosen yet. */
+  key: string | null;
+  /** That key's value in minutes, or null when it could not be read. */
+  minutes: number | null;
+  /** What the empty field shows. */
+  placeholder: string;
+}
+
+/** The two limits `inheritedTimeout` reads, as the effective config holds them. */
+export interface TimeoutSettings {
+  claude?: { planTimeoutMs?: unknown };
+  codex?: { timeoutMs?: unknown };
+}
+
+/** Minutes as a person would type them: whole when whole, else to two places. */
+function shownMinutes(ms: number): number {
+  return Math.round((ms / MINUTE) * 100) / 100;
+}
+
+export function inheritedTimeout(provider: string, effective: TimeoutSettings): InheritedTimeout {
+  if (provider === '') return { key: null, minutes: null, placeholder: "agent's" };
+  const key = provider === 'claude' ? 'claude.planTimeoutMs' : provider === 'codex' ? 'codex.timeoutMs' : null;
+  const ms: unknown =
+    provider === 'claude' ? effective.claude?.planTimeoutMs : provider === 'codex' ? effective.codex?.timeoutMs : undefined;
+  if (key === null || typeof ms !== 'number' || !Number.isFinite(ms) || ms <= 0) {
+    return { key, minutes: null, placeholder: `${provider}'s` };
+  }
+  const minutes = shownMinutes(ms);
+  return { key, minutes, placeholder: `${String(minutes)} (${provider}'s)` };
+}
+
+/** The line under a minutes column: what blank means for each agent on offer (#448). */
+export function minutesHint(providers: readonly string[], effective: TimeoutSettings): string {
+  const parts = providers.map((p) => {
+    const t = inheritedTimeout(p, effective);
+    if (t.key === null) return `${p}'s own limit`;
+    return t.minutes === null
+      ? `${t.key} for ${p}, which this screen could not read`
+      : `${t.key} for ${p}, ${String(t.minutes)} min`;
+  });
+  return `Blank minutes takes the agent's limit for a read-only turn: ${parts.join('; ')}.`;
+}
+
+/**
+ * The quorum as it comes out, said beside the field (#448) - `quorumFor` in
+ * `src/vote.ts`, which is `floor(n / 2) + 1` when blank - and the two quorums
+ * the core refuses (`validateReview` in `src/config.ts`), said where they are
+ * typed. Only said: the patch still sends what was typed, and the core's
+ * refusal is what decides.
+ */
+export function quorumReading(text: string, verifiers: number): { text: string; problem: boolean } {
+  const t = text.trim();
+  if (t === '') {
+    if (verifiers === 0) return { text: 'no verifiers, so nothing is voted on', problem: false };
+    return { text: `${String(Math.floor(verifiers / 2) + 1)} of ${String(verifiers)} (a majority)`, problem: false };
+  }
+  const q = Number(t);
+  if (!Number.isInteger(q) || q < 1) {
+    return { text: 'a quorum is a whole number of verifiers, at least 1, or blank for a majority', problem: true };
+  }
+  if (verifiers === 0) {
+    return { text: 'there are no verifiers to count; add one, or leave this blank', problem: true };
+  }
+  if (q > verifiers) {
+    return {
+      text: `${String(q)} is more than the ${String(verifiers)} verifier${verifiers === 1 ? '' : 's'} there are; the core refuses it`,
+      problem: true,
+    };
+  }
+  return { text: `${String(q)} of ${String(verifiers)}`, problem: false };
+}
+
+/**
+ * A verifiers save that would leave the saved quorum above the verifiers left
+ * (#448). The core checks the quorum against the list in the same config, so
+ * removing a verifier under `quorum: 3` was refused, and the row came back as
+ * if the remove had not happened. The quorum goes back to a majority in the
+ * same patch instead: two saves would have the first refused, and blocking the
+ * remove would make a person clear a field before they could take a row away.
+ * `reset` says it happened, so the screen can say so rather than change a
+ * setting silently. The critique's quorum (#405) is held to the same rule.
+ */
+export function keepQuorumLegal(
+  patch: Record<string, unknown>,
+  quorum: number | null,
+  section: SeatSection = 'review',
+): { patch: Record<string, unknown>; reset: boolean } {
+  const seats = patch[section];
+  if (quorum === null || typeof seats !== 'object' || seats === null) return { patch, reset: false };
+  const verifiers = (seats as Record<string, unknown>)['verifiers'];
+  if (!Array.isArray(verifiers) || quorum <= verifiers.length) return { patch, reset: false };
+  return { patch: { ...patch, [section]: { ...seats, quorum: null } }, reset: true };
+}
+
+/**
+ * Phrases a finder's focus can start from (#448). Examples, not a vocabulary:
+ * the field stays free text, because the core hands it to the finder as prose.
+ */
+export const FOCUS_EXAMPLES: readonly string[] = [
+  'security',
+  'concurrency and races',
+  'error handling and fail-closed paths',
+  'test coverage of the claim',
+  'performance',
+];
+
+/** A focus with an example phrase added: the phrase alone if blank, after a comma if not, once. */
+export function appendFocus(text: string, phrase: string): string {
+  const t = text.trimEnd();
+  if (t === '') return phrase;
+  if (t.toLowerCase().includes(phrase.toLowerCase())) return text;
+  return /[.,;:]$/.test(t) ? `${t} ${phrase}` : `${t}, ${phrase}`;
+}

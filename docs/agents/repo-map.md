@@ -19,11 +19,13 @@ src/run.ts           run state, artifacts, checkpoints, convergence maths (asses
 src/scorecard.ts     what the run archive says about the loop, and what it cannot
 src/fork.ts          `vibe fork`: preflight that only reads, then a commit phase that creates
 src/similarity.ts    the one similarity metric, its threshold, and the censuses behind it
-src/finder-merge.ts  one review round's reports across finders, merged by claim, with foundBy (#388)
-src/vote.ts          the review vote's fail-closed tally, pure: quorum, counted ballots, outcome (#388)
-src/dispositions.ts  a review fix round's dispositions joined onto its findings, with seats, pure (#393)
+src/finder-merge.ts  one review or critique round's reports across finders, merged by claim, with foundBy; near pairs flagged to the fixer (#388, #405, #462)
+src/vote.ts          the review and critique votes' fail-closed tally, pure: quorum, counted ballots, outcome (#388, #405)
+src/seat-group.ts    a round's finder or verifier turns, review.maxParallel or critique.maxParallel at once; a turn that ends the round stops its siblings, never the run's latch (#403)
+src/dispositions.ts  a review fix round's or a findings revision's dispositions joined onto its findings, with seats and (plan side) votes, pure (#393, #453)
 src/questions.ts     when two wordings are one question: the threshold, and REPHRASED.md
 src/raise.ts         what a person does to a run's findings: raise one, move a severity
+src/literal.ts       agent text made inert before it is written into NEEDS-INPUT.md (#472)
 src/roles.ts         who does what: the role table, refusals, warnings
 src/config.ts        DEFAULTS, config merge, validation, and the global file under the project's
 src/consistency.ts   cross-field rules over status/phase/planOnly, applied by loadRun
@@ -54,7 +56,7 @@ src/schemas.ts       the JSON schemas both CLIs are pinned to
 src/validate.ts      parser vocabulary for model output
 src/proc.ts          child-process plumbing, and how a child ended
 src/review-md.ts     the repository's REVIEW.md, read from the run's start commit, for the review seats (#389)
-src/cancel.ts        stopping a turn that is already running - the latch, what it may kill, and the wait it may cut short
+src/cancel.ts        stopping a turn that is already running - the latch, what it may kill, the wait it may cut short, and the scoped turn group (#403)
 src/commands.ts      a command a person pressed - no shell, no shim, and where it runs
 src/commandlog.ts    a command's output on disk, and what the last launch left there
 src/models.ts        which models each CLI offers, asked of the CLI - never a list here

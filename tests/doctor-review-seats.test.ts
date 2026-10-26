@@ -101,9 +101,66 @@ test('a quorum that was set is printed as set, and finders alone print no quorum
   assert.equal(findersOnly.lines.filter((l) => /^\s+quorum\s/.test(l)).length, 0);
 });
 
-test('under the defaults doctor prints no review block', async () => {
-  const { code, lines } = await doctor(targetDir(undefined));
+test('with review.finders set to [] doctor prints no review block', async () => {
+  // What every default printed before #447, now the opt-out's.
+  const { code, lines } = await doctor(targetDir({ finders: [] }));
   assert.equal(code, EXIT.OK);
   assert.equal(lines.some((l) => l.includes('review seats')), false);
   assert.equal(lines.some((l) => l.includes('review finders') || l.includes('review verifiers')), false);
+  assert.equal(lines.some((l) => l.includes('(default)') || l.includes('no default finder')), false);
+});
+
+test('under the defaults doctor lists the one default finder, marked as the default (#447)', async () => {
+  const { code, lines } = await doctor(targetDir(undefined));
+  assert.equal(code, EXIT.OK);
+  assert.ok(lines.some((l) => l.includes('review finders (each reviews every chunk')));
+  assert.match(
+    line(lines, 'finder 1 \\(default\\)'),
+    /claude\s+claude-fixture \/ high \/ 333000ms {2}focus: "error handling, fail-closed paths, and tests that assert what the change claims"$/,
+  );
+  assert.equal(lines.some((l) => /^\s+finder 2/.test(l)), false);
+  assert.equal(lines.some((l) => l.includes('review verifiers')), false);
+});
+
+test('a finder somebody wrote, even one matching the default, is not marked (#447)', async () => {
+  const { lines } = await doctor(
+    targetDir({ finders: [{ provider: 'claude', effort: 'high', focus: 'error handling, fail-closed paths, and tests that assert what the change claims' }] }),
+  );
+  assert.ok(lines.some((l) => /^\s+finder 1\s/.test(l)));
+  assert.equal(lines.some((l) => l.includes('(default)')), false);
+});
+
+test('a table all on one provider gets no default finder, and doctor says so in one line (#447)', async () => {
+  const dir = targetDir(undefined);
+  const file = path.join(dir, 'vibe.config.json');
+  const roles = { planner: 'claude', implementer: 'claude', critic: 'claude', answerer: 'claude', reviewer: 'claude' };
+  writeFileSync(file, JSON.stringify({ codex: { readRateLimits: false }, roles }), 'utf8');
+  const { code, lines } = await doctor(dir);
+  assert.equal(code, EXIT.OK);
+  assert.deepEqual(
+    lines.filter((l) => l.includes('no default finder')).map((l) => l.trim()),
+    ['no default finder: every role is on claude; set review.finders to add one'],
+  );
+  assert.equal(lines.some((l) => l.includes('review finders')), false);
+  // Both vendors in the table: the line is not said.
+  const mixed = await doctor(targetDir({ finders: [] }));
+  assert.equal(mixed.lines.some((l) => l.includes('no default finder')), false);
+});
+
+test('doctor says how many seat turns may run at once, and what that costs (#403)', async () => {
+  const one = await doctor(targetDir({ verifiers: ['codex', 'codex'] }));
+  assert.match(line(one.lines, 'parallel'), /\s1 \(one after another\)$/);
+  const lines = one.lines;
+  assert.ok(lines.indexOf(line(lines, 'parallel')) > lines.indexOf(line(lines, 'unconfirmed P0')));
+
+  const four = await doctor(targetDir({ finders: ['codex'], maxParallel: 4 }));
+  assert.match(
+    line(four.lines, 'parallel'),
+    /\s4 at once \(Codex turns can overshoot budget\.maxTokens by up to 4 turns' spend\)$/,
+  );
+  // With no seats at all, still nothing; the default finder is a seat (#447).
+  const none = await doctor(targetDir({ finders: [] }));
+  assert.equal(none.lines.filter((l) => /^\s+parallel\s/.test(l)).length, 0);
+  const defaulted = await doctor(targetDir(undefined));
+  assert.match(line(defaulted.lines, 'parallel'), /\s1 \(one after another\)$/);
 });

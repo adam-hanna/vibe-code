@@ -262,14 +262,25 @@ export const FINDINGS_SCHEMA = {
         // excerpt:null`, so their content comes before nulls still owed. That is
         // 54 of the archive's 812 evidence entries (40 `external`, 14
         // `absence`), down from 742 of 790 that ended on a null `ref` before.
-        // Whether they stall, and what to do if they do, is #429.
+        //
+        // Measured after #424 (#429): they do not stall, so the order stays. Of
+        // 152 Codex outputs written since (35 in this repo's archive, 117 from
+        // a throwaway bench project built to produce them), 62 evidence entries
+        // were `external` (39) or `absence` (23). No blank run sat before
+        // `path`, `line` or `excerpt` in any of them; the longest blank run in
+        // all 152 outputs was 2 characters. Splitting the entry per kind with
+        // an `anyOf` would cost Codex strict-output risk for a stall nobody saw.
+        // Measure again with `scripts/count-schema-stalls.mjs` if one appears.
         //
         // Left alone on the same evidence: `test_verdicts` (last in
         // `REVIEW_SCHEMA`, often `[]`) shows no blank run before it in the
         // archive, and `ANSWERS_SCHEMA`, `FIX_SCHEMA` and `PLAN_SCHEMA` end on
-        // fields that are not null. `scripts/count-schema-stalls.mjs` is how a
-        // later archive confirms or refutes this, including whether the stall
-        // simply moved to the new last key.
+        // fields that are not null. `REVISE_SCHEMA` (#453) is `PLAN_SCHEMA` with
+        // `dispositions` appended, and ends on `dispositions[].reason`, a
+        // non-null string, so it keeps to the rule rather than testing it.
+        // `scripts/count-schema-stalls.mjs` is how a later archive confirms or
+        // refutes this, including whether the stall simply moved to the new
+        // last key.
         required: [
           'id',
           'severity',
@@ -405,7 +416,8 @@ export const FINDINGS_SCHEMA = {
               // entries, and as the last key after `excerpt` it was where 60 of
               // the archive's 150 blank runs sat. This ends a `code` entry on
               // its content, but not an `external` or `absence` one, which still
-              // ends on null fields after it (54 of 812 entries; #429). See the
+              // ends on null fields after it. Measured not to stall (62 such
+              // entries after #424, no blank run before them; #429). See the
               // note on the finding.
               required: ['kind', 'ref', 'path', 'line', 'excerpt'],
               properties: {
@@ -535,6 +547,41 @@ export const VOTE_SCHEMA = {
   },
 } as const satisfies object;
 
+/**
+ * One critique verifier's vote on one plan finding (#405).
+ *
+ * `VOTE_SCHEMA`'s shape exactly - the same keys, the same three votes and the
+ * same evidence item, because `parseVote` and `groundVoteEvidence` read both -
+ * worded for a plan rather than a code change. A schema of its own rather than
+ * a rewording of `VOTE_SCHEMA`, which the review's verifiers are sent and which
+ * stays byte-identical.
+ */
+export const PLAN_VOTE_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['vote', 'reason', 'evidence'],
+  properties: {
+    vote: {
+      type: 'string',
+      enum: ['real', 'not-real', 'cannot-tell'],
+      description:
+        'real = the defect the claim describes exists in this plan. not-real = it does not, and ' +
+        'you can show why. cannot-tell = anything in between, including any doubt.',
+    },
+    reason: {
+      type: 'string',
+      description: 'Why, in a few sentences. For not-real, the concrete reason the claim is false of this plan.',
+    },
+    evidence: {
+      type: 'array',
+      description:
+        'Where to look. Needed for not-real: a not-real vote whose citations resolve to ' +
+        'nothing is counted as cannot-tell. May be empty for real and cannot-tell.',
+      items: FINDINGS_SCHEMA.properties.findings.items.properties.evidence.items,
+    },
+  },
+} as const satisfies object;
+
 /** Codex answering Claude's blocking questions. */
 export const ANSWERS_SCHEMA = {
   type: 'object',
@@ -604,6 +651,47 @@ export const FIX_SCHEMA = {
             description:
               'fixed = you changed the code to resolve it. rebutted = you believe it is incorrect ' +
               'and changed nothing for it. deferred = real, but separable work you did not do here. ' +
+              'not-addressed = none of these.',
+          },
+          reason: { type: 'string', description: 'Why, in a sentence or two.' },
+        },
+      },
+    },
+  },
+} as const satisfies object;
+
+/**
+ * A findings revision's turn (#453): the plan, plus what the planner did with
+ * each finding it was shown. `PLAN_SCHEMA`'s properties in their order with a
+ * required `dispositions` after them, so the plan half is read by `parsePlan`
+ * unchanged and the dispositions are split off before anything stores the plan.
+ *
+ * Sent only on `revise-<n>`, the revision answering a critique: the first plan
+ * turn and an answers-only revision send `PLAN_SCHEMA` exactly as before. The
+ * enum is `FIX_SCHEMA`'s, worded for a plan. It ends on `reason`, a non-null
+ * string - see the key-order note in `FINDINGS_SCHEMA`.
+ */
+export const REVISE_SCHEMA = {
+  ...PLAN_SCHEMA,
+  required: [...PLAN_SCHEMA.required, 'dispositions'],
+  properties: {
+    ...PLAN_SCHEMA.properties,
+    dispositions: {
+      type: 'array',
+      description: 'One entry per finding id listed in the prompt, and only those ids.',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['id', 'disposition', 'reason'],
+        properties: {
+          id: { type: 'string', description: 'The finding id, exactly as listed.' },
+          disposition: {
+            type: 'string',
+            enum: ['fixed', 'rebutted', 'deferred', 'not-addressed'],
+            description:
+              'fixed = you changed the plan to resolve it. rebutted = you believe it is incorrect ' +
+              'and changed nothing in the plan for it; explain why in plan_md as well. deferred = ' +
+              'real, but separable work you recorded in out_of_scope rather than planning here. ' +
               'not-addressed = none of these.',
           },
           reason: { type: 'string', description: 'Why, in a sentence or two.' },

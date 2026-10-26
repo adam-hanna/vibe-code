@@ -153,6 +153,53 @@ saying why, so `RoundCard.questions` is attached by arrival through the same `du
 census goes through. It is a count and a link rather than the text — the column is 364px and a
 question is a paragraph — and the Questions tab is where the text is, one section per round.
 
+**A person settles the assumptions; the threshold does not move (#465).** A run defers an
+advisory question the answerer declines and carries on with the planner's fallback. A round
+later the planner can ask the same thing in other words, now blocking, and the person answers
+that. `reconcileAssumed` retires an assumption only when a person answered *the same question*,
+exactly or at `REPHRASE_THRESHOLD`. In the bench run (`lru-h`) the two wordings scored
+**0.395**, so `ASSUMED.md` called a decision made one round later a guess. The plan was right
+and the record was wrong. Lowering the threshold is not the fix: it was measured
+(`src/similarity.ts`), and the highest-scoring pair in the #65 census that was *not* one
+question scored 0.4. A threshold that caught 0.395 would match questions that differ.
+
+So the person decides, in the file they are already editing. `writeEscalation` lists the
+assumptions still in force under `## Assumptions the run is already making`, on every kind of
+stop, before `## Change a severity`. Each is `### A<n>. <question>` with a
+`**Your decision:**` blockquote. The rules that keep it from disturbing anything else:
+
+- **The marker is not `**Your answer:**`.** `cmdResume` picks its path by whether the file
+  holds that string *anywhere*, and `parseHumanAnswers`, `src/answers.ts` and the app's reader
+  key on it. A different marker leaves all of them as they were, and a findings stop stays a
+  findings stop.
+- **Planner text is rendered inert.** The question and its fallback are free strings, so
+  `inert` puts each on one line and collapses every run of asterisks to one. Nothing can begin
+  a `### ` or `>` line, and no `**Your answer:**` survives at any asterisk count.
+  `normalize(inert(q)) === normalize(q)`, so the heading still matches.
+- **`parseDecisions` reads only that section,** from its heading to the next `## `. Finding
+  titles are rendered verbatim as `### ` headings, so a finding titled `A1. …` would otherwise
+  be read as a decision nobody wrote.
+- **Refuse, never repair (#141).** The resume stops with nothing spent and the file in place
+  when a block has:
+  - text off the `> ` lines;
+  - a heading that matches no deferred question (a stale file);
+  - two blocks for one question;
+  - a `**Your answer:**` typed anywhere in the section.
+- **The heading text is the key, never the number.** Answers in the same file change which
+  assumptions remain before decisions are read.
+- **A decision is a human answer to that exact question.** It goes through
+  `recordHumanAnswers` under the deferred question's own stored wording, so it is retired by
+  the exact rule and `REPHRASED.md` says nothing. On the answers path it joins the person's
+  answers in `pendingAnswers`. On the findings and moves-only paths it does not, because that
+  would buy a revision the stop did not ask for; `userDecisions` carries it to every turn.
+  Decisions never stand in for a blocking answer: a question stop with only decisions filled
+  is still "No answers found".
+
+`ASSUMED.md` meanwhile lists the person's answers after the assumptions, under
+`## Your answers in this run`, verbatim and **matched to nothing**. It is where a reader checks
+whether one already settles an assumption the run could not pair it with. Showing and filling
+decisions in the window or on the phone is a follow-up.
+
 **`vibe plan` is deliberately not a row.** #140 asked for `planOnly` to resolve to
 `gates['plan-approved'] = 'stop'`; it does not, because they are two different things rather
 than two mechanisms for one. `planOnly` says there is no next phase, so the run *completes* —
@@ -192,8 +239,25 @@ comment: a real plan may say "see below" in a sentence, and a substring rule wou
 
 That field is what makes a human finding possible without corrupting the record. `src/raise.ts`
 holds the whole surface: a block appended to every `NEEDS-INPUT.md`, parsed on the same resume
-that reads the answers, merged into `pendingFindings` rather than replacing them. Four things
+that reads the answers, merged into `pendingFindings` rather than replacing them. Five things
 about it are load-bearing:
+
+- **Agent text in the file cannot carry a marker** (#472). Every parser of `NEEDS-INPUT.md` keys
+  on markers: `cmdResume` on `**Your answer:**` anywhere in the file, `parseHumanAnswers` on
+  line-initial `### `, this module on its `**…:**` and `*…:*` labels, and `parseDecisions` on the
+  assumptions heading. The rest of the file is the agents' words, which used to be written as
+  they came, so a finding quoting `**Your answer:**` sent a findings stop down the answers path,
+  which refused with *No answers found*. Of 501 findings in the archive and the bench, 5 quoted
+  it, all from #465's own run reviewing that feature. `literal()` (`src/literal.ts`) now goes
+  over every agent-written field `writeEscalation`, `describeVotes` and `moveSection` render: the
+  task, the stop message, each question's text, options and default, each finding's title,
+  detail and fix, the guard's reason and the vote reasons. It escapes the asterisks of each
+  marker in `MARKERS` and puts a backslash before a `#`, `>` or `*` that starts a line (after up
+  to three spaces), and changes nothing else, so text holding none of these renders byte for
+  byte as before. A field rendered after other text on its line is escaped only after a
+  newline, so a title such as `#flush drains #pending` is untouched. The parsers did not move.
+  `MARKERS` is checked against the parsers' own constants and every `**Label:**` the raise and
+  move templates print, so a new marker there fails a test until it is listed.
 
 - **Grounding runs; the inert guard does not.** A `*File:* src/run.ts:120` is an `Evidence`
   entry of kind `code`, so `checkEvidence` is nearly a no-op on one — but running it keeps one
@@ -394,6 +458,19 @@ is that such an edit can no longer pass in silence. `src/judge.ts` decides which
   moved, or the test asserted more than the thing it guards. It is never justified because it
   makes the gate pass. Adding a test is not suspicious. For `vibe.config.json`, the question is
   whether the plan called for the change.
+
+  **"Added" is measured from where the run started, so the prompt says what that hides**
+  (#463). A test file the run itself created is listed as `added` in every review round, so a
+  later commit of the same run that weakens it, such as a fix round loosening an expected
+  value to agree with the code, used to read as a new file and be judged justified. On the
+  bench (commits that weakened tests to hide planted bugs, reviewed with no finders) the
+  reviewer judged them justified 4 times in 4, while noting the assertions "miss several
+  defects". The prompt now tells it to read the file's history on the branch (`git log -p`)
+  and to judge every change after the commit that first added it by the editing rule. With
+  that sentence: 3 of 4 judged not justified, and 4 of 4 legitimate fix-round edits to such
+  files (two lru, two retry, with deletions) still judged justified. It is a sentence, not a
+  record: the facts listed stay the diff from the base, and the history is read by the
+  reviewer, so a file whose history it does not read is judged as before.
 - **`unjudged` is the fail-closed answer.** A listed file with no verdict from the part that
   showed it is recorded as `unjudged`, never as justified, because that is the case the issue
   exists to catch. A verdict naming an unlisted file attaches to nothing. If two verdicts name
@@ -405,6 +482,11 @@ is that such an edit can no longer pass in silence. `src/judge.ts` decides which
   A round that touches no judge file gives the reviewer a byte-identical prompt and writes no
   field. `test_changes_judged` is narration with no event, because the record is already durable
   in two places. It is said at `warn` only when a file is unjudged or not justified.
+
+A round with review finders records every reporting seat's verdict, not only the reviewer's
+(#404): each file gains `verdicts`, one entry per seat in config order, and `verdict` becomes
+their combination, failing closed (the rule is under the finders, below). A round with no
+finders has no `verdicts` key anywhere, so its record is byte-for-byte what it was.
 
 **Nothing under `.vibe/runs/` is read through a link, and there is one predicate for all
 three levels.** `linkageOf` in `src/run.ts` is `lstat(...).isSymbolicLink()`, which is true of
@@ -532,9 +614,8 @@ by a spec built from the finder's entry (through the same `specFor` `tableFor` u
 timeout, the path style, memory, the holder's name, the charge and the heartbeat follow the
 seat with no code of their own. `roles.reviewer` is the first finder, byte for byte; with
 `review.finders: []` the round is exactly what it was, with no `foundBy`, no new event and no
-new narration. Finders run in sequence after the first has reviewed every part. Running them at
-once needs the cancel latch, the charge seam, `saveState` and the heartbeat proven safe with two
-children, and is its own change.
+new narration. Finders run after the first has reviewed every part, up to `review.maxParallel`
+of them at once (#403; `1`, the default, is one after another) - see *Seats at once* below.
 
 - **The dispatch guard.** `claudeDispatch` asks `perTurnSlot(slot)` (`src/slots.ts`) before
   `shouldRotate` and before `recordTurnContext`. Both are about `main`: asked with a finder's
@@ -550,6 +631,18 @@ children, and is its own change.
   normalised path, same line, both present) or when `similarity(title) >= REPHRASE_THRESHOLD`.
   That threshold was measured for question rephrasing and recycled finding labels, not for this
   population, and is reused rather than tuned until runs with several finders exist to measure.
+  **Near citations are flagged to the fixer, never merged** (#462). The bench's panel reviews
+  showed one bug reported by two seats under two ids, cited lines a step apart (153 against
+  154, 267 against 266). A census of every cross-seat pair the merge kept apart while citing
+  one file, 31 of them labelled by hand, found a 1-line gap was the same defect 6 times and two
+  different ones 2 times; 2-3 lines, 2 and 0; 5 or more, 0 and 8. Titles did not separate the
+  1-line pairs. So any window that merges the duplicates also merges real defects, which hides
+  one from the fixer, and the merge rule stays as it was. `nearPairs` finds pairs from disjoint
+  seats within `NEAR_LINES` (3, the widest same-defect gap) and `fixPrompt` names them under
+  *Findings that may be one defect*; the fixer, which reads the code, decides. Only findings
+  with `foundBy` take part, so a review without finders renders the prompt it always did. What
+  it does not reach: a pair with no line on one side (the semver operator pair cited a path
+  only), and the vote, which still votes each finding of a pair on its own.
   Greedy in finder order; one finder is never merged with itself. The winner is the most
   blocking (`SEVERITY_RANK`, now in `src/validate.ts`), ties to the earliest; it brings its own
   text and its own `downgraded`, because a guard's record is never moved onto a finding it did
@@ -558,9 +651,21 @@ children, and is its own change.
   id. `foundBy` keeps the id each finder used, which is also the id its own downgrade events
   name. After the merge the pipeline is unchanged: `proveFindings`, then the artifact once, then
   `recordPendingFindings`.
-- **The first finder owns `reviewCoverage` and `testChanges`** (decision 6). Additional
-  finders' test verdicts are dropped: two judges' verdicts on one file would need a rule for
-  disagreeing, and inventing one is out of scope.
+- **The first finder owns `reviewCoverage`** (decision 6).
+- **Every seat's test verdict is kept, and combined failing closed** (#404, which supplies the
+  rule decision 6 declined to invent). Per file, over the seats that reported - the reviewer and
+  every finder that did not fail: any *not justified* makes it not justified; otherwise any
+  *unjudged* makes it unjudged; only a unanimous *justified* is justified. A dissent is never
+  outvoted, because a verdict is one judge's statement about the judge, and #112 records it
+  rather than adjudicating it; a majority waving a rewritten assertion through is the silence
+  the record exists to break. A failed finder contributes nothing, as it contributes no
+  findings, so it cannot make a file unjudged. Each seat's verdicts are attached per diff part
+  by `attachVerdicts`, so "first wins" still holds within a seat. The combined record is written,
+  and `test_changes_judged` said with `seats` and `disagreed`, only after the finders return;
+  until then `state.testChanges` is the reviewer's own, so a stop during the finders leaves
+  what a round without them would have. `disagreed` counts files where one seat said justified
+  and another not justified. The end-of-run warning names each not-justified file's seats as
+  `<seat> <provider>/<model>`.
 - **A failed additional finder does not end the round** (decision 7). An `Escalation` or a
   `Cancelled` propagates as it would for the first finder; anything else is recorded as
   `review_finder_failed` and that finder contributes nothing. Losing an extra seat can only leave
@@ -571,26 +676,57 @@ children, and is its own change.
   from scratch, so a `review_finder_failed` from the attempt it replaced must not lower the
   count. The cost half comes from `chargedTurns`, `turn_failed` included. The window's "found by
   n of m" takes `m` from the same frame, which `replayRun` carries, and never the configured count.
-- **⚑ The first finder keeps its memory.** `roles.reviewer` keeps its conversation across
+- **The first finder keeps its memory, and that stays** (#435). `roles.reviewer` keeps its conversation across
   rounds (the Codex `review` thread by default, Claude's `main` session if it is seated on
   Claude) while additional finders are fresh every round, so it is less independent than the
   others. Accepted, because a fresh first seat would break the default run's identity.
-  **Still open (#435).** The trade is memory of what it raised and of the fixer's reports
-  (fewer findings re-raised under new ids) against independence (fewer findings anchored on its
-  own last round). What would settle it is a measurement across runs with `review.finders` set:
-  how often, from round 2 on, the first finder re-raises a finding the fixer reported fixed or
-  rebutted, against how often a fresh finder does, read from `foundBy` and
-  `fix-dispositions-<n>.json`. As of #435 no such run exists: none of the 27 runs archived in
-  the main checkout's `.vibe/runs/` has a `review-<n>-f<k>` or `vote-` turn, so there is no
-  number and none is given. #435 changed only the user-facing pages (`configuration.md`,
-  `how-it-works.md`, the README's `review.finders` row), which now say it. The facts they
+  **Decided, on a measurement that cannot settle it** (2026-10-26). The trade is memory of what
+  it raised and of the fixer's reports against independence from its own last round. The test
+  was to be how often, from round 2 on, the first finder re-raises a finding the fixer reported
+  fixed or rebutted, against how often a fresh finder does. The 27 archived runs had no finder
+  turn, so a bench was built to produce them: 45 review loops on a throwaway library, 24 with a
+  finder, some on commits with planted bugs and a weaker fixer to provoke incomplete fixes. It
+  gave 12 findings in rounds 2 and later. The reviewer re-raised 2 under the same id, both after
+  the fixer reported them fixed, and both were then fixed in the next round. A fresh finder's
+  re-raise cannot be counted: it never has the old id, and matching by citation counted
+  neighbouring bugs as the same one. Nothing measured favours a fresh first seat, and making it
+  fresh would change the default run, so it stays. The user-facing pages (`configuration.md`,
+  `how-it-works.md`, the README's `review.finders` row) say so. The facts they
   state: a Codex reviewer is on `SLOTS.review`, carried under `codex.persistSession`, and
   `--no-codex-session` makes it fresh along with every Codex role; a Claude reviewer is on
   `main`, the planner's and implementer's session, whose `persists` is constant; additional
   finders are on `fresh-claude`/`fresh-codex` and get `hasMemory: false`. Every seat gets the
   same `latestReport`; only the carried reviewer also has its earlier findings and earlier
-  reports in context, and no reviewer is shown the dispositions. If it changes, it goes behind
-  a setting or is justified by that measurement, and a run with no finders stays byte-identical.
+  reports in context, and no reviewer is shown the dispositions. Reopening it needs a way to
+  count a fresh finder's re-raise, and then the bench in #435's comments is the place to run it.
+- **One finder by default, and no vote** (#447, the owner's decision of 2026-10-26). The same
+  bench measured the panel: the finder caught 3 bugs the reviewer missed, and 3 of 4 reviews
+  with it flagged a test edit that hid bugs against 0 of 4 without it; all 8 bench votes
+  confirmed their finding, 1 of the archive's 2 demotions was wrong, and the votes cost 3.8M
+  tokens. The finder added 6.9M tokens to the reviewer's 29.6M. So a run with no
+  `review.finders` in any layer gets one seat on the vendor `roles.reviewer` is not on, no
+  model, `high` when it is Claude and no effort (so `codex.effort`) when it is Codex, and the
+  bench's focus. **Resolved, not stored:** `DEFAULTS.review.finders` stays `[]` because the
+  seat depends on the reviewer's provider, which any layer or `--role` moves, so
+  `withDefaultFinders` in `src/config.ts` applies `defaultReviewFinders(roles)` once the layers
+  are merged and `--role` applied, unless a layer *named* the key (present in its `review`,
+  `[]` included). `loadConfig` calls it, and so does `serve.ts` for `globalEffective`, which
+  does not go through `loadConfig`. A table on one provider gets none: a default must not add
+  a CLI nobody chose. **Never resolved on a resume or a fork:** a run's finders are fixed when
+  it starts. The stored-config road (`withProjectFile`/`applyOverrides`) never calls it, and
+  the fallback for a run with no stored config passes `loadConfig`'s
+  `{ defaultFinders: false }`, from `resumeConfig` and `fork.ts` only. **Where the
+  `(default)` mark comes from:** `LoadedConfig.findersDefaulted`, outside `Config`. Since
+  `configPath` already reaches `state.json` (`startRun` stores the `LoadedConfig`),
+  `storedConfig` strips the new field at every store. `seat-runners-pin`'s
+  `explicit-empty-finders` case, recorded before the change, pins that a loop naming `[]` does
+  exactly what it did and that `storedConfig` of its config is the bytes stored before; it
+  drives `orchestrate` directly, so what `startRun` actually writes is read off disk by
+  `default-review-finder.test.ts`, as the resume and fork fallbacks are. The mark is not inferred by comparing against
+  `defaultReviewFinders`, so a hand-written seat equal to the default is not labelled. The
+  settings screen's "use the default" sends `review.finders: null`, which
+  `tidyReviewFinders` turns into a deleted key (and drops an emptied `review`); `null` means
+  nothing new at load time.
 
 **Part C runs the vote.** Inside `runReview`, after the merge and `proveFindings` and before
 the return, so the caller still writes `code-review-<n>.json` once and the votes are in it
@@ -600,8 +736,9 @@ the gate. With `review.verifiers: []` nothing runs: no turn, no `votes` key, no 
 - **What is voted on.** Every P0 and P1 left after the reproducers, except one whose own
   reproducer *reproduced* - that is an observation, and a vote has nothing to add to it; it
   blocks whatever `unconfirmedP0` says. A finding a guard already moved is P2 by then, and P2
-  and P3 are never voted on. Each eligible finding goes to every verifier, in sequence (finding
-  1 to every verifier, then finding 2), labelled `vote-<r>-<n>-v<k>`: `<n>` is the finding's
+  and P3 are never voted on. Each eligible finding goes to every verifier - every ballot of the
+  round in one pool of up to `review.maxParallel` at once, which at `1` is finding 1 to every
+  verifier, then finding 2 (#403, *Seats at once* below) - labelled `vote-<r>-<n>-v<k>`: `<n>` is the finding's
   1-based place in the report as voted on, `v1` is `review.verifiers[0]`. `seatOf` reads it
   back as `kind: 'vote'`, `verifier: k`.
 - **A verifier is a reviewer whose seat was swapped and whose job is a vote.** `seatTable(roles,
@@ -653,6 +790,202 @@ the gate. With `review.verifiers: []` nothing runs: no turn, no `votes` key, no 
   `adjudicate`'s Codex sandbox verdict counts a Codex that only a seat uses (`seatProviders`).
   Both agents were already probed on every run. A seat's turn that fails mid-turn names its own
   line (`TurnRequest.seatPath`), not `roles.reviewer`.
+
+### One finder runner and one vote runner, for two phases (#452)
+
+The review's finders and vote (#388) and the plan critique's (#405) are one mechanism:
+`runFinderSeats` and `runVoteSeats`, module-level in `src/orchestrator.ts`. #405 first built the
+critique's beside the review's, because #403 was rewriting the review's at the time, and the two
+had already drifted (the review's through `runSeatGroup` with labelled frames, the critique's in
+plain loops). Each runner takes a phase descriptor, `FinderPhase` or `VotePhase`, of data and
+small callbacks, so the shared code never asks which phase it is running for. Running a seat,
+absorbing its failure, merging in config order, filling ballot slots and tallying them in order
+are written once. The descriptor holds the rest:
+
+| | Review (built in `runReview`) | Critique (`critiqueFinderPhase`, `critiqueVotePhase`) |
+|---|---|---|
+| `role`, first seat | `reviewer`, `roles.reviewer` | `critic`, `roles.critic` |
+| `round` | `state.reviewRound` | `state.planRound` |
+| `parts` (a finder's turns) | one per diff chunk, `review-<n>-f<k>[-part<i>]` | one, `critique-<n>-f<k>` |
+| finder prompt | `withFocus(reviewPromptFor(i, false, false), focus)` | `withFocus(critiquePromptFor(…, false), focus)` |
+| `table` | `seatTable(roles, setting)`, and `VOTE_SCHEMA` for a verifier | `seatTable(roles, setting, undefined, 'critic')`, `PLAN_VOTE_SCHEMA` for a verifier |
+| `failed`, `merged` | `review_finder_failed`, `review_finders_merged` (data has `parts`) | `critique_finder_failed`, `critique_finders_merged` |
+| `exempt` from the vote | a P0/P1 whose reproducer reproduced | a P0/P1 marked `defer: true` |
+| vote `prompt` | `votePrompt`, with the diff parts its evidence cites | `critiqueVotePrompt`, with the plan and `plan-<n>.json` |
+| vote `label` | `vote-<n>-<i>-v<k>` | `critique-<n>-vote-<i>-v<k>` |
+| `tallied` | `review_votes_tallied`, `…; N reproduced, not voted` | `critique_votes_tallied`, `…; N deferred, not voted` only when N > 0 |
+| `quorum`, `unconfirmedP0` | `cfg.review.*` | `cfg.critique.*` |
+| `maxParallel`, `setting` | `cfg.review.maxParallel` | `cfg.critique.maxParallel` |
+
+The sentences and `data` of the merged and tallied events come from the descriptor, so each
+phase keeps its own words and keys byte for byte. A `FinderPhase` may also name an `extra`, a
+reading of each part's output that the runner keeps per part in the finder's slot without
+interpreting it (#404): the review sets `parseTestVerdicts`, the critique sets none.
+`runFinderSeats` returns `{ report, slots }` - the merged report and the reporting finders'
+slots in config order - and both callers unwrap `report`; only the review reads `slots`, to
+combine the test verdicts itself. A finder's parts are always a list: the
+review's chunks and the critique's single turn have the same shape, and more than one part is
+merged by `mergeReviewReports`. The step line is `<holder> <doing> (finder <k>)`, and a seat's
+`turn_started` and `turn_finished` carry the phase's `kind` (`review` or `critique`), or `vote`.
+`seat-runners-pin.test.ts` pins a whole round of each phase at `maxParallel: 1`: every
+narration, event, label, prompt and artifact. It was recorded on the code from before the
+runners were unified, under `tests/fixtures/seat-runners-pin/`.
+
+### Seats at once (#403)
+
+#388 ran the seats in sequence on purpose: several live children of one run first needed the
+cancel latch, the charge seam, `saveState` and the heartbeat proven safe. #403 is that proof,
+and `review.maxParallel` (a whole number from 1, default `1`) is the bound. At `1` everything
+here is the sequential order, byte for byte - labels, prompts, events, narration and artifacts -
+because the groundwork rule says the setting changes nothing until somebody raises it.
+
+The plan critique has the same bound under its own name, `critique.maxParallel` (#452, default
+`1`), and everything below holds for its group as it does for the review's. It is a setting of
+its own, not a reuse of `review.maxParallel`: each section already has its own `quorum` and
+`unconfirmedP0`, the two panels can differ, and sharing the bound would silently have changed the
+critique for anyone who had already raised the review's. That is a behaviour change to an
+existing config, which the groundwork rule forbids. `runSeatGroup` takes the setting's name, so
+its backstop says which bound it refused.
+
+- **What overlaps.** `roles.reviewer` reviews every part first, **alone** (as `roles.critic`
+  critiques the plan first, alone): it keeps a
+  conversation, it can rotate, and it already overlaps a compaction under
+  `withConcurrentCompaction`; keeping it alone keeps all three paths exactly as they were. Then
+  the finders run as one group, up to `maxParallel` at once - each finder's own parts still in
+  sequence. Then the reproducers (`proveFindings`), in order, as before. Then every ballot of the
+  round - each eligible finding times each verifier - as a second group.
+- **`runSeatGroup` (`src/seat-group.ts`) decides when, never what.** Each task writes into a slot
+  its caller owns, indexed by config order: a finder's report by `k`, a ballot by (finding,
+  verifier). The merge reads the finder slots in order and the tally reads the ballot slots in
+  order, so `code-review-<n>.json`, `foundBy`, `votes` and its ballot order, the renamed
+  `-f<k>` ids, FOLLOW-UPS.md and NEEDS-INPUT.md are the same whichever turn finished first
+  (`review-parallel.test.ts` releases them in reverse and compares bytes). Events
+  (`turn_started`, `heartbeat`, `turn_finished`, the charges) stay in real time: they describe
+  what happened.
+- **One failure stays local**, as before: a finder's is `review_finder_failed` and contributes
+  nothing; a verifier's is a `cannot-tell` ballot. The others carry on.
+- **A ceiling or an escalation stops the group, not the run's latch.** A task that rejects -
+  an `Escalation` from `enforceCeilings` after a charge, a `Cancelled`, a rate limit past its
+  cap - stops the group: `stopTurnGroup` (`src/cancel.ts`) kills the group's live children and
+  wakes its waits, nothing more starts, every sibling is awaited (`withConcurrentCompaction`'s
+  `allSettled` rule), and the first error is rethrown. Each killed sibling is charged on its
+  way out by `withRateLimitRetry`'s `chargeFailure`, so its `turn_failed` and `child_ended` are
+  recorded before the `escalation` `cli.ts` records. No report or ballot from the round counts:
+  nothing is merged or tallied, and no `code-review-<n>.json` is written. A budget escalation
+  with siblings live keeps `enforceCeilings`' sentence and adds how many seat turns were live,
+  counting the one that crossed, and the run's totals after all of them were charged. **Why not
+  `requestCancel`:** a ceiling is not a stop. The latch would end the run as *"The run was
+  stopped"*, with the wrong exit code and the wrong reason. A group is found through
+  `AsyncLocalStorage`, for the reason the latch is a module variable: no token is threaded
+  through `runTurn`, the adapters and `run()`.
+- **A stop is the latch, unchanged.** `requestCancel` kills every registered child, so a stop
+  with three verifiers live kills all three, `proc.ts` refuses a fourth, and the run ends
+  `needs-input` with nothing tallied.
+- **A critique's group runs beside a rotation, and a group stop cannot reach it.** The critic,
+  the critique's finders and its vote all run inside `withConcurrentCompaction`'s callback, so a
+  rotation of the planner's conversation (`compact`) can be live beside the group. The rotation
+  is started from `planPhase`'s async context, before `runSeatGroup` creates the group, so it
+  never joins the group's `AsyncLocalStorage` scope: `stopTurnGroup` kills only the seats.
+  `withConcurrentCompaction` is unchanged. Its `allSettled` waits for the rotation to settle,
+  the seat group's error wins, and a ceiling the rotation crosses is outranked and said, so the
+  run records exactly one escalation (`critique-parallel.test.ts`).
+- **The two in-flight guards stay run-level.** `guardTurnSpend` now counts the run's spend plus
+  every live turn's in-flight spend in the run's scope, not just its own; tripping it is still a
+  run stop through the latch, and with several turns live its reason names the combined figure
+  and the turns it counted. **Codex reports nothing in flight**, so concurrent Codex turns count
+  as zero until they are charged and can carry the run past `budget.maxTokens` by up to
+  `maxParallel` turns' spend. That is stated in `docs/configuration.md`, never estimated.
+  `guardTurnQuiet` is unchanged: **a silent finder or verifier stops the whole run**, as a silent
+  sequential one did; it does not become one `cannot-tell` ballot.
+- **Why it is safe.** `applyCharge` is synchronous and runs in the provider result's own
+  continuation, so two turns finishing together are both charged whole. `saveState` is
+  synchronous and atomic over the one in-memory `RunState`, and `inFlight` keys stay unique
+  because seat labels are unique per round. The heartbeat's live-turn map was built for
+  overlap already. Finders and verifiers sit on per-turn fresh slots, with no session and no
+  rotation. The one shared thing that was not safe was the Codex rate-limit monitor's connect,
+  which a second read could use mid-handshake; every read now waits on the one connect.
+- **What tells the window.** Only above `1`, a seat's `turn_started` carries its `label` and a
+  `turn_finished` follows it; the window keeps live turns by label (see
+  `core-and-window.md`). A `model_said` line is prefixed with its turn's label whenever another
+  turn is live in the run, so interleaved prose in the transcript stays readable; every other
+  per-turn line already names its turn.
+
+## Finders and a vote for the plan critique (#405)
+
+#388 gave the review its panel and marked the critique out of scope (⚑2). This gives the critique
+the same panel, under a `critique` section of its own: the owner may want a different panel for
+plans, or none, and a plan vote costs one turn per blocking finding per verifier while a review's
+scales with what the diff turned up. The section takes `review`'s keys (four, and
+`maxParallel` since #452) and is validated by the same `validateSeats` under `critique.` paths, merged by the same `mergeReview` (a project's list
+replaces the global one whole), and read by `readFinders(cfg, 'critique')` and
+`readVerifiers(cfg, 'critique')`. With both lists empty a plan round is exactly what it was: no
+turn, no `foundBy`, no `votes`, no event, and the critic's prompt is `critique-round1.txt` byte for
+byte. Nothing here measures how often a critique finding is wrong, so it ships off and the docs say
+nothing about accuracy: the archive has no record of what the planner did with each finding.
+
+- **Through the review's runners** (#452). `critiqueFinderPhase` and `critiqueVotePhase` build
+  the descriptors `runFinderSeats` and `runVoteSeats` run, so the critique's seats share the
+  review's code for running a seat, absorbing its failure, merging and tallying (*One finder
+  runner and one vote runner* above). They run in a `runSeatGroup` bounded by
+  `critique.maxParallel`, never by `review.maxParallel`, and at `1`, the default, a plan round is
+  byte for byte what it was before #452.
+- **The order within a plan round.** Critic, then finders, then the merge, then the vote, then
+  `refusePlaceholderPlan`, then `plan-critique-<n>.json`, `collectDeferred`, FOLLOW-UPS.md and
+  `recordPendingFindings`, all inside `withConcurrentCompaction`'s callback; then the gate. The
+  artifact holds the merged, voted findings, so everything downstream reads one report.
+- **A critique seat is a critic whose seat was swapped.** `seatTable(roles, setting, schema,
+  'critic')` copies the critic's row onto the seat's agent and a fresh slot (`seatSlot`), so the
+  timeout, charge, heartbeat, path style and holder's name follow it. `roles.critic` stays the
+  first finder (`foundBy` seat `roles.critic`) and keeps its `judge` thread. A finder is one turn
+  per plan round, `critique-<n>-f<k>`, handed `critiquePromptFor` with `hasMemory: false` plus its
+  focus (`withFocus`, whose heading still says "review" so the review's prompts do not move). From
+  round 2 that is the no-memory `continuityNote`: the #435 asymmetry, documented and not solved.
+  A failed finder turn is `critique_finder_failed`; `critique_finders_merged` counts who reported.
+- **What is voted on.** Every P0 and P1 after the merge, except `defer: true` and anything a guard
+  already moved to P2. There is no reproducer exemption: the critique has none. The `defer`
+  exclusion is defence only, because `parseFindings` clears `defer` on every P0 and P1 a turn
+  returns; `critique-votes-loop.test.ts` pins that a "deferred" P1 reaches the vote as a P1.
+- **Its own prompt and schema.** `critiqueVotePrompt` and `PLAN_VOTE_SCHEMA`, not `votePrompt` and
+  `VOTE_SCHEMA`: the review's are sent to the review's verifiers and `vote-basic.txt` pins them, and
+  the question differs. *Does this defect exist in this plan* covers the plan contradicting the
+  repository, missing what the task requires, getting a step wrong, or taking on what the task rules
+  out, and none of those is a diff. A verifier is shown the claim, the task, `plan_md`, the
+  assumptions, `out_of_scope`, the acceptance criteria, REVIEW.md and the read-only repository; by
+  construction never the id, the severity, `foundBy`, the author, how many raised it or another
+  ballot. Labels are `critique-<n>-vote-<i>-v<k>`, `<i>` the finding's place in the merged report.
+- **The outcomes are `applyVotes`'**, under `critique.quorum` and `critique.unconfirmedP0`. An
+  unconfirmed P1 goes to P2 with the tally as its reason (`movedByVote`). The revision prompt marks
+  it `*Unconfirmed by vote:* <tally> - non-blocking.` (`voteNote`, plan side only - `fixPrompt`
+  still shows a vote-moved review finding as a plain P2). On approval it goes to the implementer
+  through `planNonBlocking` under `loop.fixNonBlocking`: `isPlanToAddress` takes it although
+  `isDeferrable` does too, and `approvePlan` leaves it out of `declined`, because `declined` tells
+  the implementer a finding is real and belongs elsewhere. It is listed in FOLLOW-UPS.md as
+  unconfirmed by vote either way.
+- **`halt`.** `planPhase` throws the needs-input `Escalation` after `sayFindings` and before the
+  gate's branches, once the artifact and the pending findings are written. A plain resume takes the
+  pending findings to the revision with the P0 blocking; a resume after a person demoted it under
+  *Change a severity* takes #394's accept-on-demotion path. Neither votes on that round again.
+- **The guards see what actually blocked.** The gate, `blockingFindings`, `p1Rounds` through
+  `guardProgress` (with `planStall`, the repeat census and `maxPlanRounds`) and `guardPlanBudget`
+  all read the voted report, so a vote-moved P1 is never a blocker id in `p1Rounds` and churn the
+  vote rejects never trips `loop.stallAfter`. Finder and verifier turns are not plan rounds:
+  `planRound` moves only with a revision. Question rounds come before the critique and are
+  unchanged.
+- **Every round votes afresh.** A finding raised again under the same id is voted on again by
+  fresh verifiers that know no earlier tally; nothing remembers one.
+- **Everything that names the review names the critique.** Events `critique_finders_merged`,
+  `critique_finder_failed` and `critique_votes_tallied`, carried by the replay; `seatOf` reads the
+  finder and vote labels into the `critique` phase, and the summary's review lines count only
+  `review`-phase seats; `Critique finders:`/`Critique votes:` summary lines; unconfirmed plan
+  findings are listed under their own sentence (split by `raisedBy: 'critic'`); doctor's critique
+  block and the pre-run `Critique finders:`/`Critique verifiers:`/`Critique vote:` lines (the last giving the quorum and `unconfirmedP0`); `describeMcp`'s critique
+  rows and `mcpRefusals`' critique grantees; `seatProviders` for the sandbox preflight; and the
+  Settings section "who else critiques the plan, and who votes". The window folds the two critique
+  frames into the same `finderMerges` and `voteTallies` as the review's, so a critique card carries
+  its merge and `ReportPane` draws `foundBy` and votes from `plan-critique-<n>.json` as it does for
+  a review.
+- **Cost.** One turn per plan round per finder; one turn per voted finding per verifier per round;
+  all under `budget.maxTokens`, with no separate ceiling.
 
 ## What the fixer did with each finding (#393)
 
@@ -726,6 +1059,79 @@ read it. Now it is data, and it is recorded per round.
   (an opened run draws its own replayed frames), or `fix-report-<n+1>.md` is listed without one.
   The second case covers a run from before #393. The decision is `outcomeFor`, a pure function. The finding row, the round
   card and the stats view are unchanged.
+
+## What the planner did with each critique finding (#453)
+
+`critique.verifiers` votes on whether a critique finding is real, but nothing measured how often
+one is wrong. The planner was told to "fix the plan, or say so explicitly in the plan", so a
+rebuttal was prose in `plan_md` with no finding id on it. The archive on 2026-10-23 held 74
+"rebut*" across 24 `plan-<n>.json` files, all prose, and 142 of the 151 P1s with a following
+critique simply stopped being raised, which says nothing about whether they were fixed or
+rebutted. #393's record is now kept for the plan side too.
+
+- **Only the findings revision is asked.** `revise-<n>` is sent `REVISE_SCHEMA`
+  (`src/schemas.ts`) as its per-turn `jsonSchema`. That is `PLAN_SCHEMA`'s properties in their
+  order, plus a required `dispositions: [{ id, disposition, reason }]` with `FIX_SCHEMA`'s enum
+  worded for a plan. It ends on `reason`, a non-null string, per the key-order note. The first
+  plan turn, an answers-only `revise-q<n>`, and every critique that approves send `PLAN_SCHEMA`
+  and the prompt they always did. `revisePlanPrompt`'s findings branch swaps "say so explicitly
+  in the plan" for the `plan dispositions` block (overridable under `prompts`): answer each id,
+  and still explain a rebuttal in the plan, because `plan_md` is what the implementer reads.
+  `revise-answers.txt` and `revise-findings.txt` pin both renderings against develop's.
+- **The plan keeps its shape.** The turn's output is read once. `parsePlan` reads the plan half
+  unchanged, and `parsePlanDispositions` reads the list. `plan-<n>.json`, `state.plan` and
+  everything downstream never see `dispositions`. An unreadable plan fails the turn as before. A
+  readable plan with an unreadable list stands: `plan_dispositions_unreadable` is narrated and
+  recorded, nothing is recorded as `not-addressed`, and a stale `plan-dispositions-<n>.json`
+  is removed. That is #393's rule. A readable list that leaves an id out records it
+  `not-addressed`. An id the planner was never shown is dropped, and a repeated id keeps its
+  first answer. The narration names both.
+- **Where it is recorded.** `plan-dispositions-<n>.json` and a `plan_dispositions` event, with
+  the same shape as `FixDispositions` plus a `vote` per finding. `<n>` is the revision's round,
+  the number in `revise-<n>` and in the `plan-<n>.json` it wrote. `answers` is `n-1`, because
+  `revise-<n>` answers `plan-critique-<n-1>.json`. Every finding the planner was shown is
+  answered, at every severity, including carried, human-raised and vibe-raised findings.
+  `reproducer` is always null, because nothing reproduces a plan finding.
+- **Order against the save.** `recordDispositions`' order: the record is written after the plan
+  parses and before the one `saveState` that persists the plan and consumes the findings it
+  answers. A revision is therefore never consumed without its record. A death in between leaves
+  the findings pending, and the resume revises them in a new plan round (`revisePlan` advances
+  `planRound` again), so the redo is `revise-<n+1>`, not `revise-<n>`. The scorecard keeps the last
+  event per label, so it counts both records. Nothing between the record and the save awaits, so
+  the window is a few synchronous statements wide; the double count is stated, not guarded.
+- **Attribution.** Every seat in `foundBy` when critique finders ran. Otherwise the stamp
+  `state.criticSeat` (round, provider, model or `"default"`), which the critique callback writes
+  beside `plan-critique-<n>.json`, `state.reviewSeat`'s pattern. A resume that moved
+  `roles.critic` therefore credits the model that looked. A stamp for another round, or none,
+  credits nobody. `settleDispositions` was generalized rather than copied: the author whose
+  findings fall back to the stamp, the seat name and the stamp are parameters. So the review path
+  is byte-identical, and only `raisedBy: 'critic'` reaches `roles.critic`. A person's and vibe's
+  findings (the placeholder refusal is one) are credited to nobody and excluded from every figure.
+- **The vote rides along.** Each disposition carries the finding's stored `votes.outcome`
+  (`confirmed | unconfirmed | undecided`), or null when it was not voted on or `readTally` cannot
+  read the record. It is never recounted. This is the cross-tab #405 shipped without.
+- **Raised again.** When the critique of plan `n` is recorded, still inside the callback,
+  `recordRebuttalsRaisedAgain` reads `plan-dispositions-<n>.json` and records
+  `critique_rebuttal_disputed` with the rebutted ids, those raised again under the **same id**
+  (`disputed`), and those not raised again. It is recorded at critique time because a critique
+  that approves has no next revision, and that is exactly when the rebuttal stood. Same id only:
+  a finding raised again under a new id is not seen, and memoryless finders rename ids
+  (`<id>-f<k>`), so for their findings this undercounts. It is never matched by title.
+- **Why the scorecard says "rebutted by the planner", and never precision.** For #393's
+  reason: a rebuttal is the planner's call, not a verdict, and the planner can be wrong too.
+  `vibe stats` prints "Critique findings, by what the planner did" beside the fixer's section:
+  - revisions recorded, unreadable and silent;
+  - rows by seat and by severity;
+  - rebutted and raised again against rebutted and not raised again, with the same-id caveat
+    in the line itself;
+  - the vote outcome × disposition rows.
+
+  Every figure stands beside its `of`, and no percentage is printed. A rebuttal whose next
+  critique recorded no comparison is "could not say", never "not raised again": a critique that
+  stopped before recording it looks the same. "Finding precision" stays in `UNMEASURABLE`,
+  naming both rebuttal rates as the nearest proxies.
+- **The window does not draw it yet.** The events and artifacts are durable. Neither the
+  findings pane nor the replay reads them.
 
 ## Non-blocking findings on a passing round (#425)
 
@@ -877,7 +1283,14 @@ The run then died with `codex wrote no structured output … reason: max_output_
   kind: an `external` entry now ends `ref:"https://…", path:null, line:null, excerpt:null`, and an
   `absence` entry `path:"x", line:null, excerpt:null`. That is 54 of the archive's 812 evidence
   entries (40 `external`, 14 `absence`), down from 742 of 790 that ended on a null `ref` before.
-  Whether those stall, and what changes if they do, is #429.
+  **They don't stall, so the order stays** (#429). After #424, 152 Codex outputs were counted:
+  35 from this repo's archive and 117 from a throwaway bench project whose briefs required spec
+  links and left edge cases open, so reviewers would write `external` and `absence` evidence.
+  They held 62 such entries (39 `external`, 23 `absence`), with no blank run before `path`,
+  `line` or `excerpt` in any of them, and no blank run longer than 2 characters anywhere. A
+  separate evidence object per kind in an `anyOf` was the fix on offer, and it would put Codex's
+  strict output at risk for a stall that was never observed. If one appears, the count above is
+  how to see it.
   `test_verdicts` and the other schemas were left alone, because the archive shows no stall before
   their last fields. The count is how a later archive confirms this, including whether the stall
   simply moved to the new last key.

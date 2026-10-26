@@ -572,7 +572,9 @@ test('config: a project file naming servers loads, and a change to them is a nam
   assert.deepEqual(tableFor(loaded.roles as RoleProviders).reviewer.mcpServers, ['github']);
   // The resume path's `configDiff` names it, so `resume_config` records it with
   // no mechanism of its own.
-  assert.deepEqual(configDiff(DEFAULTS, loaded), ['roles.reviewer']);
+  // Against a project that names nothing rather than `DEFAULTS`: both resolve
+  // the default finder (#447), so the one difference is the one the file made.
+  assert.deepEqual(configDiff(loadConfig(tmp('vibe-mcp-cfg-none-')), loaded), ['roles.reviewer']);
 });
 
 // ---- The words ---------------------------------------------------------------

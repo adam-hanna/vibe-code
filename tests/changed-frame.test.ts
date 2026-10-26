@@ -46,7 +46,7 @@ async function withAppData(body: () => Promise<void>): Promise<void> {
 /** A config seam whose writes succeed and say where they went. */
 const configured: SessionDeps = {
   writeConfig: () => ({ path: '/repo/vibe.config.json' }),
-  config: () => ({ ...DEFAULTS, configPath: '/repo/vibe.config.json' }),
+  config: () => ({ ...DEFAULTS, configPath: '/repo/vibe.config.json', findersDefaulted: false }),
 };
 
 test('a memory save, value or deletion, announces itself once, after its reply', async () => {
@@ -98,7 +98,7 @@ test('reads, refusals and a save with nowhere to go announce nothing', async () 
   });
 
   const refused = session({
-    config: () => ({ ...DEFAULTS, configPath: null }),
+    config: () => ({ ...DEFAULTS, configPath: null, findersDefaulted: false }),
     writeConfig: () => {
       throw new Error('gates["plan-round"] must be one of auto, step, stop');
     },

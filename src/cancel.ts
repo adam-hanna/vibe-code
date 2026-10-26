@@ -1,3 +1,5 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
+
 import type { ChildEnding } from '@src/proc.js';
 
 /**
@@ -44,6 +46,19 @@ import type { ChildEnding } from '@src/proc.js';
  * the next interruptible child **refuses to start** rather than relying on every
  * layer in between to have done the right thing. `clearCancel` exists for the
  * tests and for a resume in the same process, and is not called by the loop.
+ *
+ * ## A turn group is the one kill that is not the latch (#403)
+ *
+ * Review and plan critique seats may run several at once (`review.maxParallel`,
+ * `critique.maxParallel`), and when one of them crosses a ceiling the others
+ * have to die with it - but that is not a stop. A ceiling is an `Escalation` with its own reason and its own exit code,
+ * and setting the latch here would end the run as *"The run was stopped"*, the
+ * wrong sentence about the wrong thing. So a group is a second, scoped set:
+ * every child and wait registered while a group's task is running joins it as
+ * well as the run's set, `stopTurnGroup` kills and wakes that group alone, and
+ * the latch is never touched. The group is found through `AsyncLocalStorage`
+ * for the reason the latch is a module variable: no token is threaded through
+ * `runTurn`, the adapters and `run()`, so no call site can forget one.
  */
 
 /** Why the run was cancelled, or null if it was not. */
@@ -70,6 +85,69 @@ const interruptible = new Set<() => void>();
  * *"I ended a run, and now I can't create a new one."*
  */
 const waiting = new Set<() => void>();
+
+/**
+ * A set of seat turns that end together, without ending the run (#403).
+ *
+ * `reason` latches like the run's own: once a group is stopped, a child or a
+ * wait started inside it is refused rather than relying on every layer between
+ * here and the turn to have noticed.
+ */
+export interface TurnGroup {
+  reason: string | null;
+  kills: Set<() => void>;
+  wakes: Set<() => void>;
+}
+
+const groups = new AsyncLocalStorage<TurnGroup>();
+
+export function newTurnGroup(): TurnGroup {
+  return { reason: null, kills: new Set(), wakes: new Set() };
+}
+
+/** Run `fn` with `group` as the group every child and wait it starts joins. */
+export function inTurnGroup<T>(group: TurnGroup, fn: () => Promise<T>): Promise<T> {
+  return groups.run(group, fn);
+}
+
+/**
+ * Kill every child and wake every wait in `group`, and refuse any new one.
+ * Never touches the run's latch. Returns how many children it killed, on
+ * `requestCancel`'s terms.
+ */
+export function stopTurnGroup(group: TurnGroup, why: string): number {
+  group.reason ??= why;
+  let killed = 0;
+  for (const kill of [...group.kills]) {
+    try {
+      kill();
+      killed += 1;
+    } catch {
+      // The latch on the group is the mechanism; the kill is the courtesy.
+    }
+  }
+  for (const wake of [...group.wakes]) {
+    try {
+      wake();
+    } catch {
+      // As above.
+    }
+  }
+  return killed;
+}
+
+/** The group the current async context belongs to, or undefined. */
+export function currentTurnGroup(): TurnGroup | undefined {
+  return groups.getStore();
+}
+
+/**
+ * Why a new child or wait here must not start: the run's latch first, then the
+ * stop of the group this context belongs to. Null when neither is set.
+ */
+export function stopReason(): string | null {
+  return reason ?? groups.getStore()?.reason ?? null;
+}
 
 /**
  * Ask for the turn in flight to be killed and the run to end.
@@ -128,7 +206,12 @@ export function clearCancel(): void {
  */
 export function registerInterruptible(kill: () => void): () => void {
   interruptible.add(kill);
-  return () => interruptible.delete(kill);
+  const group = groups.getStore();
+  group?.kills.add(kill);
+  return () => {
+    group?.kills.delete(kill);
+    return interruptible.delete(kill);
+  };
 }
 
 /**
@@ -171,7 +254,12 @@ export class Cancelled extends Error {
  */
 export function registerWait(wake: () => void): () => void {
   waiting.add(wake);
-  return () => waiting.delete(wake);
+  const group = groups.getStore();
+  group?.wakes.add(wake);
+  return () => {
+    group?.wakes.delete(wake);
+    return waiting.delete(wake);
+  };
 }
 
 /**
@@ -195,7 +283,7 @@ export function registerWait(wake: () => void): () => void {
  * fifteen minutes doing nothing first.
  */
 export function sleepUnlessCancelled(ms: number, timers = globalThis): Promise<boolean> {
-  if (reason !== null) return Promise.resolve(false);
+  if (stopReason() !== null) return Promise.resolve(false);
   return new Promise<boolean>((resolve) => {
     let done = false;
     // One settle, whichever arrives first. `clearTimeout` and the unregister are

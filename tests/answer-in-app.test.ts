@@ -6,6 +6,7 @@ import path from 'node:path';
 import { ANSWER_MARKER, fillAnswers, unanswered } from '@src/answers.js';
 import { parseHumanAnswers } from '@src/cli.js';
 import { LOCK_FILE } from '@src/lock.js';
+import { ASSUMPTIONS_HEADING, assumptionSection, DECISION_MARKER } from '@src/questions.js';
 import { answerQuestions } from '@src/run.js';
 import { createSession } from '@src/serve.js';
 import { StoredStateError } from '@src/stored.js';
@@ -141,6 +142,31 @@ test('the findings section is left alone', () => {
   assert.match(result.md, /## Outstanding P1 findings/);
   assert.match(result.md, /### a finding/);
   assert.match(result.md, /detail here/);
+});
+
+test('the assumptions section is left alone, and is never a question here (#465)', () => {
+  // The window fills answers; deciding an assumption is not built there yet. So
+  // a fill must leave every decision block byte-for-byte - an empty one and a
+  // filled one - and must not list either as an open question.
+  const section = assumptionSection([
+    { question: 'Which cache?', kind: 'technical', recommended: 'LRU', reason: 'declined' },
+    { question: 'Which queue?', kind: 'technical', recommended: 'FIFO', reason: 'declined' },
+  ]).replace(`${DECISION_MARKER}\n\n> \n`, `${DECISION_MARKER}\n\n> Decided: LRU.\n`);
+  const md = `${template('Which database?')}\n${section}\n## Raise a finding\n`;
+  const tail = md.slice(md.indexOf(ASSUMPTIONS_HEADING));
+
+  const result = fillAnswers(md, [
+    { question: 'Which database?', answer: 'Postgres' },
+    // Keyed to an assumption: the fill does not reach it, and says so.
+    { question: 'Which queue?', answer: 'FIFO' },
+  ]);
+
+  assert.equal(result.filled, 1);
+  assert.deepEqual(result.unmatched, ['Which queue?']);
+  assert.equal(result.md.slice(result.md.indexOf(ASSUMPTIONS_HEADING)), tail);
+  assert.deepEqual(parseHumanAnswers(result.md).map((a) => [a.question, a.answer]), [['Which database?', 'Postgres']]);
+  assert.deepEqual(unanswered(md), ['Which database?'], 'an empty decision is not an open question');
+  assert.deepEqual(unanswered(result.md), []);
 });
 
 // ---- on a real run ----------------------------------------------------------

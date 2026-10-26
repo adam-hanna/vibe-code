@@ -2,7 +2,7 @@
 
 vibe runs two phases. In **planning**, the planner writes a plan and the critic attacks it, until the plan has no blocking findings. In **implementation**, the implementer writes the code, vibe runs your verification gates itself, and the reviewer reviews the diff, until that has no blocking findings either. A fifth role, the answerer, answers the planner's questions.
 
-By default Claude is the planner and the implementer, and Codex is the critic, the answerer and the reviewer. Each role can be seated on either Claude or Codex, with its own model and effort; which agent holds each job is the [role table](./configuration#roles). The review can also seat more finders and verifiers, under [`review`](./configuration#review); see [More finders, and a vote](#more-finders-and-a-vote).
+By default Claude is the planner and the implementer, and Codex is the critic, the answerer and the reviewer. Each role can be seated on either Claude or Codex, with its own model and effort; which agent holds each job is the [role table](./configuration#roles). The review can also seat more finders and verifiers, under [`review`](./configuration#review), and so can the plan critique, under [`critique`](./configuration#critique); see [More finders, and a vote](#more-finders-and-a-vote).
 
 Under the default table the planner plans in Claude's read-only plan mode, and the implementer then resumes **the same session** with permissions bypassed, so it starts with the plan and the whole investigation in context. An implementer that does not share the planner's conversation, such as one on Codex, starts without that history and works from the approved plan, which every implement prompt carries. Either way implementation writes to your checkout, which is also why vibe works on a branch of its own.
 
@@ -123,7 +123,7 @@ A reproducer that failed before a final fix and passes after it closes the findi
 
 ### More finders, and a vote
 
-By default one reviewer reviews each round. [`review`](./configuration#review) can add two kinds of seat, each on Claude or Codex with its own model and effort, and each a fresh, read-only turn that never resumes a conversation:
+By default a review round has the reviewer and one finder, on the agent the reviewer is not on, and no vote: see [the default finder](./configuration#review). [`review`](./configuration#review) can change the finders and add verifiers, each on Claude or Codex with its own model and effort, and each a fresh, read-only turn that never resumes a conversation:
 
 - **Finders** review the same diff after the reviewer, each without seeing what the others found. Their findings are merged by claim: two findings are one defect when they cite the same file and line or say the same thing in their titles, and otherwise both are kept. A finder whose turn fails, other than by a stop or a ceiling, contributes nothing, and the round goes on with the rest.
 
@@ -132,7 +132,15 @@ By default one reviewer reviews each round. [`review`](./configuration#review) c
 
 The vote is fail-closed. A finding is confirmed when `review.quorum` verifiers say `real` (a majority, by default). It is unconfirmed only when enough say `not-real` that the quorum is out of reach. Otherwise it is undecided and keeps blocking. A verifier whose turn failed counts as `cannot-tell`, so too few usable votes never let a finding through. An unconfirmed P1 is moved to P2 with the tally as its reason, and listed in `FOLLOW-UPS.md`. An unconfirmed P0 keeps blocking by default; `review.unconfirmedP0` can instead stop the run for you (exit 2) or move it to P2. Every vote is recorded on its finding in `code-review-<n>.json`.
 
+By default the finders run one after another, and so do the votes. Set `review.maxParallel` to let up to that many finder or verifier turns run at once: the reviewer still goes first and alone, and the round records the same findings and votes in the same order whichever turn finishes first. See [running seats at once](./configuration#review) for what it costs against the token ceiling.
+
 Both cost turns inside `budget.maxTokens`, and the run summary's `Finders:` and `Votes:` lines say what they cost in turns and tokens. Beside the `Votes:` line, the summary names each blocking finding the vote did not confirm: its id, its title, how many verifiers did not confirm it (for example *2 of 3 verifier(s) did not confirm*, with the `not-real` and `cannot-tell` counts and the quorum), the severity it had, and the path to `FOLLOW-UPS.md`. The tally is read from the votes recorded on the finding; if they cannot be read, the line says *votes unreadable* instead of giving a count. A run with no verifiers, or one where every vote confirmed, prints nothing extra.
+
+#### For the plan critique
+
+[`critique`](./configuration#critique) seats the same two kinds for the plan, as a panel of its own, and is empty by default. In each plan round the critic critiques the plan first; then each finder critiques the same plan, one turn per finder per round, and their findings are merged as the review's are; then every P0 and P1 goes to each verifier. A verifier sees the claim, the task, the plan with its assumptions, scope and acceptance criteria, and the repository, and is asked whether the defect exists in this plan, not how severe it is. Only then is `plan-critique-<n>.json` written and the gate asked, so the gate, `loop.p1Tolerance`, the stall check and `loop.maxPlanRounds` all see what the vote left blocking. A P1 the vote did not confirm is moved to P2: the next revision is shown it as non-blocking with its tally, an approved plan hands it to the implementer under `loop.fixNonBlocking`, and it is listed in `FOLLOW-UPS.md` as unconfirmed by vote. Under `critique.unconfirmedP0: "halt"` the run stops for you; leave the P0 alone and the resume revises the plan, or demote it and the resume approves the plan if the gate then passes.
+
+A critique finder starts fresh every round, as a review finder does, and every round's vote is fresh: a finding raised again in a later round is voted on again, by verifiers that know nothing of the earlier tally. Finder and verifier turns are not plan rounds, and they cost turns inside `budget.maxTokens`; the summary's `Critique finders:` and `Critique votes:` lines say how many and how many tokens. They run one after another by default; `critique.maxParallel`, the critique's own setting and not the review's, lets up to that many run at once, as `review.maxParallel` does for the review.
 
 ### What the fixer did with each finding
 
@@ -140,9 +148,15 @@ A review fix round, including the final one, returns its report and, for every f
 
 `vibe stats` totals these per reviewer seat and by severity, and the app shows each finding's outcome in the Code review tab. A `rebutted` is what the fixer said, not a verdict on the finding.
 
+### What the planner did with each critique finding
+
+A plan revision that answers a critique returns the revised plan and, for every finding it was shown, one of `fixed`, `rebutted`, `deferred` or `not-addressed`, with a reason. A rebuttal is still explained in the plan itself, because the plan is what the implementer reads. The answers go in `plan-dispositions-<n>.json`, credited to the seats that raised each finding and carrying the finding's vote outcome when [critique verifiers](./configuration#critique) voted on it. `plan-<n>.json` is the plan alone, as before. If the answers cannot be read, the plan is kept and nothing is recorded for that revision. A revision that answers only the planner's own questions is not asked.
+
+When the next critique raises a rebutted finding again under the same id, the run records it as disputed. `vibe stats` totals the planner's answers per critic seat, by severity and by vote outcome, and says how many rebutted findings were raised again. That count only notices the same id: a finding raised again under a new id, which a critique finder's always is, is not noticed, so it undercounts. A `rebutted` is what the planner said, not a verdict on the finding. The app does not show these yet.
+
 ### Changes to the run's own judge
 
-The tests and `vibe.config.json` decide whether a run passed, so a round that edits them is grading its own work. When a round changes a file matching `verify.testPaths`, or `vibe.config.json`, the reviewer is shown each one and must say whether the change was justified. A change is justified only when the test's claim is no longer the contract, and never because it makes the gate pass. Each file's status, its lines added and removed, and the verdict are recorded in `state.json` and the round's `code-review-<n>.json`. A file the reviewer did not address is recorded as `unjudged`. None of this stops the run, but the end-of-run summary names any file that was not judged justified.
+The tests and `vibe.config.json` decide whether a run passed, so a round that edits them is grading its own work. When a round changes a file matching `verify.testPaths`, or `vibe.config.json`, the reviewer is shown each one and must say whether the change was justified. A change is justified only when the test's claim is no longer the contract, and never because it makes the gate pass. A test file the run itself added counts as an edit too when a later round changes it: the reviewer is told to read its history on the branch, so a fix round that loosens a test it wrote earlier is judged like any other edit. Each file's status, its lines added and removed, and the verdict are recorded in `state.json` and the round's `code-review-<n>.json`. A file the reviewer did not address is recorded as `unjudged`. None of this stops the run, but the end-of-run summary names any file that was not judged justified.
 
 ### The repository's review standards (REVIEW.md)
 

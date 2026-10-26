@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'vitest';
-import { classify, outcomeFor, outcomeLine, readDispositions } from './artifacts';
+import { classify, outcomeFor, outcomeLine, readDispositions, revisionRan } from './artifacts';
+import type { ArtifactEntry } from '../host';
 import { emptyRun, reduce } from './model';
 import type { Run } from './model';
 import type { Frame } from '../host';
@@ -137,5 +138,76 @@ describe('the outcome for one finding of a review round', () => {
 
   test('a fix report is classified so a round that ran can be told from one that did not', () => {
     expect(classify({ name: 'fix-report-2.md', kind: 'file', bytes: 10 })).toMatchObject({ kind: 'fix-report', round: 2 });
+  });
+});
+
+/**
+ * What the planner did with a critique finding, on the Plan critique tab (#457).
+ *
+ * The same pane and the same join as the fixer's: `plan-dispositions-<n+1>.json`
+ * answers `plan-critique-<n>.json`, and `plan-critique-<n+1>.json` is the next
+ * critique. Only the answerer's name and the round's wording differ.
+ */
+describe('the outcome for one finding of a critique round', () => {
+  const file = readDispositions(
+    JSON.stringify({
+      round: 1,
+      label: 'revise-1',
+      answers: 0,
+      dispositions: [
+        { id: 'c1', disposition: 'rebutted', reason: 'the plan already covers it', vote: 'unconfirmed' },
+        { id: 'c2', disposition: 'not-addressed', reason: '' },
+      ],
+    }),
+  );
+
+  test('the planner is named, and the plan round is counted from one as the tabs count it', () => {
+    expect(outcomeFor('c1', { by: 'planner', listed: 1, file, unrecorded: false, raised: new Set() })).toEqual([
+      'planner: rebutted - the plan already covers it (plan round 2)',
+    ]);
+    expect(outcomeFor('c2', { by: 'planner', listed: 1, file, unrecorded: false, raised: new Set() })).toEqual([
+      'planner: not addressed (plan round 2)',
+    ]);
+  });
+
+  test('raised again by the next critique is its own badge', () => {
+    expect(outcomeFor('c1', { by: 'planner', listed: 1, file, unrecorded: false, raised: new Set(['c1']) })).toEqual([
+      'planner: rebutted - the plan already covers it (plan round 2)',
+      'same id raised again next round',
+    ]);
+  });
+
+  test('a revision that recorded none says so, and one still loading or never run says nothing', () => {
+    expect(outcomeFor('c1', { by: 'planner', listed: null, file: null, unrecorded: true, raised: null })).toEqual([
+      'dispositions not recorded for this round',
+    ]);
+    expect(outcomeFor('c1', { by: 'planner', listed: 1, file: null, unrecorded: true, raised: null })).toEqual([]);
+    expect(outcomeFor('c1', { by: 'planner', listed: null, file: null, unrecorded: false, raised: null })).toEqual([]);
+  });
+
+  test('the file is its own kind, with the revision round as its round, and never a plan', () => {
+    expect(classify({ name: 'plan-dispositions-3.json', kind: 'file', bytes: 10 })).toMatchObject({
+      kind: 'plan-dispositions',
+      round: 3,
+    });
+    expect(classify({ name: 'plan-3.json', kind: 'file', bytes: 10 })).toMatchObject({ kind: 'plan', round: 3 });
+    expect(classify({ name: 'plan-critique-3.json', kind: 'file', bytes: 10 })).toMatchObject({ kind: 'critique', round: 3 });
+  });
+
+  test('a revision ran when the next plan is listed, and an answers-only rewrite of this one is not that', () => {
+    const listing = (...names: string[]): ArtifactEntry[] => names.map((name) => ({ name, kind: 'file', bytes: 1 }));
+    expect(revisionRan(listing('plan-0.json', 'plan-critique-0.json', 'plan-1.json'), 0)).toBe(true);
+    expect(revisionRan(listing('plan-0.json', 'plan-critique-0.json'), 0)).toBe(false);
+    // The dispositions file is not a plan, whatever its name starts with.
+    expect(revisionRan(listing('plan-0.json', 'plan-critique-0.json', 'plan-dispositions-1.json'), 0)).toBe(false);
+  });
+
+  test('the review side reads exactly as before', () => {
+    const fix = readDispositions(
+      JSON.stringify({ round: 1, label: 'fix-1', dispositions: [{ id: 'a', disposition: 'fixed', reason: 'done' }] }),
+    );
+    expect(outcomeFor('a', { listed: 1, file: fix, unrecorded: false, raised: null })).toEqual([
+      'fixer: fixed - done (fix round 1)',
+    ]);
   });
 });

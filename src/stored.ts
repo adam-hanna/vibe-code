@@ -33,6 +33,7 @@ import type {
   ReviewSeat,
   FileChangeStatus,
   JudgeFile,
+  JudgeSeatVerdict,
   TestChanges,
   UnaddressedFinding,
   RoundClaim,
@@ -828,6 +829,24 @@ export function isToAddress(f: unknown): f is Finding {
   );
 }
 
+/**
+ * A finding an approved plan hands the implementer (#425, #405): one to
+ * address, or a P2 the critique vote moved.
+ *
+ * The plan side only. A vote-moved finding is `isDeferrable` - FOLLOW-UPS.md
+ * lists it as *Unconfirmed by vote* either way - and so not `isToAddress`; but
+ * #405 decision 5 has an unconfirmed plan P1 follow #425's rule for a plan's
+ * non-blocking findings: under `loop.fixNonBlocking` it reaches the
+ * implementer, who judges it like any other, rather than being lost. A real
+ * deferral (`defer: true`) still is not one.
+ */
+export function isPlanToAddress(f: unknown): f is Finding {
+  return (
+    isToAddress(f) ||
+    (hasFindingShape(f) && (f.severity === 'P2' || f.severity === 'P3') && f.defer !== true && movedByVote(f))
+  );
+}
+
 const UNADDRESSED_OUTCOMES: ReadonlySet<string> = new Set([
   'not-addressed',
   'deferred',
@@ -1426,10 +1445,56 @@ function readReviewCoverage(raw: unknown, ctx: ReadContext): ReviewCoverage | un
 }
 
 /**
+ * One verdict as stored: `unjudged`, or a justified flag with its reason, or
+ * null for anything else, which each caller treats as damage in its own way.
+ */
+function readJudgeVerdict(raw: unknown): JudgeFile['verdict'] | null {
+  if (raw === 'unjudged') return 'unjudged';
+  if (isRecord(raw) && typeof raw['justified'] === 'boolean' && isString(raw['reason'])) {
+    return { justified: raw['justified'], reason: raw['reason'] };
+  }
+  return null;
+}
+
+/**
+ * Every seat's verdict on one judge file (#404), entry by entry.
+ *
+ * Repaired rather than dropped whole, unlike the `readTestChanges` record it
+ * sits in, because the file's combined `verdict` stands on its own: it was decided when the round
+ * ran, from the whole list, and is never recomputed here from what survived. A
+ * malformed entry is dropped and said; a value that is not a list drops the key.
+ */
+function readSeatVerdicts(raw: unknown, ctx: ReadContext, at: string): JudgeSeatVerdict[] | undefined {
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw)) {
+    ctx.repairs.dropped('testChanges', at);
+    return undefined;
+  }
+  const out: JudgeSeatVerdict[] = [];
+  for (const [j, entry] of (raw as unknown[]).entries()) {
+    const provider = isRecord(entry) ? enumOf(entry['provider'], PROVIDERS) : null;
+    const verdict = isRecord(entry) ? readJudgeVerdict(entry['verdict']) : null;
+    if (
+      !isRecord(entry) ||
+      !isString(entry['seat']) ||
+      provider === null ||
+      !isString(entry['model']) ||
+      entry['model'] === '' ||
+      verdict === null
+    ) {
+      ctx.repairs.dropped('testChanges', `${at}[${j}]`);
+      continue;
+    }
+    out.push({ seat: entry['seat'], provider, model: entry['model'], verdict });
+  }
+  return out;
+}
+
+/**
  * What the last review round did to the judge, or nothing at all (#112).
  *
- * Dropped whole rather than repaired, for `readReviewCoverage`'s reason one
- * function up and a sharper one: a verdict is the reviewer's word, and a
+ * Dropped whole rather than repaired, for `readReviewCoverage`'s reason above
+ * and a sharper one: a verdict is the reviewer's word, and a
  * repaired entry would be a word nobody said. A count that is neither a
  * non-negative integer nor null is not something the writer produces - null is
  * how it says "not counted" - so it is damage rather than a value to coerce.
@@ -1452,7 +1517,7 @@ function readTestChanges(raw: unknown, ctx: ReadContext): TestChanges | undefine
   }
   const count = (v: unknown): v is number | null => v === null || isCounter(v);
   const files: JudgeFile[] = [];
-  for (const entry of raw['files'] as unknown[]) {
+  for (const [i, entry] of (raw['files'] as unknown[]).entries()) {
     if (!isRecord(entry)) return drop();
     const status = enumOf(entry['status'], FILE_CHANGE_STATUSES);
     const file = entry['path'];
@@ -1469,31 +1534,32 @@ function readTestChanges(raw: unknown, ctx: ReadContext): TestChanges | undefine
     ) {
       return drop();
     }
-    let read: JudgeFile['verdict'];
-    if (verdict === 'unjudged') read = 'unjudged';
-    else if (
-      isRecord(verdict) &&
-      typeof verdict['justified'] === 'boolean' &&
-      isString(verdict['reason'])
-    ) {
-      read = { justified: verdict['justified'], reason: verdict['reason'] };
-    } else {
-      return drop();
-    }
-    files.push({ path: file, oldPath, status, added, removed, verdict: read });
+    const read = readJudgeVerdict(verdict);
+    if (read === null) return drop();
+    const seats = readSeatVerdicts(entry['verdicts'], ctx, `testChanges.files[${i}].verdicts`);
+    files.push({
+      path: file,
+      oldPath,
+      status,
+      added,
+      removed,
+      verdict: read,
+      ...(seats === undefined ? {} : { verdicts: seats }),
+    });
   }
   return { round: raw['round'], patterns: [...(raw['patterns'] as string[])], files };
 }
 
 /**
- * The seat that took the last recorded review round's turn, or nothing (#393).
+ * The seat that took the last recorded review round's turn (#393), or critique
+ * round's turn (#453), or nothing.
  *
  * Dropped whole rather than repaired, for `readTestChanges`'s reason: a
- * fix's dispositions are credited to this seat, and a repaired value would
+ * round's dispositions are credited to this seat, and a repaired value would
  * credit a seat nobody recorded. `isCounter` rather than `isPositiveInt`,
- * because round 0 is the first review round's own number.
+ * because round 0 is the first round's own number.
  */
-function readReviewSeat(raw: unknown, ctx: ReadContext): ReviewSeat | undefined {
+function readRoundSeat(raw: unknown, ctx: ReadContext, field: 'reviewSeat' | 'criticSeat'): ReviewSeat | undefined {
   if (raw === undefined) return undefined;
   if (
     !isRecord(raw) ||
@@ -1503,7 +1569,7 @@ function readReviewSeat(raw: unknown, ctx: ReadContext): ReviewSeat | undefined 
     !isString(raw['model']) ||
     raw['model'] === ''
   ) {
-    ctx.repairs.dropped('reviewSeat', 'reviewSeat');
+    ctx.repairs.dropped(field, field);
     return undefined;
   }
   return { round: raw['round'], provider: raw['provider'], model: raw['model'] };
@@ -2132,7 +2198,10 @@ const READERS = {
   testChanges: (raw, ctx) => readTestChanges(raw, ctx),
   // Absent stays absent: a run from before #393, or one that has not recorded a
   // review round. A damaged value is dropped, so its round credits no seat.
-  reviewSeat: (raw, ctx) => readReviewSeat(raw, ctx),
+  reviewSeat: (raw, ctx) => readRoundSeat(raw, ctx, 'reviewSeat'),
+  // The same for a critique round (#453): absent on a run from before it, or
+  // one that has not recorded a critique; damaged is dropped, crediting nobody.
+  criticSeat: (raw, ctx) => readRoundSeat(raw, ctx, 'criticSeat'),
   // Absent stays absent: no fix round is in flight. A damaged marker is dropped,
   // which resumes the way every run did before it existed - a new round.
   fixInFlight: (raw, ctx) => {

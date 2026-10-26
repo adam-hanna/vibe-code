@@ -394,3 +394,19 @@ test('in a chunked round, a file the showing part did not judge stays unjudged',
   );
   assert.equal(state.testChanges?.files[0]?.verdict, 'unjudged');
 });
+
+// ---- a test this run added, then edited (#463) -----------------------------
+
+test('the judge is told an added test file may have been edited later in the run', async () => {
+  // Measured from the run's base, a test file the run created is always
+  // "added", so a later commit that weakens it shows only as an added file.
+  // On the bench the reviewer judged such files justified 4 times in 4 until
+  // the prompt said to read the file's history on the branch.
+  const state = parked('added-then-edited', {}, (s) => apply(s, { 'tests/x.test.ts': lines(8, 'case') }));
+  const { prompts } = await review(state);
+  const block = judgeBlock(prompts.get('review-0')) ?? '';
+  assert.match(block, /`tests\/x\.test\.ts` - added/);
+  assert.match(block, /a test file this run created and then changed in a later commit of the same run is listed as added/);
+  assert.match(block, /`git log -p -- <file>`/);
+  assert.match(block, /is not justified, however the file was first written/);
+});

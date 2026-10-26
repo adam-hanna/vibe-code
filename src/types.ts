@@ -849,6 +849,20 @@ export interface Config {
    */
   review: ReviewConfig;
   /**
+   * More critique seats than the one critic, and a vote before a plan finding
+   * blocks (#405). The same five keys as `review`, validated by the same code
+   * under `critique.` paths, and read by `planPhase` when either list is
+   * non-empty. Its `maxParallel` is its own (#452): raising the review's
+   * never changes how a plan round runs.
+   *
+   * A section of its own rather than a reuse of `review`, by the owner's
+   * decision: the panel for a plan may differ from the panel for a diff, or be
+   * none at all - a plan vote is one turn per blocking finding per verifier,
+   * while a review round's votes scale with what the diff turned up. Settable
+   * in the global file as `review` is.
+   */
+  critique: CritiqueConfig;
+  /**
    * Whether a terminal `vibe run`, `vibe plan` or `vibe doctor` ends by saying
    * that npm has a newer vibe (#323). The only setting that reaches the
    * network; `src/updatecheck.ts` says what is sent. Read only by the terminal
@@ -881,7 +895,19 @@ export interface ReviewConfig {
   /** How many `real` votes confirm a finding; null is a majority, floor(n/2)+1. */
   quorum: number | null;
   unconfirmedP0: UnconfirmedP0;
+  /**
+   * How many finder or verifier turns may be live at once in a review round
+   * (#403), or a plan critique round (#452). `1` runs them one after another,
+   * which is the order of every run before it.
+   */
+  maxParallel: number;
 }
+
+/**
+ * The `critique` section (#405): `review`'s shape, for the plan critique, with
+ * a `maxParallel` of its own since #452. See `Config.critique`.
+ */
+export type CritiqueConfig = ReviewConfig;
 
 /** Block name to replacement text. Open-ended keys, checked against the real list. */
 export type PromptOverrides = Readonly<Record<string, string>>;
@@ -889,6 +915,13 @@ export type PromptOverrides = Readonly<Record<string, string>>;
 
 export interface LoadedConfig extends Config {
   configPath: string | null;
+  /**
+   * Whether `review.finders` is the resolved default rather than a list some
+   * layer named (#447). Only for the `(default)` mark `vibe doctor` and a fresh
+   * run's first lines print. Never a setting, so never on `Config` and never in
+   * `state.config`: `storedConfig` strips it before a run is written.
+   */
+  findersDefaulted: boolean;
 }
 
 /** Deep-partial shape accepted from vibe.config.json and CLI overrides. */
@@ -1265,7 +1298,45 @@ export interface FixDispositions {
   duplicates: string[];
 }
 
-/** Who took a review round's own turn. See `RunState.reviewSeat`. */
+/** The outcome of a finding's vote (#388 Part C, #405). */
+export type VoteOutcome = Votes['outcome'];
+
+/**
+ * One critique finding's disposition (#453): the review shape, plus the
+ * finding's vote outcome as stored in `plan-critique-<n>.json`.
+ *
+ * `vote` is null when the finding was not voted on, or its vote could not be
+ * read. `reproducer` is always null here: no reproducer runs in the plan phase,
+ * and the review phase's observation is never read for a plan finding.
+ */
+export interface PlanFindingDisposition extends FindingDisposition {
+  vote: VoteOutcome | null;
+}
+
+/**
+ * One findings revision's dispositions: `plan-dispositions-<round>.json` and
+ * the `plan_dispositions` event carry this shape (#453). The same fields as
+ * `FixDispositions`.
+ */
+export interface PlanDispositions {
+  /** The plan round, the number in `revise-<round>` and in `plan-<round>.json`. */
+  round: number;
+  /** `revise-<round>`. */
+  label: string;
+  /** The critique round it answers: `plan-critique-<answers>.json`. */
+  answers: number;
+  /** One per finding the planner was shown, in the order it was shown them. */
+  dispositions: PlanFindingDisposition[];
+  /** Ids the planner answered that were not in its prompt, dropped. */
+  dropped: string[];
+  /** Ids the planner answered more than once; the first answer was kept. */
+  duplicates: string[];
+}
+
+/**
+ * Who took a review or critique round's own turn. See `RunState.reviewSeat`
+ * and `RunState.criticSeat`.
+ */
 export interface ReviewSeat {
   round: number;
   provider: string;
@@ -1642,8 +1713,24 @@ export interface JudgeVerdict {
  *
  * `'unjudged'` is the fail-closed answer: the file was listed and no verdict
  * for it came back from the part that showed it. It is never read as justified.
+ *
+ * `verdicts` exists only in a round that seated review finders (#404): one
+ * entry per seat that reported, in config order, and `verdict` is then their
+ * combination, failing closed (`combineVerdicts`). In every other round the key
+ * is omitted - never `undefined` - so that record is byte-for-byte what it was.
  */
 export interface JudgeFile extends FileChange {
+  verdict: JudgeVerdict | 'unjudged';
+  verdicts?: JudgeSeatVerdict[];
+}
+
+/** One seat's verdict on a judge file, when a round seated finders (#404). */
+export interface JudgeSeatVerdict {
+  /** `roles.reviewer` or `review.finders[<k-1>]`, as `FinderReport.seat`. */
+  seat: string;
+  provider: AgentProvider;
+  /** The configured model, or `"default"` - never a resolved guess. */
+  model: string;
   verdict: JudgeVerdict | 'unjudged';
 }
 
@@ -1666,9 +1753,16 @@ export interface TestChanges {
  * One turn's observed-but-uncharged spend. See `RunState.inFlight`.
  *
  * Keyed by `label` plus `provider` wherever it is looked up, which is unique
- * among live turns: the only concurrency is `withConcurrentCompaction`, and it
+ * among live turns. There are two sources of concurrency. `withConcurrentCompaction`
  * pairs Claude's `compact` with a Codex critique or review turn, so the pair
- * differs on both axes.
+ * differs on both axes. A review or plan critique seat group (`runSeatGroup`,
+ * #403, #452) runs up to `review.maxParallel` or `critique.maxParallel` finder
+ * or verifier turns at once, and their labels - `review-<r>-f<k>[-part<i>]` and
+ * `vote-<r>-<n>-v<k>`, or `critique-<r>-f<k>` and `critique-<r>-vote-<n>-v<k>` -
+ * are unique within a round, so the key stays unique there too. `saveState` stays safe with several
+ * live: it is synchronous and atomic, and it writes the one in-memory
+ * `RunState` of the one run this process holds, so no write can interleave
+ * inside another or lose a charge.
  *
  * `tokens` absent means the provider reports no figure while a turn is in
  * flight, which is true of Codex: its stream carries usage only on
@@ -2066,6 +2160,18 @@ export interface RunState {
    * before it existed, and a damaged value is dropped, never guessed.
    */
   reviewSeat?: ReviewSeat | undefined;
+  /**
+   * Who took the most recent critique round's own turn (#453): `roles.critic`'s
+   * provider and model as they were when that round's `plan-critique-<round>.json`
+   * was written, `round` being the raw `planRound` the artifact carries.
+   *
+   * The `reviewSeat` pattern for the plan side: a findings revision credits the
+   * critique's findings to this seat, and `resume_config` can change
+   * `roles.critic` between the critique and the revision. A revision that
+   * answers any other round credits nobody. Absent on every run recorded before
+   * it existed, and a damaged value is dropped, never guessed.
+   */
+  criticSeat?: ReviewSeat | undefined;
   /**
    * The review fix round whose turn has started and whose findings are not yet
    * consumed (#393): set with the round's increment, before the turn, and

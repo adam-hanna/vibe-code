@@ -227,6 +227,15 @@ export interface MonitorOptions {
 
 export class CodexRateLimitMonitor {
   private client: AppServerClient | null = null;
+  /**
+   * The connect in progress, shared by every read that arrives during it (#403).
+   *
+   * `connect` assigns `client` before the handshake resolves - for the leak
+   * reason it records - so with review seats running at once, a second `read`
+   * arriving mid-handshake used to find a client and send it a request before it
+   * had been initialised. Every read now waits on the one connect instead.
+   */
+  private connecting: Promise<AppServerClient> | null = null;
   private snapshot: Snapshot | null = null;
   private disabled = false;
   private readonly ttlMs: number;
@@ -250,7 +259,7 @@ export class CodexRateLimitMonitor {
     // being constructed, before any child event exists to reject a promise. An
     // optional signal must never become a new way for a run to die.
     try {
-      const client = this.client ?? (await this.connect(cwd));
+      const client = await this.clientFor(cwd);
 
       const cached = this.snapshot;
       if (cached !== null && this.stillDescribesNow(cached)) return cached.limits;
@@ -263,6 +272,16 @@ export class CodexRateLimitMonitor {
       this.disable(err);
       return null;
     }
+  }
+
+  private clientFor(cwd: string): Promise<AppServerClient> {
+    if (this.connecting !== null) return this.connecting;
+    if (this.client !== null) return Promise.resolve(this.client);
+    const connecting = this.connect(cwd).finally(() => {
+      if (this.connecting === connecting) this.connecting = null;
+    });
+    this.connecting = connecting;
+    return connecting;
   }
 
   /** Drop the cached reading so the next `read()` must go to the server. */
@@ -366,6 +385,7 @@ export class CodexRateLimitMonitor {
   private closeClient(): void {
     const client = this.client;
     this.client = null;
+    this.connecting = null;
     this.snapshot = null;
     try {
       client?.close();

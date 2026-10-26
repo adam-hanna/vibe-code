@@ -26,6 +26,7 @@ import { EFFORTS } from '@src/types.js';
 import type {
   Config,
   ConfigOverrides,
+  FinderSeat,
   GatesConfig,
   LoadedConfig,
   PromptOverrides,
@@ -44,11 +45,15 @@ export { EFFORTS };
 
 const SANDBOXES: readonly Sandbox[] = ['read-only', 'workspace-write', 'danger-full-access'];
 
-/** What `review.unconfirmedP0` may say (#388): the owner's three, 2026-10-20. */
+/** What `review.unconfirmedP0` and `critique.unconfirmedP0` may say (#388): the owner's three, 2026-10-20. */
 export const UNCONFIRMED_P0: readonly UnconfirmedP0[] = ['block', 'halt', 'demote'];
 
-/** The keys of the `review` section, in the order a message lists them. */
-const REVIEW_KEYS = ['finders', 'verifiers', 'quorum', 'unconfirmedP0'] as const;
+/**
+ * The keys of the `review` and `critique` sections (#388, #405), in the order a
+ * message lists them. One list since #452 gave the critique the bound on seats
+ * at once (#403) that the review already had.
+ */
+const SEAT_SECTION_KEYS = ['finders', 'verifiers', 'quorum', 'unconfirmedP0', 'maxParallel'] as const;
 
 /**
  * The agent CLI versions this build was tested against (#298).
@@ -268,11 +273,25 @@ export const DEFAULTS: Config = {
   // Empty: nobody's instructions until somebody writes some (#273).
   instructions: { text: '' },
   // More review seats and a vote (#388), read by `runReview` when either list
-  // is non-empty. Empty lists, so a default run is byte-identical to one from
-  // before the key existed. `block` is the owner's decision (2026-10-20): an
-  // unconfirmed P0 still blocks unless somebody chooses otherwise. No
-  // recommended set of seats ships until #388's measurement has been made.
-  review: { finders: [], verifiers: [], quorum: null, unconfirmedP0: 'block' },
+  // is non-empty. `block` is the owner's decision (2026-10-20): an unconfirmed
+  // P0 still blocks unless somebody chooses otherwise. `maxParallel: 1` is
+  // today's order, one seat turn after another (#403): the groundwork rule, so
+  // nothing about a run changes until somebody raises it.
+  //
+  // `finders` stays empty here although a default run has one finder (#447):
+  // that seat is on whichever vendor `roles.reviewer` is not, which any layer or
+  // `--role` can move, so it is resolved by `withDefaultFinders` once the
+  // layers are known rather than stored as a value nothing could keep true.
+  // Verifiers stay empty by the same decision: the bench's vote changed nothing.
+  review: { finders: [], verifiers: [], quorum: null, unconfirmedP0: 'block', maxParallel: 1 },
+  // The same panel for the plan critique (#405), read by `planPhase` when either
+  // list is non-empty. Empty, so a default plan loop is byte-identical to one
+  // from before the key existed, and `block` for the reason `review`'s is. No
+  // recommended panel ships: nothing has measured how often a critique finding
+  // is wrong. `maxParallel: 1` for the review's reason (#452), and a setting of
+  // its own so that a config which already raised `review.maxParallel` keeps
+  // the critique it had.
+  critique: { finders: [], verifiers: [], quorum: null, unconfirmedP0: 'block', maxParallel: 1 },
   // On, by the owner's decision on #323: a terminal user is told once, at the
   // end of `vibe run`, `vibe plan` or `vibe doctor`, when npm has a newer vibe.
   // It is the one network request in `src/` - see `src/updatecheck.ts` for what
@@ -403,8 +422,90 @@ export function mergeConfig(base: Config, override: unknown): Config {
     prompts: mergePrompts(base.prompts, override['prompts']),
     instructions: mergeInstructions(base.instructions, override['instructions']),
     review: mergeReview(base.review, override['review']),
+    // `review`'s merge, for the same reason: a project's list replaces the
+    // global one whole (#405).
+    critique: mergeReview(base.critique, override['critique']),
     updates: mergeSection(base.updates, override['updates']),
   };
+}
+
+/**
+ * What the default finder is told to look at hardest (#447). The focus the
+ * bench measured, and the seat holding it is where the weakened-test catches
+ * came from.
+ */
+export const DEFAULT_FINDER_FOCUS =
+  'error handling, fail-closed paths, and tests that assert what the change claims';
+
+/**
+ * The one provider every role is on, or null when the table uses both - or
+ * cannot be read, which is `validateRoles`' to name, not this.
+ */
+export function singleProvider(roles: RoleProviders): AgentProvider | null {
+  const table = tableOrUndefined(roles);
+  if (table === undefined) return null;
+  const first = table[ROLE_NAMES[0] as Role].provider;
+  return ROLE_NAMES.every((role) => table[role].provider === first) ? first : null;
+}
+
+/**
+ * The review finders a config gets when no layer names `review.finders` (#447).
+ * Pure, and the one place the rule lives: `loadConfig` and the settings
+ * screen's global view both reach it through `withDefaultFinders`.
+ *
+ * Measured, by the owner's decision of 2026-10-26: a bench of 45 review loops,
+ * where the finder caught 3 bugs the reviewer missed, and 3 of 4 reviews with
+ * it seated flagged a test edit that hid bugs against 0 of 4 without it. The
+ * vote changed nothing, so no verifier comes with it.
+ *
+ * - **On the other vendor** from `roles.reviewer`: the reviewer is already the
+ *   first finder, and a second look is worth most from the other agent.
+ * - **No model**, ever: the CLI's own default, as a role with none gets. Naming
+ *   one would be guessing what a vendor will still serve.
+ * - **`high` for a Claude seat**, which is what the bench ran. **No effort for
+ *   a Codex seat**, so it takes `codex.effort` (xhigh by default), which is
+ *   what the bench's Codex seats ran at.
+ * - **None when every role is on one provider**: a default must never add a CLI
+ *   somebody has not already chosen to depend on. Only `roles` counts.
+ *
+ * An unreadable table gives none, for the same reason `singleProvider` says.
+ */
+export function defaultReviewFinders(roles: RoleProviders): FinderSeat[] {
+  const table = tableOrUndefined(roles);
+  if (table === undefined || singleProvider(roles) !== null) return [];
+  return table.reviewer.provider === 'codex'
+    ? [{ provider: 'claude', effort: 'high', focus: DEFAULT_FINDER_FOCUS }]
+    : [{ provider: 'codex', focus: DEFAULT_FINDER_FOCUS }];
+}
+
+/**
+ * The config with the default finder resolved, unless a layer named
+ * `review.finders` (#447). Named means the key is present in the layer's
+ * `review` object, whatever it holds - `[]` included, which is the opt-out.
+ * `defaulted` says the list came from here, for the `(default)` mark; it is
+ * false when the default resolved to no seat.
+ */
+export function withDefaultFinders(
+  cfg: Config,
+  layers: readonly unknown[],
+): { cfg: Config; defaulted: boolean } {
+  const named = layers.some(
+    (layer) => isRecord(layer) && isRecord(layer['review']) && Object.hasOwn(layer['review'], 'finders'),
+  );
+  if (named || !isRecord(cfg.review)) return { cfg, defaulted: false };
+  const finders = defaultReviewFinders(cfg.roles);
+  return { cfg: { ...cfg, review: { ...cfg.review, finders } }, defaulted: finders.length > 0 };
+}
+
+/**
+ * A loaded config as a run stores it (#447): everything but
+ * `findersDefaulted`, which says where a value came from and is never a
+ * setting. `configPath` stays, as it always has, so a stored config is the
+ * bytes it was before.
+ */
+export function storedConfig(cfg: LoadedConfig): Omit<LoadedConfig, 'findersDefaulted'> {
+  const { findersDefaulted: _findersDefaulted, ...rest } = cfg;
+  return rest;
 }
 
 /**
@@ -572,6 +673,7 @@ const SECTIONS = [
   'prompts',
   'instructions',
   'review',
+  'critique',
   'updates',
 ] as const;
 
@@ -605,6 +707,13 @@ export function loadConfig(
   targetDir: string,
   overrides: ConfigOverrides = {},
   roles: RolePatches = {},
+  /**
+   * `defaultFinders: false` leaves `review.finders` as the layers say (#447).
+   * Only a resume's and a fork's fallback for a run with no stored config pass
+   * it: a run's finders are fixed when it starts, and such a run started before
+   * there was a default.
+   */
+  options: { defaultFinders?: boolean } = {},
 ): LoadedConfig {
   const configPath = path.join(targetDir, 'vibe.config.json');
   let fromFile: unknown = {};
@@ -631,20 +740,26 @@ export function loadConfig(
   // project that says nothing about a key inherits the person's own choice and
   // one that does say wins (#223).
   const fromGlobal = readGlobalConfig();
-  const merged = withRolePatches(
+  const layered = withRolePatches(
     mergeConfig(mergeConfig(mergeConfig(DEFAULTS, fromGlobal), fromFile), overrides),
     roles,
   );
   // Order matters. `resolveRoleScopedAgents` reads the table, so a bad role
   // value checked afterwards would surface as an empty `toolchain.node.agents`
   // - a toolchain error for what is a `roles` mistake.
-  validateRoles(merged.roles);
+  validateRoles(layered.roles);
+  // After `--role`, so the default finder follows where the reviewer really
+  // sits, and before `validate`, so the seat is held to a written one's rules.
+  const { cfg: merged, defaulted } =
+    options.defaultFinders === false
+      ? { cfg: layered, defaulted: false }
+      : withDefaultFinders(layered, [fromGlobal, fromFile, overrides]);
   // No prior table, unlike `applyOverrides`: these layers are raw file and flag
   // input, so any `agents` in one is a contract the user wrote by hand and keeps
   // winning over the role table, exactly as it did before per-role flags.
   const cfg = resolveRoleScopedAgents(merged, [fromGlobal, fromFile, overrides]);
   validate(cfg);
-  return { ...cfg, configPath: existsSync(configPath) ? configPath : null };
+  return { ...cfg, configPath: existsSync(configPath) ? configPath : null, findersDefaulted: defaulted };
 }
 
 /**
@@ -914,37 +1029,45 @@ function validate(cfg: Config): void {
   // instruction is a good one, and a length limit would be a number with
   // nothing behind it - the same answer `validatePrompts` gives (#273).
   if (typeof cfg.instructions.text !== 'string') throw new Error('instructions.text must be a string');
-  validateReview(cfg.review);
+  validateSeats('review', cfg.review);
+  validateSeats('critique', cfg.critique);
 }
 
 /**
- * The `review` section (#388), refused by name and by index.
+ * The `review` section (#388), or the `critique` section (#405), refused by
+ * name and by index.
  *
  * Each seat goes through `roleSetting`, the one reader `roles.<role>` uses, so
  * what a seat may say and what a role may say cannot drift apart - only the
- * path in the message and the key list differ. A finder's `focus` is the one
+ * path in the message differs. A finder's `focus` is the one
  * key `roleSetting` permits without checking, so it is checked here.
  *
  * The quorum is checked against the list in the same config, which is why it
  * is refused after the seats are read: "2 but there are only 1 verifiers" is
  * only a true sentence about a list that is itself legal.
+ *
+ * One function for both sections, with the section's name the only thing that
+ * changes in a message: the two take the same five keys, and two copies of the
+ * refusals would be two answers to what a legal seat is.
  */
-function validateReview(review: unknown): void {
-  const takes = `review takes ${REVIEW_KEYS.slice(0, -1).join(', ')} and ${REVIEW_KEYS[REVIEW_KEYS.length - 1] ?? ''}`;
-  if (!isRecord(review)) {
-    throw new Error(`review must be an object with finders, verifiers, quorum and unconfirmedP0`);
+function validateSeats(section: 'review' | 'critique', value: unknown): void {
+  const keys: readonly string[] = SEAT_SECTION_KEYS;
+  const listed = `${keys.slice(0, -1).join(', ')} and ${keys[keys.length - 1] ?? ''}`;
+  const takes = `${section} takes ${listed}`;
+  if (!isRecord(value)) {
+    throw new Error(`${section} must be an object with ${listed}`);
   }
-  for (const key of Object.keys(review)) {
-    if (!(REVIEW_KEYS as readonly string[]).includes(key)) {
-      throw new Error(`review.${key} is not a setting; ${takes}`);
+  for (const key of Object.keys(value)) {
+    if (!keys.includes(key)) {
+      throw new Error(`${section}.${key} is not a setting; ${takes}`);
     }
   }
-  const finders: unknown = review['finders'];
-  const verifiers: unknown = review['verifiers'];
-  if (!Array.isArray(finders)) throw new Error('review.finders must be a list of seats, or [] for none');
-  if (!Array.isArray(verifiers)) throw new Error('review.verifiers must be a list of seats, or [] for none');
+  const finders: unknown = value['finders'];
+  const verifiers: unknown = value['verifiers'];
+  if (!Array.isArray(finders)) throw new Error(`${section}.finders must be a list of seats, or [] for none`);
+  if (!Array.isArray(verifiers)) throw new Error(`${section}.verifiers must be a list of seats, or [] for none`);
   finders.forEach((entry: unknown, i) => {
-    const where = `review.finders[${i}]`;
+    const where = `${section}.finders[${i}]`;
     roleSetting(where, entry, { keys: FINDER_KEYS, noun: 'a finder' });
     if (isRecord(entry) && Object.prototype.hasOwnProperty.call(entry, 'focus')) {
       const focus = entry['focus'];
@@ -959,25 +1082,33 @@ function validateReview(review: unknown): void {
     }
   });
   verifiers.forEach((entry: unknown, i) => {
-    roleSetting(`review.verifiers[${i}]`, entry, { noun: 'a verifier' });
+    roleSetting(`${section}.verifiers[${i}]`, entry, { noun: 'a verifier' });
   });
-  const quorum: unknown = review['quorum'];
+  const quorum: unknown = value['quorum'];
   if (quorum !== null) {
     if (typeof quorum !== 'number' || !Number.isInteger(quorum) || quorum < 1) {
-      throw new Error('review.quorum must be a positive whole number of verifiers, or null for a majority');
+      throw new Error(`${section}.quorum must be a positive whole number of verifiers, or null for a majority`);
     }
     if (verifiers.length === 0) {
       throw new Error(
-        `review.quorum is ${quorum} but review.verifiers is empty; a quorum needs verifiers to count`,
+        `${section}.quorum is ${quorum} but ${section}.verifiers is empty; a quorum needs verifiers to count`,
       );
     }
     if (quorum > verifiers.length) {
-      throw new Error(`review.quorum is ${quorum} but there are only ${verifiers.length} verifiers`);
+      throw new Error(`${section}.quorum is ${quorum} but there are only ${verifiers.length} verifiers`);
     }
   }
-  const p0: unknown = review['unconfirmedP0'];
+  const p0: unknown = value['unconfirmedP0'];
   if (typeof p0 !== 'string' || !UNCONFIRMED_P0.includes(p0 as UnconfirmedP0)) {
-    throw new Error(`review.unconfirmedP0 must be one of ${UNCONFIRMED_P0.join(', ')}`);
+    throw new Error(`${section}.unconfirmedP0 must be one of ${UNCONFIRMED_P0.join(', ')}`);
+  }
+  // Each section's own bound (#403, #452). No upper bound: a cap would be a
+  // number nobody measured.
+  const parallel: unknown = value['maxParallel'];
+  if (typeof parallel !== 'number' || !Number.isInteger(parallel) || parallel < 1) {
+    throw new Error(
+      `${section}.maxParallel must be a positive whole number of turns at once (1 runs them one after another)`,
+    );
   }
 }
 
@@ -1332,6 +1463,7 @@ export function writeConfigPatch(
   }
 
   tidyVerify(candidate);
+  tidyReviewFinders(candidate, patch);
 
   // The same pipeline `loadConfig` runs, in the same order and for the same
   // reasons - `validateRoles` first, because `resolveRoleScopedAgents` reads the
@@ -1389,6 +1521,28 @@ function tidyVerify(candidate: Record<string, unknown>): void {
   if (tidy['command'] === null && Array.isArray(tidy['gates'])) delete tidy['command'];
   if (tidy['gates'] === null && typeof tidy['command'] === 'string') delete tidy['gates'];
   setOwn(candidate, 'verify', tidy);
+}
+
+/**
+ * Remove `review.finders` when a patch says `null` for it (#447).
+ *
+ * The settings screen's "use the default" for the finders: the merge is one
+ * level deep, so no patch could delete the key, and a file that kept naming the
+ * list - even as the default seat - would stop following the reviewer when it
+ * moved. A `review` left empty goes too, so the file reads as one written by
+ * hand that never named it. Asked of the **patch**, not the file: a
+ * `"finders": null` somebody wrote by hand means what it always has, and an
+ * unrelated save is no business of this.
+ */
+function tidyReviewFinders(candidate: Record<string, unknown>, patch: Record<string, unknown>): void {
+  const asked = patch['review'];
+  if (!isRecord(asked) || asked['finders'] !== null) return;
+  const review = candidate['review'];
+  if (!isRecord(review)) return;
+  const tidy: Record<string, unknown> = { ...review };
+  delete tidy['finders'];
+  if (Object.keys(tidy).length === 0) delete candidate['review'];
+  else setOwn(candidate, 'review', tidy);
 }
 
 export function refuseArtifactPath(entry: unknown): string | null {

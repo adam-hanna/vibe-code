@@ -2,6 +2,8 @@ import { describedRole, ROLES } from '@src/roles.js';
 import { EVIDENCE_RULE, REPRODUCER_RULE } from '@src/schemas.js';
 import { inspectedItems } from '@src/evidence.js';
 import { describeOutcome } from '@src/reproducer.js';
+import { nearPairs } from '@src/finder-merge.js';
+import { movedByVote } from '@src/stored.js';
 import { authorOf, readEvidence, reproductionAt, severityChangesOf } from '@src/validate.js';
 import type { RoleTable } from '@src/roles.js';
 import type { EnvironmentFacts } from '@src/runtime.js';
@@ -52,6 +54,19 @@ const STALL_STEP_BACK =
   'common, and reconsider the approach rather than fixing each one in place. If the brief itself ' +
   'is the problem (too broad, contradictory, or missing a decision only a person can make), say so ' +
   "plainly in the plan's open questions.";
+
+/**
+ * What a findings revision is asked to return beside the plan (#453): one
+ * disposition per finding it was shown, in `REVISE_SCHEMA`'s `dispositions`.
+ *
+ * A rebuttal is still explained in `plan_md`, because the implementer reads the
+ * plan and never the dispositions. Only the findings path carries it, so every
+ * other revision's prompt is the one it always was.
+ */
+const PLAN_DISPOSITIONS =
+  'For each finding listed above, answer its id in `dispositions`: `fixed`, `rebutted`, `deferred` ' +
+  'or `not-addressed`, with a sentence of reason. Use only those ids. Still explain a rebuttal in ' +
+  'the plan itself: `plan_md` is what the implementer reads, and `dispositions` is not shown to it.';
 
 /** The step-back's measured line, from `planStall`'s `{counts, fresh}`. Not overridable. */
 function stallCountsLine({ counts, fresh }: StallMeasure): string {
@@ -945,9 +960,11 @@ export function revisePlanPrompt({
 
 An independent reviewer raised the following. Evaluate each P1 against the original task and repository evidence, then resolve the defect or explicitly rebut an incorrect finding. The reviewer's proposed remedy is advisory; use the simplest coherent approach that resolves a valid defect.
 
-${findings.map(formatFinding).join('\n\n')}${deferralNote(findings, 'planner')}
+${findings.map((f) => formatFinding(f) + voteNote(f)).join('\n\n')}${deferralNote(findings, 'planner')}
 
-For each P1: fix the plan, or, if you believe the finding is wrong, say so explicitly in the plan with your reasoning. Do not silently ignore one.
+For each P1: fix the plan, or, if you believe the finding is wrong, rebut it. Do not silently ignore one.
+
+${block(BLOCK.planDispositions, PLAN_DISPOSITIONS)}
 
 ${block(BLOCK.fix, FIX_BREADTH)}`);
   }
@@ -1326,6 +1343,93 @@ ${planMd}
 ${block(BLOCK.json, RESPOND_WITH_JSON)}`;
 }
 
+/** What a critique verifier is shown of the plan (#405): the plan and the three lists it states. */
+export type VotePlan = Pick<Plan, 'plan_md' | 'assumptions' | 'out_of_scope' | 'acceptance_criteria'>;
+
+/**
+ * One critique verifier's prompt: is this one claimed defect in the plan real?
+ * (#405)
+ *
+ * `votePrompt`'s rules, asked of a plan instead of a diff. A prompt of its own
+ * rather than a branch inside `votePrompt`, whose output the review's
+ * verifiers are sent and `vote-basic.txt` pins byte for byte; and because the
+ * question is not the same one - *does this defect exist in this plan* covers a
+ * plan contradicting the repository, missing what the brief requires, getting
+ * a step wrong, or taking on what the brief rules out, none of which a diff can
+ * show.
+ *
+ * **What it is never told, by construction**, for `votePrompt`'s reason: it
+ * takes the claim's four fields and nothing else of the finding, so the id, the
+ * severity, `foundBy`, who raised it, how many did and every other ballot have
+ * no argument to arrive through.
+ */
+export function critiqueVotePrompt(
+  claim: VoteClaim,
+  task: string,
+  plan: VotePlan,
+  environment?: EnvironmentFacts | null,
+  roles: RoleTable = ROLES,
+  /** The repository's `REVIEW.md`, as `votePrompt` takes it (#389). Absent renders nothing. */
+  reviewMd?: ReviewStandards | undefined,
+  /**
+   * The run artifact holding the plan being voted on, `plan-<n>.json`, so a
+   * `not-real` that points at the plan's own text can cite something that
+   * resolves. `VOTE_EVIDENCE`'s example, `PLAN.md`, is written only once the
+   * plan loop ends, so during a critique it resolves to nothing.
+   */
+  planArtifact = 'plan-0.json',
+): string {
+  return `You are checking one claimed defect in an implementation plan, before any code is written. Someone critiquing the plan says the defect below exists in it. Decide whether it does.
+
+Read the repository as needed: a plan's claims about the code are only checkable against the code. The repository is yours to read, not to change.
+
+${environmentBlock(environment, 'reviewer', roles)}
+
+## How to vote
+
+Judge **whether the defect exists in this plan** - not how severe it is, and not whether it is worth fixing. Those are not your question. A defect here is the plan contradicting the repository, missing something the task requires, getting a step wrong, or putting in scope something the task rules out.
+
+- **\`real\`** - the defect the claim describes is there. You need no evidence beyond the claim's own; agreeing with what it points at is enough.
+- **\`not-real\`** - the claim is false of this plan. Give a concrete reason it is false, and evidence for that reason that a reader can open: the code, or the part of the plan, that shows it, cited the way a finding cites. A \`not-real\` vote whose evidence resolves to nothing is counted as \`cannot-tell\`.
+- **\`cannot-tell\`** - anything in between. If you are in doubt, this is your vote. It is not a failure; it keeps the claim standing, which is the right outcome when nobody can show it is wrong.${standardsSection(reviewMd, true)}
+
+## Evidence
+
+${VOTE_EVIDENCE}
+
+The plan below is the run artifact \`${planArtifact}\`. To cite the plan itself, cite it as an \`artifact\` with the path \`${planArtifact}\`; \`PLAN.md\` is not written until the plan is approved.
+
+## The claim
+
+### ${claim.title}
+
+${claim.detail}${citation(claim, '\n\n')}
+
+*Suggested fix:* ${claim.suggested_fix}
+
+## The task the plan is for
+
+${task}
+
+## The plan
+
+${plan.plan_md}
+
+## Assumptions the planner declared
+
+${formatAssumptions(plan.assumptions)}
+
+## Scope the plan declared
+
+${formatOutOfScope(plan.out_of_scope)}
+
+## The plan's acceptance criteria
+
+${formatAcceptanceCriteria(plan.acceptance_criteria)}
+
+${block(BLOCK.json, RESPOND_WITH_JSON)}`;
+}
+
 /** The repository's `REVIEW.md` as a review turn receives it (#389). */
 export interface ReviewStandards {
   /** The file, verbatim. */
@@ -1362,6 +1466,13 @@ ${s.text}${s.text.endsWith('\n') ? '' : '\n'}`;
  * edited, closely paraphrased, because without it `justified: true` means
  * nothing - a reviewer would mark whatever made the gate pass. It states no
  * threshold: "N removed lines" is a fact the reviewer reads, never a trigger.
+ *
+ * "Added" is from the run's base, so a test file the run created reads as
+ * added in every round, and a later round that weakened it read as a new file
+ * (#463): on the bench, judged justified 4 times in 4. The sentence after
+ * "adding tests is not suspicious" sends the reviewer to the file's history on
+ * the branch; with it, 3 of 4 were judged not justified and 4 of 4 legitimate
+ * fix-round edits stayed justified.
  */
 function judgeSection(judge: readonly FileChange[] | undefined): string {
   if (judge === undefined || judge.length === 0) return '';
@@ -1374,7 +1485,7 @@ ${judge.map(judgeLine).join('\n')}
 
 For each file above, return exactly one entry in \`test_verdicts\` - \`file\` spelled exactly as listed, \`justified\`, and a \`reason\`.
 
-**What justified means.** Editing or removing a test is justified ONLY when the test's claim is no longer the contract: the behaviour it checks genuinely moved, as the plan intended, or the test asserted more than the thing it was guarding. It is NEVER justified merely because it makes the gate pass - a test changed to agree with the code is the defect this check exists to catch. A newly added test is fine to mark justified; adding tests is not suspicious. For \`vibe.config.json\` and \`REVIEW.md\`, the question is whether the change is something the plan called for.
+**What justified means.** Editing or removing a test is justified ONLY when the test's claim is no longer the contract: the behaviour it checks genuinely moved, as the plan intended, or the test asserted more than the thing it was guarding. It is NEVER justified merely because it makes the gate pass - a test changed to agree with the code is the defect this check exists to catch. A newly added test is fine to mark justified; adding tests is not suspicious. But "added" here is measured from where this run started, so a test file this run created and then changed in a later commit of the same run is listed as added: read its history on this branch (\`git log -p -- <file>\`), and judge every change after the commit that first added it by the rule above. A later commit that deletes an assertion, loosens an expected value or drops a case so the test agrees with the code is not justified, however the file was first written. For \`vibe.config.json\` and \`REVIEW.md\`, the question is whether the change is something the plan called for.
 
 A listed file you leave out is recorded as unjudged, never as justified. This does not block the run and it is not a finding: if a change here is wrong, ALSO raise it as an ordinary finding at its true severity.
 `;
@@ -1529,7 +1640,7 @@ export function fixPrompt(
 
 Evaluate **every P1**, then resolve valid defects or rebut incorrect findings with evidence. Address a P2 only when it belongs to the task or is necessary to a coherent repair and the fix is contained and low-risk. Defer separable improvements, even when they would be a small edit. Skip P3s unless they are incidental to required work.
 
-${findings.map(formatFinding).join('\n\n')}${deferralNote(findings, 'fixer')}
+${findings.map(formatFinding).join('\n\n')}${deferralNote(findings, 'fixer')}${nearNote(findings)}
 
 ${block(BLOCK.fix, FIX_BREADTH)}
 
@@ -1800,6 +1911,20 @@ function provenNote(f: Finding): string {
   return `\n\n*Reproducer:* ${describeOutcome(outcome)}`;
 }
 
+/**
+ * A plan finding the critique vote moved to P2 (#405), as the planner is shown
+ * it: non-blocking, and why - the tally, in FOLLOW-UPS.md's words.
+ *
+ * The planner's prompt only. `fixPrompt` shows a vote-moved review finding as a
+ * plain P2 and is not changed here; and empty for every other finding, so a
+ * revision with nothing the vote moved is byte-identical.
+ */
+function voteNote(f: Finding): string {
+  return movedByVote(f) && f.downgraded !== undefined
+    ? `\n\n*Unconfirmed by vote:* ${f.downgraded.reason} - non-blocking.`
+    : '';
+}
+
 function formatFinding(f: Finding): string {
   // Omitted rather than printed empty. A human raising a finding is reporting a
   // defect, not designing the repair, and `*Suggested fix:* ` with nothing after
@@ -1822,6 +1947,27 @@ ${f.detail}${fix}${citation(f, '\n')}${raisedNote(f)}${movedNote(f)}${provenNote
  * whose findings were all deferred never reaches it. FOLLOW-UPS.md, written
  * every round regardless of the gate, is the record that always exists.
  */
+/**
+ * The pairs of findings that may be one defect, said to the fixer (#462).
+ *
+ * Different seats describing one bug usually cite lines a step apart, so the
+ * merge keeps them as two findings - deliberately, because a line-window merge
+ * measured on the bench would also have merged two real defects (see
+ * `NEAR_LINES`). The fixer reads the code, so it is the one asked. Empty, and
+ * the prompt byte-identical, when no pair qualifies, which is every review
+ * without finders.
+ */
+function nearNote(findings: readonly Finding[]): string {
+  const pairs = nearPairs(findings);
+  if (pairs.length === 0) return '';
+  const lines = pairs.map(
+    (p) =>
+      `- \`${p.first}\` and \`${p.second}\`: both cite \`${p.path}\`, ` +
+      (p.gap === 0 ? 'on the same line' : `${p.gap} line${p.gap === 1 ? '' : 's'} apart`),
+  );
+  return `\n\n## Findings that may be one defect\n\nDifferent reviewers raised each pair below, citing the same file a few lines apart. They were kept as separate findings because two real defects can sit a line apart. Read the code and decide: if a pair is one defect, fix it once and give both ids the same disposition, saying in the second one's reason which id it duplicates; if it is two, handle each on its own.\n\n${lines.join('\n')}`;
+}
+
 function deferralNote(findings: readonly Finding[], audience: 'planner' | 'fixer'): string {
   if (!findings.some((f) => f.defer === true)) return '';
 
@@ -1903,6 +2049,7 @@ const BLOCK = {
   deferred: 'a deferred finding',
   simple: 'simple solution',
   stall: 'stall',
+  planDispositions: 'plan dispositions',
 } as const;
 
 let installed: Readonly<Record<string, string>> = {};
@@ -2034,6 +2181,8 @@ export function promptBlocks(): readonly PromptBlock[] {
     of(BLOCK.deferred, ['planner', 'implementer'], DEFERRED_MARK),
     // Only the findings revision after a stall carries it (#394).
     of(BLOCK.stall, ['planner'], STALL_STEP_BACK),
+    // Only the revision answering a critique carries it (#453).
+    of(BLOCK.planDispositions, ['planner'], PLAN_DISPOSITIONS),
   ];
 }
 

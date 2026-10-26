@@ -8,6 +8,8 @@ import {
   environmentStale,
   loadConfig,
   globalConfigPath,
+  singleProvider,
+  storedConfig,
   withProjectFile,
 } from '@src/config.js';
 import {
@@ -35,12 +37,21 @@ import { installPromptOverrides, installStandingInstructions } from '@src/prompt
 import { describeEnding as describeProcessEnding, installEndingStamp } from '@src/ending.js';
 import { commitFork, listForkPoints, planFork } from '@src/fork.js';
 import type { Liveness, LockHandle } from '@src/lock.js';
-import { mergeHumanAnswers, reconcileAssumed, reconcileQuestionRecords } from '@src/questions.js';
+import { ANSWER_MARKER } from '@src/answers.js';
+import {
+  ASSUMPTIONS_HEADING,
+  DECISION_MARKER,
+  isSameQuestion,
+  mergeHumanAnswers,
+  reconcileAssumed,
+  reconcileQuestionRecords,
+} from '@src/questions.js';
 import { acceptMoves, acceptRaised, parseMoves, parseRaised, raisePhase } from '@src/raise.js';
 import type { RaiseProblem, RequestedMove, RequestedMoves } from '@src/raise.js';
 import { assertUsableRunId } from '@src/stored.js';
 import { chooseBase, Escalation, EXIT, orchestrate, voteMovedFollowUps, writeEscalation } from '@src/orchestrator.js';
 import { readTally } from '@src/vote.js';
+import { authorOf } from '@src/validate.js';
 import type { ExitCode } from '@src/orchestrator.js';
 import {
   codexConversations,
@@ -85,14 +96,18 @@ import type {
   CliVersions,
   Config,
   ConfigOverrides,
+  DeferredQuestion,
   Effort,
   Finding,
+  JudgeFile,
+  JudgeSeatVerdict,
   LoadedConfig,
   RunEvent,
   RunState,
   RunSummary,
 } from '@src/types.js';
 import { findGateScratch } from '@src/artifacts.js';
+import { disagreements } from '@src/judge.js';
 
 const USAGE = `
 vibe - automated plan/critique/implement/review loop (Claude Code + Codex)
@@ -775,7 +790,7 @@ async function startRun(
   targetDir: string,
   task: string,
   planOnly: boolean,
-  cfg: Config,
+  cfg: LoadedConfig,
   allocated: AllocatedRun,
   extraContext: string | null,
   flags: ParsedArgs['flags'],
@@ -788,7 +803,9 @@ async function startRun(
   // has no worktree while its branch is checked out in one (#223).
   const state = createRun(targetDir, task, planOnly, {
     allocated,
-    config: cfg,
+    // Without `findersDefaulted` (#447): where a value came from is not a
+    // setting, and a run that named its finders stores what it always did.
+    config: storedConfig(cfg),
     extraContext,
     worktree: cfg.git.worktree,
     requestedBranch: flags.branch,
@@ -900,7 +917,9 @@ export function resumeConfig(targetDir: string, state: RunState, flags: ParsedAr
   // to agree about it or the diff compares configs built different ways.
   const load = (overrides: ConfigOverrides, roles: RolePatches): Config =>
     stored === undefined
-      ? loadConfig(targetDir, overrides, roles)
+      // A run's finders are fixed when it starts (#447), and a run with no
+      // stored config started before there was a default finder to resolve.
+      ? storedConfig(loadConfig(targetDir, overrides, roles, { defaultFinders: false }))
       // **The project's file on top of the run's memory** (#223). Without it the
       // settings screen could not reach a run that had already started, so a run
       // stopped on a ceiling could not be resumed past it by raising that
@@ -1091,7 +1110,13 @@ async function resumeRun(
     // Both parses before either is acted on, so an unfinished block anywhere in
     // the file stops the resume before half of it has been applied (#142).
     const moves = parseRequestedMoves(state, raw);
-    if (!reportIncompleteRaises([...moves.problems, ...raised.problems])) return EXIT.NEEDS_HUMAN;
+    // Decisions on the assumptions the run is carrying (#465), parsed with the
+    // other edits and before the path below is chosen, so a block that cannot be
+    // taken stops the resume while nothing has been spent.
+    const decided = parseDecisions(raw, state.deferredQuestions);
+    if (!reportIncompleteRaises([...moves.problems, ...raised.problems, ...decided.problems])) {
+      return EXIT.NEEDS_HUMAN;
+    }
 
     // Moves before raises, on both paths below. A move can only name a finding
     // the run was already carrying - it is rendered from that list - so nothing
@@ -1109,6 +1134,9 @@ async function resumeRun(
     if (!raw.includes('**Your answer:**')) {
       log.info('Previous stop reported findings, not questions - continuing with raised limits.');
       applyEdits();
+      // Recorded, but not handed to `pendingAnswers`: that would buy a revision
+      // this stop did not ask for. `userDecisions` carries it to every turn.
+      takeDecisions(state, decided.decisions);
       renameSync(answersFile, path.join(state.dir, `stalled-${state.planRound}.md`));
       const cliVersions = await detectedCliVersions(flags);
       // Saved before `run_started` says them (#298); see the start path.
@@ -1137,12 +1165,15 @@ async function resumeRun(
       // plan stop a demotion that passes the gate approves the plan - so an
       // empty answer beside a move is an answer, not a file left unfilled.
       applyEdits();
+      takeDecisions(state, decided.decisions);
       log.info('No answers given - taking your severity changes and continuing.');
       renameSync(answersFile, path.join(state.dir, `stalled-${state.planRound}.md`));
     } else if (answers.length === 0) {
       log.fail(`No answers found in ${answersFile}`);
       log.info('Fill in the "**Your answer:**" blocks (replace the empty "> " line), then resume.');
-      const pending = raised.findings.length + moves.moves.length;
+      // Decisions never stand in for a blocking answer (#465): they wait in the
+      // file with everything else.
+      const pending = raised.findings.length + moves.moves.length + decided.decisions.length;
       if (pending > 0) {
         log.info(
           `The ${pending} edit(s) you made are still in the file and will be taken in once the ` +
@@ -1152,19 +1183,27 @@ async function resumeRun(
       return EXIT.NEEDS_HUMAN;
     } else {
       applyEdits();
-      log.ok(`Picked up ${answers.length} answer(s) from NEEDS-INPUT.md`);
+      const decisionCount = decided.decisions.length;
+      log.ok(
+        `Picked up ${answers.length} answer(s)` +
+          (decisionCount > 0 ? ` and ${decisionCount} decision(s)` : '') +
+          ' from NEEDS-INPUT.md',
+      );
+      // A decision is a human answer to that exact deferred question (#465), so
+      // it travels with the answers: into the next revision, and into the record.
+      const given = [...answers, ...decided.decisions];
       // Merged, never overwritten (#169): the answerer's usable answers are
       // already durable in `pendingAnswers` when a run stops after its turn, and
       // a `question-round` stop hands every question back - answered or not. The
       // person wins where both answered one question; the answerer's answer
       // stands where the person left it blank.
-      state.pendingAnswers = mergeHumanAnswers(state.pendingAnswers, answers);
+      state.pendingAnswers = mergeHumanAnswers(state.pendingAnswers, given);
       // On the same write that stores them, so there is no window where the run
       // is holding answers it has no durable record of having been given (#65).
       // `pendingAnswers` is consumed by the loop and cannot be that record - and
       // only the human answers go here, because `humanAnswered` means a person
       // answered and the merged list includes the answerer's.
-      recordHumanAnswers(state, answers);
+      recordHumanAnswers(state, given);
       saveState(state);
       // Immediately, and before preflight: `ASSUMED.md` is authored at the end of
       // a successful run, but this resume may exit at the preflight gate or stop
@@ -1591,6 +1630,138 @@ export function recordHumanAnswers(state: RunState, answers: readonly Answer[]):
   state.humanAnswers = [...(state.humanAnswers ?? []), ...supplied.map((a) => ({ ...a }))];
 }
 
+/** Decisions a person wrote on the run's assumptions, and the blocks it cannot take. */
+export interface Decisions {
+  decisions: Answer[];
+  problems: RaiseProblem[];
+}
+
+/**
+ * Every `**Your decision:**` a person filled in under the assumptions section
+ * of a `NEEDS-INPUT.md` (#465), each as a human answer to that exact deferred
+ * question.
+ *
+ * **It reads that section and nothing else** - from its heading to the next
+ * `## `. Finding titles are rendered verbatim as `### ` headings, so a finding
+ * called `A1. ...` whose detail mentions the marker would otherwise be read as
+ * a decision nobody wrote, or refuse a valid resume as a stale file.
+ *
+ * Matched by the heading text, never the number: answers in the same file
+ * change which assumptions remain before this is read, so an index would decide
+ * the wrong question. The recorded wording is the deferred question's own, so
+ * `reconcileAssumed` retires it by the exact rule and `REPHRASED.md` says
+ * nothing.
+ *
+ * **Refuse, never repair**, as `parseRaised` does (#141). A block with text off
+ * the `> ` lines, a heading no deferred question matches, or two blocks for one
+ * question are reported and the resume stops with nothing spent. So is the
+ * answer marker typed anywhere in the section, filled or not: `cmdResume`
+ * chooses its path by that string anywhere in the file, so one quoted here would
+ * turn a findings stop into a question stop and the decision would never be
+ * taken. Pure, and exported for the reason `parseHumanAnswers` is.
+ */
+export function parseDecisions(md: string, deferred: readonly DeferredQuestion[]): Decisions {
+  const decisions: Answer[] = [];
+  const problems: RaiseProblem[] = [];
+
+  const lines = md.replace(/\r\n/g, '\n').split('\n');
+  const start = lines.findIndex((l) => l.trim() === ASSUMPTIONS_HEADING);
+  if (start === -1) return { decisions, problems };
+  let end = lines.length;
+  for (let i = start + 1; i < lines.length; i += 1) {
+    if ((lines[i] ?? '').startsWith('## ')) {
+      end = i;
+      break;
+    }
+  }
+  const section = lines.slice(start, end);
+
+  // The marker, anywhere in the section, labelled by the block it sits in.
+  const marked = new Set<string>();
+  let label = ASSUMPTIONS_HEADING;
+  for (const line of section) {
+    if (line.startsWith('### ')) label = line.trim();
+    if (line.includes(ANSWER_MARKER) && !marked.has(label)) {
+      marked.add(label);
+      problems.push({
+        heading: label,
+        reason:
+          `it contains "${ANSWER_MARKER}", which the resume reads as the answer to a question - ` +
+          'remove or reword it (for example without the asterisks)',
+      });
+    }
+  }
+
+  const decided = new Set<DeferredQuestion>();
+  for (const block of section.join('\n').split(/^### /m).slice(1)) {
+    const firstLine = (block.split('\n')[0] ?? '').trim();
+    const named = /^A\d+\.\s*(.*)$/.exec(firstLine);
+    if (named === null || !block.includes(DECISION_MARKER)) continue;
+    const heading = `### ${firstLine}`;
+    if (marked.has(heading)) continue;
+
+    const quoted: string[] = [];
+    let stray = false;
+    for (const raw of block.slice(block.indexOf(DECISION_MARKER) + DECISION_MARKER.length).split('\n')) {
+      const line = raw.trim();
+      if (line.startsWith('>')) quoted.push(line.replace(/^>\s?/, '').trim());
+      else if (line !== '') stray = true;
+    }
+    if (stray) {
+      problems.push({
+        heading,
+        reason:
+          `it has text under ${DECISION_MARKER} that is not on a "> " line - put each line of ` +
+          'your decision after "> ", or empty the block to keep the fallback',
+      });
+      continue;
+    }
+    const text = quoted.join(' ').trim();
+    if (text === '') continue;
+
+    const question = (named[1] ?? '').trim();
+    const match = deferred.find((d) => isSameQuestion(d.question, question));
+    if (match === undefined) {
+      problems.push({
+        heading,
+        reason:
+          `"${question}" is not one of the questions this run deferred, so deciding it would ` +
+          'change nothing. This file may be from an earlier stop.',
+      });
+      continue;
+    }
+    if (decided.has(match)) {
+      problems.push({ heading, reason: 'it decides the same question as an earlier block' });
+      continue;
+    }
+    decided.add(match);
+    decisions.push({
+      question: match.question,
+      answer: text,
+      confidence: 'high',
+      defer_to_human: false,
+      rationale: 'Decided by the user.',
+    });
+  }
+
+  return { decisions, problems };
+}
+
+/**
+ * Take decisions on a path that is not the answers path (#465).
+ *
+ * Recorded as human answers, so `userDecisions` carries them to every later turn
+ * and `ASSUMED.md` stops calling them guesses - and deliberately not put in
+ * `pendingAnswers`, which would buy a revision the stop did not ask for.
+ */
+export function takeDecisions(state: RunState, decisions: readonly Answer[]): void {
+  if (decisions.length === 0) return;
+  recordHumanAnswers(state, decisions);
+  saveState(state);
+  reconcileQuestionRecords(state);
+  log.ok(`Took ${decisions.length} decision(s) on the run's assumptions from NEEDS-INPUT.md`);
+}
+
 /**
  * What the gate may skip.
  *
@@ -1638,7 +1809,11 @@ export type RunLoop = (state: RunState, cfg: Config, resume: boolean) => Promise
  *
  * Exported so a test can read the lines without starting a run.
  */
-export function reportRoles(cfg: Config): void {
+export function reportRoles(
+  cfg: Config,
+  /** Whether `review.finders` is the resolved default (#447), marked `(default)`. */
+  findersDefaulted = false,
+): void {
   const table = rolesFor(cfg);
   const changed = ROLE_NAMES.filter(
     (role) => JSON.stringify(cfg.roles[role]) !== JSON.stringify(DEFAULT_ROLE_PROVIDERS[role]),
@@ -1672,26 +1847,43 @@ export function reportRoles(cfg: Config): void {
   // what it always has.
   const finders = readFinders(cfg);
   if (finders.length > 0) {
-    const seated = finders.map(
-      ({ setting }) =>
-        `${setting.provider}` +
-        `${setting.model === undefined ? '' : `@${setting.model}`}` +
-        `${setting.effort === undefined ? '' : `/${setting.effort}`}`,
-    );
-    log.info(`Finders: ${seated.join(' ')}`);
+    log.info(`Finders: ${finders.map(({ setting }) => spelled(setting)).join(' ')}${findersDefaulted ? ' (default)' : ''}`);
   }
   // The verifiers (#388 Part C), the same way: only when there are any.
   const verifiers = readVerifiers(cfg);
-  if (verifiers.length > 0) {
-    const seated = verifiers.map(
-      ({ setting }) =>
-        `${setting.provider}` +
-        `${setting.model === undefined ? '' : `@${setting.model}`}` +
-        `${setting.effort === undefined ? '' : `/${setting.effort}`}`,
-    );
-    log.info(`Verifiers: ${seated.join(' ')}`);
+  if (verifiers.length > 0) log.info(`Verifiers: ${verifiers.map(({ setting }) => spelled(setting)).join(' ')}`);
+  // The plan critique's seats (#405), the same way and only when there are any.
+  const critiqueFinders = readFinders(cfg, 'critique');
+  if (critiqueFinders.length > 0) {
+    log.info(`Critique finders: ${critiqueFinders.map(({ setting }) => spelled(setting)).join(' ')}`);
+  }
+  const critiqueVerifiers = readVerifiers(cfg, 'critique');
+  if (critiqueVerifiers.length > 0) {
+    log.info(`Critique verifiers: ${critiqueVerifiers.map(({ setting }) => spelled(setting)).join(' ')}`);
+    // And the vote's policy, which decides what an unconfirmed plan finding
+    // does - said before the first turn, as doctor says it (#405).
+    log.info(`Critique vote: ${quorumText(cfg.critique.quorum, critiqueVerifiers.length)}, unconfirmed P0 ${cfg.critique.unconfirmedP0}`);
+  }
+  // Only when seats can overlap (#403): at 1 they run one after another, and a
+  // run that never raised it prints what it always has.
+  if ((finders.length > 0 || verifiers.length > 0) && cfg.review.maxParallel > 1) {
+    log.info(`Parallel: up to ${cfg.review.maxParallel} seat turns at once`);
+  }
+  // The critique's own bound (#452), on the same rule: said only when its seats
+  // can overlap.
+  if ((critiqueFinders.length > 0 || critiqueVerifiers.length > 0) && cfg.critique.maxParallel > 1) {
+    log.info(`Critique parallel: up to ${cfg.critique.maxParallel} seat turns at once`);
   }
   for (const warning of roleWarnings(cfg)) log.warn(warning);
+}
+
+/** A seat in a changed role's spelling: `provider@model/effort`, each part only when named. */
+function spelled(setting: RoleSetting): string {
+  return (
+    `${setting.provider}` +
+    `${setting.model === undefined ? '' : `@${setting.model}`}` +
+    `${setting.effort === undefined ? '' : `/${setting.effort}`}`
+  );
 }
 
 /**
@@ -1727,8 +1919,9 @@ function reportResolvedRoles(cfg: Config): void {
 
 /**
  * The review seats `review` names (#388), under the role table - and nothing at
- * all when it names none, so doctor under the defaults prints what it always
- * has.
+ * all when it names none. Under the defaults that is the one default finder
+ * (#447), whose row says `(default)`; a table on one provider has none, and
+ * says why in one line.
  *
  * Two blocks, because they cost differently. The finders (#388 Part B) each
  * review every chunk after `roles.reviewer`, at one extra turn per chunk per
@@ -1740,11 +1933,51 @@ function reportResolvedRoles(cfg: Config): void {
  * The majority is printed as the definition it is - more than half - and not
  * as a recommendation.
  */
-function reportReviewSeats(cfg: Config): void {
-  const { quorum, unconfirmedP0 } = cfg.review;
-  const finders = readFinders(cfg);
-  const verifiers = readVerifiers(cfg);
+function reportReviewSeats(cfg: Config, findersDefaulted = false): void {
+  // Said only when no finder is seated and the table leaves no other vendor
+  // for one (#447): an explicit `[]` there is as true a case as the default's.
+  const only = singleProvider(cfg.roles);
+  if (only !== null && readFinders(cfg).length === 0) {
+    log.info(`  no default finder: every role is on ${only}; set review.finders to add one`);
+  }
+  reportSeatSection(cfg, 'review', findersDefaulted, {
+    finders: '  review finders (each reviews every chunk; one extra turn per chunk per finder):',
+    verifiers:
+      '  review verifiers (each votes on every blocking finding not reproduced; one extra turn per such finding per verifier):',
+  });
+}
+
+/**
+ * The plan critique's seats (#405), `reportReviewSeats`' block for `critique`:
+ * nothing at all when it names none. A critique finder is one turn per plan
+ * round, since a plan is never split, and a critique verifier one turn per
+ * blocking plan finding per round.
+ */
+function reportCritiqueSeats(cfg: Config): void {
+  reportSeatSection(cfg, 'critique', false, {
+    finders: '  critique finders (each critiques every plan round; one extra turn per plan round per finder):',
+    verifiers:
+      '  critique verifiers (each votes on every blocking plan finding not deferred; one extra turn per such finding per verifier):',
+  });
+}
+
+/** A quorum over `n` verifiers as doctor prints it: the majority is said as the definition it is. */
+function quorumText(quorum: number | null, n: number): string {
+  return quorum === null ? `${Math.floor(n / 2) + 1} of ${n} (a majority)` : `${quorum} of ${n}`;
+}
+
+/** One section's seats, quorum and unconfirmed P0, under the headings its caller words. */
+function reportSeatSection(
+  cfg: Config,
+  section: 'review' | 'critique',
+  /** Whether the finders are the resolved default (#447), so each row says so. */
+  findersDefaulted: boolean,
+  headings: { finders: string; verifiers: string },
+): void {
+  const finders = readFinders(cfg, section);
+  const verifiers = readVerifiers(cfg, section);
   if (finders.length === 0 && verifiers.length === 0) return;
+  const { quorum, unconfirmedP0 } = cfg[section];
   const seat = (setting: RoleSetting, focus?: string): string => {
     const r = seatResolved(setting, cfg);
     const shown = focus === undefined ? '' : `  focus: ${JSON.stringify(focus)}`;
@@ -1754,21 +1987,32 @@ function reportReviewSeats(cfg: Config): void {
     const width = Math.max(...rows.map(([label]) => label.length));
     for (const [label, text] of rows) log.info(`    ${label.padEnd(width)}  ${text}`);
   };
+  // How many of those turns may be live at once (#403). It changes no count of
+  // turns, only how many overlap - and with them, how far Codex turns, which
+  // report nothing in flight, can carry the run past budget.maxTokens. Each
+  // section's own (#452).
+  const { maxParallel } = cfg[section];
+  const parallel: [string, string] = [
+    'parallel',
+    maxParallel === 1
+      ? '1 (one after another)'
+      : `${maxParallel} at once (Codex turns can overshoot budget.maxTokens by up to ${maxParallel} turns' spend)`,
+  ];
   if (finders.length > 0) {
-    log.info('  review finders (each reviews every chunk; one extra turn per chunk per finder):');
-    print(finders.map((f): [string, string] => [`finder ${f.k}`, seat(f.setting, f.focus)]));
+    log.info(headings.finders);
+    const rows = finders.map((f): [string, string] => [
+      `finder ${f.k}${findersDefaulted ? ' (default)' : ''}`,
+      seat(f.setting, f.focus),
+    ]);
+    print(verifiers.length === 0 ? [...rows, parallel] : rows);
   }
   if (verifiers.length === 0) return;
-  log.info(
-    '  review verifiers (each votes on every blocking finding not reproduced; one extra turn per such finding per verifier):',
-  );
+  log.info(headings.verifiers);
   const rows: [string, string][] = verifiers.map((v): [string, string] => [`verifier ${v.k}`, seat(v.setting)]);
   const n = verifiers.length;
-  rows.push([
-    'quorum',
-    quorum === null ? `${Math.floor(n / 2) + 1} of ${n} (a majority)` : `${quorum} of ${n}`,
-  ]);
+  rows.push(['quorum', quorumText(quorum, n)]);
   rows.push(['unconfirmed P0', unconfirmedP0]);
+  rows.push(parallel);
   print(rows);
 }
 
@@ -2053,7 +2297,9 @@ export async function execute(
     if (anyRecovery(recovery)) reportRecovery(recovery);
   };
 
-  reportRoles(cfg);
+  // The mark is a fresh run's alone (#447): a resume passes a plain `Config`,
+  // whose finders are whatever the run stored, default or not.
+  reportRoles(cfg, 'findersDefaulted' in cfg && cfg.findersDefaulted === true);
 
   // Installed here and released in the `finally`, so the stamp's lifetime is
   // exactly the lock's: this process is either driving this run or it is not,
@@ -2774,20 +3020,45 @@ function reportGates(state: RunState): void {
  * justified or none was touched - a list of fine edits at the end of a run is
  * noise that teaches people to skip the line that matters. The exit code does
  * not move for this; the issue's decision is record and surface, never block.
+ *
+ * In a round that seated finders (#404) each "not justified" file is followed
+ * by who said what - `<seat> <provider>/<model>`, the naming `foundBy` uses -
+ * and the line says how many files the seats disagreed on. Without finders the
+ * line is exactly what it was.
+ *
+ * Exported for the reason `reportDeferred` is.
  */
-function reportTestChanges(state: RunState): void {
+export function reportTestChanges(state: RunState): void {
   const record = state.testChanges;
   if (record === undefined) return;
-  const named = (files: readonly { path: string }[]): string =>
-    files.map((f) => `\`${f.path}\``).join(', ');
+  const seated = record.files.some((f) => f.verdicts !== undefined);
+  const seat = (v: JudgeSeatVerdict): string => `${v.seat} ${v.provider}/${v.model}`;
+  const said = (f: JudgeFile): string => {
+    const by = (keep: (v: JudgeSeatVerdict) => boolean): string[] =>
+      (f.verdicts ?? []).filter(keep).map(seat);
+    const groups: [string, string[]][] = [
+      ['not justified by', by((v) => v.verdict !== 'unjudged' && !v.verdict.justified)],
+      ['justified by', by((v) => v.verdict !== 'unjudged' && v.verdict.justified)],
+      ['unjudged by', by((v) => v.verdict === 'unjudged')],
+    ];
+    const text = groups
+      .filter(([, seats]) => seats.length > 0)
+      .map(([words, seats]) => `${words} ${seats.join(', ')}`)
+      .join('; ');
+    return text === '' ? '' : ` (${text})`;
+  };
+  const named = (files: readonly JudgeFile[], bySeat = false): string =>
+    files.map((f) => `\`${f.path}\`${bySeat ? said(f) : ''}`).join(', ');
   const unjudged = record.files.filter((f) => f.verdict === 'unjudged');
   const rejected = record.files.filter((f) => f.verdict !== 'unjudged' && !f.verdict.justified);
   if (unjudged.length === 0 && rejected.length === 0) return;
   const parts: string[] = [];
-  if (rejected.length > 0) parts.push(`not justified: ${named(rejected)}`);
+  if (rejected.length > 0) parts.push(`not justified: ${named(rejected, seated)}`);
   if (unjudged.length > 0) parts.push(`unjudged: ${named(unjudged)}`);
+  const split = seated ? `The seats disagreed on ${disagreements(record.files)} file(s). ` : '';
   log.warn(
     `Review round ${record.round} changed the run's own tests or config - ${parts.join('; ')}. ` +
+      split +
       'The reasons are in state.json under testChanges and in the round\'s code-review artifact.',
   );
 }
@@ -2808,24 +3079,41 @@ function reportTestChanges(state: RunState): void {
  */
 export function reportUnconfirmedByVote(state: RunState): void {
   const moved = voteMovedFollowUps(state);
-  if (moved.length === 0) return;
-  log.warn(
-    `${moved.length} blocking finding(s) the review vote did not confirm - no longer blocking, ` +
-      'and listed as unconfirmed by vote in FOLLOW-UPS.md:',
-  );
-  for (const f of moved) {
-    const t = readTally(f.votes);
-    const from: unknown = f.downgraded?.from;
-    const was = typeof from === 'string' && from.length > 0 ? `, was ${from}` : '';
-    const said =
-      t === null
-        ? 'votes unreadable'
-        : `${t.n - t.real} of ${t.n} verifier(s) did not confirm ` +
-          `(${t.notReal} not real, ${t.cannotTell} could not tell; quorum ${t.quorum})`;
-    log.info(`  - \`${f.id}\` ${f.title} - ${said}${was}`);
+  // Split by who raised it (#405): a finding the critic raised was moved by the
+  // critique's vote, and saying "the review vote" of it would name the wrong
+  // panel. Everything else keeps the sentence it had.
+  const plan = moved.filter((f) => authorOf(f) === 'critic');
+  const review = moved.filter((f) => authorOf(f) !== 'critic');
+  if (review.length > 0) {
+    log.warn(
+      `${review.length} blocking finding(s) the review vote did not confirm - no longer blocking, ` +
+        'and listed as unconfirmed by vote in FOLLOW-UPS.md:',
+    );
+    for (const f of review) log.info(unconfirmedLine(f));
   }
+  if (plan.length > 0) {
+    log.warn(
+      `${plan.length} blocking plan finding(s) the critique vote did not confirm - no longer blocking, ` +
+        'and listed as unconfirmed by vote in FOLLOW-UPS.md:',
+    );
+    for (const f of plan) log.info(unconfirmedLine(f));
+  }
+  if (moved.length === 0) return;
   const file = path.join(state.dir, 'FOLLOW-UPS.md');
   log.info(existsSync(file) ? `  Detail: ${file}` : '  FOLLOW-UPS.md was not written.');
+}
+
+/** One finding the vote moved, with its tally read from its recorded votes. */
+function unconfirmedLine(f: Finding): string {
+  const t = readTally(f.votes);
+  const from: unknown = f.downgraded?.from;
+  const was = typeof from === 'string' && from.length > 0 ? `, was ${from}` : '';
+  const said =
+    t === null
+      ? 'votes unreadable'
+      : `${t.n - t.real} of ${t.n} verifier(s) did not confirm ` +
+        `(${t.notReal} not real, ${t.cannotTell} could not tell; quorum ${t.quorum})`;
+  return `  - \`${f.id}\` ${f.title} - ${said}${was}`;
 }
 
 /**
@@ -2975,18 +3263,43 @@ async function reportReviewMdPreview(targetDir: string, cfg: LoadedConfig): Prom
  * a test without spawning real agents.
  */
 export function reportReviewFinders(state: RunState): void {
+  reportFinders(state, 'review', 'review_finders_merged', 'Finders:  ', 'review round');
+}
+
+/**
+ * The plan critique's finders (#405), `reportReviewFinders`' line for the
+ * critique: the `critique`-phase finder charges, and the last
+ * `critique_finders_merged`. Nothing at all on a run that seated none.
+ */
+export function reportCritiqueFinders(state: RunState): void {
+  reportFinders(state, 'critique', 'critique_finders_merged', 'Critique finders: ', 'plan critique round');
+}
+
+/**
+ * One phase's finder line. Only that phase's charges count (#405): a review
+ * line that also counted critique finders' turns would claim the review spent
+ * them.
+ */
+function reportFinders(
+  state: RunState,
+  phase: 'review' | 'critique',
+  mergeEvent: string,
+  prefix: string,
+  noun: string,
+): void {
   let turns = 0;
   let failed = 0;
   let tokens = 0;
   for (const t of chargedTurns(state)) {
-    if (seatOf(t.label)?.finder === undefined) continue;
+    const seat = seatOf(t.label);
+    if (seat?.finder === undefined || seat.phase !== phase) continue;
     turns += 1;
     if (t.failed) failed += 1;
     const spent = t.data['tokens'];
     if (typeof spent === 'number' && Number.isFinite(spent)) tokens += spent;
   }
   let merge: Record<string, unknown> | null = null;
-  for (const e of state.events) if (e.type === 'review_finders_merged') merge = e;
+  for (const e of state.events) if (e.type === mergeEvent) merge = e;
   if (turns === 0 && merge === null) return;
 
   const cost =
@@ -2997,10 +3310,10 @@ export function reportReviewFinders(state: RunState): void {
   const reported = merge?.['reported'];
   const seats = merge?.['finders'];
   if (merge === null || typeof round !== 'number' || typeof reported !== 'number' || typeof seats !== 'number') {
-    log.info(`Finders:  ${cost}; no review round completed its merge.`);
+    log.info(`${prefix}${cost}; no ${noun} completed its merge.`);
     return;
   }
-  log.info(`Finders:  review round ${round + 1}: ${reported} of ${seats} reported; ${cost}.`);
+  log.info(`${prefix}${noun} ${round + 1}: ${reported} of ${seats} reported; ${cost}.`);
 }
 /**
  * What the review vote cost and what it came to (#388 Part C), as one summary
@@ -3013,18 +3326,35 @@ export function reportReviewFinders(state: RunState): void {
  * from an attempt whose votes were thrown away.
  */
 export function reportReviewVotes(state: RunState): void {
+  reportVotes(state, 'review', 'review_votes_tallied', 'Votes:    ', 'review round');
+}
+
+/** The plan critique's vote (#405), `reportReviewVotes`' line for the critique. */
+export function reportCritiqueVotes(state: RunState): void {
+  reportVotes(state, 'critique', 'critique_votes_tallied', 'Critique votes: ', 'plan critique round');
+}
+
+/** One phase's vote line, counting only that phase's vote charges (#405). */
+function reportVotes(
+  state: RunState,
+  phase: 'review' | 'critique',
+  tallyEvent: string,
+  prefix: string,
+  noun: string,
+): void {
   let turns = 0;
   let failed = 0;
   let tokens = 0;
   for (const t of chargedTurns(state)) {
-    if (seatOf(t.label)?.verifier === undefined) continue;
+    const seat = seatOf(t.label);
+    if (seat?.verifier === undefined || seat.phase !== phase) continue;
     turns += 1;
     if (t.failed) failed += 1;
     const spent = t.data['tokens'];
     if (typeof spent === 'number' && Number.isFinite(spent)) tokens += spent;
   }
   let last: Record<string, unknown> | null = null;
-  for (const e of state.events) if (e.type === 'review_votes_tallied') last = e;
+  for (const e of state.events) if (e.type === tallyEvent) last = e;
   if (turns === 0 && last === null) return;
 
   const cost =
@@ -3041,11 +3371,11 @@ export function reportReviewVotes(state: RunState): void {
   const unconfirmed = n('unconfirmed');
   const undecided = n('undecided');
   if (round === null || findings === null || confirmed === null || unconfirmed === null || undecided === null) {
-    log.info(`Votes:    ${cost}; no review round completed its tally.`);
+    log.info(`${prefix}${cost}; no ${noun} completed its tally.`);
     return;
   }
   log.info(
-    `Votes:    review round ${round + 1}: ${findings} finding(s) voted on - ${confirmed} confirmed, ` +
+    `${prefix}${noun} ${round + 1}: ${findings} finding(s) voted on - ${confirmed} confirmed, ` +
       `${unconfirmed} unconfirmed, ${undecided} undecided; ${cost}.`,
   );
 }
@@ -3152,6 +3482,8 @@ function summary(state: RunState, started: number, recovery?: RecoveryReport): v
   reportReviewMd(state);
   reportReviewFinders(state);
   reportReviewVotes(state);
+  reportCritiqueFinders(state);
+  reportCritiqueVotes(state);
   reportUnconfirmedByVote(state);
   if (state.sessionRotations > 0) log.info(`Compacted: ${state.sessionRotations} time(s)`);
   // A record of what `forkedFrom` holds, never a computation over it: the totals
@@ -3392,12 +3724,14 @@ async function cmdDoctor(args: readonly string[]): Promise<ExitCode> {
     if (globalAt !== null && existsSync(globalAt)) log.info(`  also your settings for all projects: ${globalAt}`);
     log.info(`  claude ${shownModel(cfg.claude.model, 'claude')}/${cfg.claude.effort} - codex ${shownModel(cfg.codex.model, 'codex')}/${cfg.codex.effort}`);
     reportResolvedRoles(cfg);
-    reportReviewSeats(cfg);
+    reportReviewSeats(cfg, cfg.findersDefaulted);
+    reportCritiqueSeats(cfg);
     // Which MCP servers each role reaches and how each provider enforces it
     // (#138), in the words `src/mcp.ts` keeps for every surface that says it.
     log.info('  mcp:');
     const table = rolesFor(cfg);
-    for (const line of describeMcp(table, readFinders(cfg), readVerifiers(cfg))) log.info(`    ${line}`);
+    const critique = { finders: readFinders(cfg, 'critique'), verifiers: readVerifiers(cfg, 'critique') };
+    for (const line of describeMcp(table, readFinders(cfg), readVerifiers(cfg), critique)) log.info(`    ${line}`);
     const mcpBlocked = await mcpRefusals(cfg, table, {
       cwd: targetDir,
       repoDir: targetDir,

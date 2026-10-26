@@ -91,7 +91,9 @@ test('every label the orchestrator builds is one seatOf places', () => {
     at = path.dirname(at);
   }
   const source = readFileSync(path.join(at, 'src', 'orchestrator.ts'), 'utf8');
-  const found = [...source.matchAll(/label: (?:`([^`]+)`|'([^']+)')/g)].map(
+  // A seat runner's ballot label is a descriptor's `label: (n, k) => \`…\`` (#452),
+  // read here too, so the vote labels stay inside what this checks.
+  const found = [...source.matchAll(/label: (?:\(n, k\) => )?(?:`([^`]+)`|'([^']+)')/g)].map(
     (m) => m[1] ?? m[2] ?? '',
   );
   assert.ok(found.length >= 7, 'the label sites moved — this test is reading the wrong thing');
@@ -176,6 +178,69 @@ test("a finder round's merge and failure frames are replayed with their own data
   const finderTurn = steps.filter((s) => s.narration.id === 'turn_started')[1];
   assert.equal(finderTurn?.narration.data?.['finder'], 1);
   assert.equal(finderTurn?.narration.data?.['seat'], 'review.finders[0]');
+});
+
+test('a critique finder and a critique vote are turns of the critique round, told apart (#405)', () => {
+  // The critic itself carries neither key, so a run from before #405 reads as it did.
+  assert.deepEqual(seatOf('critique-0'), { role: 'critic', kind: 'critique', phase: 'critique', round: 0 });
+  assert.deepEqual(seatOf('critique-0-f1'), { ...seatOf('critique-0'), finder: 1 });
+  assert.deepEqual(seatOf('critique-1-vote-2-v3'), {
+    role: 'critic',
+    kind: 'vote',
+    phase: 'critique',
+    round: 1,
+    verifier: 3,
+  });
+  assert.equal('finder' in (seatOf('critique-3') ?? {}), false);
+  assert.equal('verifier' in (seatOf('critique-3') ?? {}), false);
+  // The review's own labels are unchanged.
+  assert.equal(seatOf('vote-1-2-v3')?.phase, 'review');
+});
+
+test('the critique finder label the orchestrator builds is the spelling seatOf reads', () => {
+  // Assigned to a variable rather than written at a `label:` site, as the
+  // review's finder labels are, so it gets the same source-read pin.
+  let at = path.dirname(fileURLToPath(import.meta.url));
+  while (!existsSync(path.join(at, 'src', 'orchestrator.ts')) && path.dirname(at) !== at) {
+    at = path.dirname(at);
+  }
+  const source = readFileSync(path.join(at, 'src', 'orchestrator.ts'), 'utf8');
+  const templates = [...source.matchAll(/`(critique-\$\{[^}]+\}-f\$\{[^}]+\})`/g)].map((m) => m[1] ?? '');
+  assert.equal(templates.length, 1, `one critique finder label, found ${templates.join(', ') || 'none'}`);
+  const label = (templates[0] ?? '').replace(/\$\{[^}]+\}/g, '2');
+  assert.equal(seatOf(label)?.finder, 2);
+  assert.equal(seatOf(label)?.phase, 'critique');
+});
+
+test("a critique round's finder, failure and tally frames are replayed, and its seats name the critique section", () => {
+  const merged = { round: 0, finders: 2, reported: 2, findings: 3, merged: 2, byCitation: 1, byTitle: 0 };
+  const failed = { round: 1, finder: 1, seat: 'critique.finders[0]', label: 'critique-1-f1', error: 'boom' };
+  const tallied = { round: 0, findings: 1, verifiers: 1, votes: 1, confirmed: 1, unconfirmed: 0, moved: 0, held: 0, undecided: 0, deferred: 0 };
+  const state = stateWith({
+    events: [
+      { at: iso(60_000), type: 'codex_turn', label: 'critique-0', tokens: 100 },
+      { at: iso(61_000), type: 'codex_turn', label: 'critique-0-f1', tokens: 100 },
+      { at: iso(62_000), type: 'critique_finders_merged', ...merged },
+      { at: iso(63_000), type: 'codex_turn', label: 'critique-0-vote-1-v1', tokens: 100 },
+      { at: iso(64_000), type: 'critique_votes_tallied', ...tallied },
+      { at: iso(65_000), type: 'critique_finder_failed', ...failed },
+    ],
+  });
+  const steps = replayRun(state, NOTHING).steps;
+  for (const [id, data] of [
+    ['critique_finders_merged', merged],
+    ['critique_votes_tallied', tallied],
+    ['critique_finder_failed', failed],
+  ] as const) {
+    assert.deepEqual(steps.find((s) => s.narration.id === id)?.narration.data, data, `${id} is not replayed`);
+  }
+  const turns = steps.filter((s) => s.narration.id === 'turn_started').map((s) => s.narration.data);
+  assert.equal(turns[0]?.['finder'], undefined);
+  assert.equal(turns[1]?.['seat'], 'critique.finders[0]');
+  assert.equal(turns[2]?.['seat'], 'critique.verifiers[0]');
+  assert.equal(turns[2]?.['kind'], 'vote');
+  // All three are in the critique round the critic opened: one phase_started.
+  assert.equal(steps.filter((s) => s.narration.id === 'phase_started').length, 1);
 });
 
 test('a label this build does not know is placed nowhere rather than guessed', () => {

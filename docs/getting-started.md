@@ -80,6 +80,18 @@ Answer each question in place. Every question has a `### ` heading, and your ans
 > Per user. Anonymous requests fall back to per IP.
 ```
 
+The file may also list the assumptions the run is already making, under **Assumptions the run is already making**. These are questions it was not blocked on and continued past using the planner's fallback. If one is already settled by an answer you gave, or you want to decide it now, write your decision under it the same way. Leave it empty to keep the fallback:
+
+```markdown
+### A1. Should the cache evict the least recently used entry when it is full?
+*Proceeding with:* yes
+
+**Your decision:**
+> Same as my answer to 1: evict the oldest.
+```
+
+Deciding is optional, and it never replaces answering a question. Don't write the literal `**Your answer:**` inside that section: the resume reads it as an answer and stops to ask you to remove it. A decision is recorded as your answer to that exact question, so `ASSUMED.md` stops listing it as a guess.
+
 Then resume:
 
 ```bash

@@ -41,6 +41,7 @@ export type ArtifactKind =
   | 'review'
   | 'answers'
   | 'dispositions'
+  | 'plan-dispositions'
   | 'fix-report'
   | 'other';
 
@@ -72,6 +73,9 @@ const PATTERNS: readonly { kind: ArtifactKind; re: RegExp }[] = [
   // A review fix round's dispositions (#393). Its round is the FIX round, so it
   // answers `code-review-<round - 1>.json`; no tab lists it on its own.
   { kind: 'dispositions', re: /^fix-dispositions-(\d+)\.json$/ },
+  // A plan revision's dispositions (#453, #457). Its round is the REVISION's,
+  // so it answers `plan-critique-<round - 1>.json`; no tab lists it on its own.
+  { kind: 'plan-dispositions', re: /^plan-dispositions-(\d+)\.json$/ },
   // A review fix round's report: the evidence that the round ran, when it left
   // no dispositions file - an unreadable answer, or a run from before #393.
   { kind: 'fix-report', re: /^fix-report-(\d+)\.md$/ },
@@ -330,7 +334,10 @@ function readCitations(v: unknown): Citation[] {
   return out;
 }
 
-/** One finding's disposition, as `fix-dispositions-<n>.json` has it (#393). */
+/**
+ * One finding's disposition, as `fix-dispositions-<n>.json` has it (#393), and
+ * `plan-dispositions-<n>.json` in the same shape (#453).
+ */
 export interface RecordedDisposition {
   disposition: string;
   reason: string;
@@ -374,9 +381,23 @@ export function readDispositions(text: string): DispositionsFile | null {
   return { round: num(root['round']), label, final: label?.startsWith('final-') ?? false, byId };
 }
 
-/** What the fixer did with one finding, as far as the run's files can say. */
+/**
+ * Who answered a round's findings: the fixer answers a review (#393), the
+ * planner's revision answers a critique (#457).
+ */
+export type Answerer = 'fixer' | 'planner';
+
+/** What the fixer or the planner did with one finding, as far as the run's files can say. */
 export type FixOutcome =
-  | { kind: 'recorded'; fixRound: number; final: boolean; entry: RecordedDisposition }
+  | {
+      kind: 'recorded';
+      /** The answering round's own number: the fix round, or the revision's plan round, raw. */
+      fixRound: number;
+      final: boolean;
+      entry: RecordedDisposition;
+      /** Absent is the fixer, which is every outcome before #457. */
+      by?: Answerer;
+    }
   /** The round ran and its dispositions could not be read, so none were recorded. */
   | { kind: 'not-recorded' }
   | null;
@@ -399,16 +420,26 @@ export function outcomeLine(
   else if (outcome?.kind === 'recorded') {
     const what = outcome.entry.disposition.replace(/-/g, ' ');
     const why = outcome.entry.reason === '' ? '' : ` - ${outcome.entry.reason}`;
-    const round = `${outcome.final ? 'final fix round' : 'fix round'} ${String(outcome.fixRound)}`;
-    out.push(`fixer: ${what}${why} (${round})`);
+    // A plan round is counted from one, as the Plans and Plan critique tabs
+    // count it (`shownRound`); a fix round keeps the number in its label.
+    const round =
+      outcome.by === 'planner'
+        ? `plan round ${String(outcome.fixRound + 1)}`
+        : `${outcome.final ? 'final fix round' : 'fix round'} ${String(outcome.fixRound)}`;
+    out.push(`${outcome.by ?? 'fixer'}: ${what}${why} (${round})`);
   }
   if (next === 'raised-again') out.push('same id raised again next round');
   else if (next === 'not-reviewed-again') out.push('not reviewed again');
   return out;
 }
 
-/** What the files beside one review round say about the fix round that answered it. */
+/**
+ * What the files beside one review round say about the fix round that answered
+ * it, or beside one critique round about the revision that answered it.
+ */
 export interface AnsweringRound {
+  /** Absent is the fixer. */
+  by?: Answerer;
   /** The round of the listed `fix-dispositions-<n>.json`, or null when none is listed. */
   listed: number | null;
   /** That file, read; null while it is loading or when it cannot be read. */
@@ -417,6 +448,18 @@ export interface AnsweringRound {
   unrecorded: boolean;
   /** The ids the next review raised, or null when there is no next review to read. */
   raised: ReadonlySet<string> | null;
+}
+
+/**
+ * Whether the revision answering `plan-critique-<round>.json` ran (#457): its
+ * `plan-<round + 1>.json` is listed. A findings revision writes that plan after
+ * its dispositions, and removes a stale dispositions file when its answer could
+ * not be read, so a listed plan with no dispositions file beside it recorded
+ * none - an unreadable answer, or a run from before #453. An answers-only
+ * revision rewrites `plan-<round>.json` and opens no round, so it never counts.
+ */
+export function revisionRan(entries: readonly ArtifactEntry[], round: number): boolean {
+  return ofKind(entries, 'plan').some((c) => c.round === round + 1);
 }
 
 /**
@@ -431,7 +474,7 @@ export function outcomeFor(id: string, a: AnsweringRound): string[] {
   const entry = a.file?.byId.get(id);
   const outcome: FixOutcome =
     entry !== undefined && a.listed !== null
-      ? { kind: 'recorded', fixRound: a.listed, final: a.file?.final ?? false, entry }
+      ? { kind: 'recorded', fixRound: a.listed, final: a.file?.final ?? false, entry, ...(a.by === undefined ? {} : { by: a.by }) }
       : a.unrecorded && a.listed === null
         ? { kind: 'not-recorded' }
         : null;

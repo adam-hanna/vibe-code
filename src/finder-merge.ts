@@ -86,6 +86,93 @@ function sharesCitation(a: Finding, b: Finding): boolean {
   return false;
 }
 
+/**
+ * How many lines apart two seats' citations of one file may be for the fixer to
+ * be told the two findings may be one defect (#462). A flag, never a merge.
+ *
+ * Measured on every cross-seat pair the merge kept apart while citing the same
+ * file: 31 pairs, from the bench's 24 panel reviews and the archive, each
+ * labelled by hand from its titles. A gap of 1 line was the same defect 6 times
+ * and two different defects 2 times. 2 to 3 lines: 2 and 0. 5 lines or more: 0
+ * and 8. Title similarity did not separate the gap-1 pairs either (the
+ * different ones scored 0.056 and 0.222, the same ones 0.000 to 0.400). So no
+ * rule here can merge the 8 without also merging the 2. A merge hides one
+ * defect from the fixer; a flag asks the fixer, who reads the code, to decide.
+ * 3 is the widest gap at which a pair was ever one defect.
+ */
+export const NEAR_LINES = 3;
+
+/** Two findings that may be one defect: ids in report order, and where they are close. */
+export interface NearPair {
+  first: string;
+  second: string;
+  path: string;
+  /** Lines between the closest two citations of `path`, 0 to `NEAR_LINES`. */
+  gap: number;
+}
+
+/**
+ * The seats that raised a finding, or null when it has no readable `foundBy`.
+ * `foundBy` rides through `readFinding` unvalidated, so a shape this build cannot
+ * read flags nothing rather than guessing who raised it.
+ */
+function seatsOf(f: Finding): Set<string> | null {
+  const raw: unknown = f.foundBy;
+  if (!Array.isArray(raw) || raw.length === 0) return null;
+  const seats = new Set<string>();
+  for (const entry of raw as unknown[]) {
+    const seat = typeof entry === 'object' && entry !== null ? (entry as { seat?: unknown }).seat : undefined;
+    if (typeof seat !== 'string') return null;
+    seats.add(seat);
+  }
+  return seats;
+}
+
+/** The closest pair of `code` citations of one file across two findings, or null. */
+function closest(a: Finding, b: Finding): { path: string; gap: number } | null {
+  let best: { path: string; gap: number } | null = null;
+  const lines = (f: Finding) =>
+    readEvidence(f.evidence).flatMap((e) =>
+      e.kind === 'code' && e.path !== undefined && e.line !== undefined
+        ? [{ path: normalisePath(e.path), line: e.line }]
+        : [],
+    );
+  const right = lines(b);
+  for (const l of lines(a)) {
+    for (const r of right) {
+      if (l.path !== r.path) continue;
+      const gap = Math.abs(l.line - r.line);
+      if (best === null || gap < best.gap) best = { path: l.path, gap };
+    }
+  }
+  return best;
+}
+
+/**
+ * The pairs of a merged report's findings that may be one defect (#462): raised
+ * by seats that share none, citing one file within `NEAR_LINES` lines.
+ *
+ * Only findings that carry `foundBy` take part, and it is present only when
+ * finders ran, so a review without finders flags nothing. Two findings from one
+ * seat are never paired, for the reason the merge never merges them: that seat
+ * chose to make two claims.
+ */
+export function nearPairs(findings: readonly Finding[]): NearPair[] {
+  const out: NearPair[] = [];
+  findings.forEach((a, i) => {
+    const left = seatsOf(a);
+    if (left === null) return;
+    for (const b of findings.slice(i + 1)) {
+      const right = seatsOf(b);
+      if (right === null || [...left].some((s) => right.has(s))) continue;
+      const near = closest(a, b);
+      if (near === null || near.gap > NEAR_LINES) continue;
+      out.push({ first: a.id, second: b.id, ...near });
+    }
+  });
+  return out;
+}
+
 /** How a finding matches a group, or null when it does not. Citation first. */
 function matchOf(group: readonly Member[], candidate: Member): 'citation' | 'title' | null {
   if (group.some((m) => m.finder.k === candidate.finder.k)) return null;

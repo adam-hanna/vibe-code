@@ -7,7 +7,7 @@ import {
   parseStructured,
   RateLimitError,
 } from '@src/claude.js';
-import { Cancelled, cancelRequested, sleepUnlessCancelled } from '@src/cancel.js';
+import { Cancelled, sleepUnlessCancelled, stopReason } from '@src/cancel.js';
 import { codexTurn, OutputCutOffError } from '@src/codex.js';
 import { cutOffNote } from '@src/cutoff.js';
 import type { CodexTurnOptions, CodexTurnResult } from '@src/codex.js';
@@ -20,8 +20,8 @@ import {
   groundVoteEvidence,
   refusePlaceholderPlan,
 } from '@src/evidence.js';
-import { FIX_SCHEMA, VOTE_SCHEMA } from '@src/schemas.js';
-import { dispositionSummary, settleDispositions } from '@src/dispositions.js';
+import { FIX_SCHEMA, PLAN_VOTE_SCHEMA, REVISE_SCHEMA, VOTE_SCHEMA } from '@src/schemas.js';
+import { dispositionSummary, settleDispositions, settlePlanDispositions } from '@src/dispositions.js';
 import { countBallot, describeVotes, failedBallot, tally } from '@src/vote.js';
 import { describeOutcome, observe } from '@src/reproducer.js';
 import { gateMode } from '@src/gates.js';
@@ -52,7 +52,9 @@ import {
 } from '@src/roles.js';
 import type { Access, FinderEntry, Role, RoleSpec, RoleTable, VerifierEntry } from '@src/roles.js';
 import { mergeAcrossFinders } from '@src/finder-merge.js';
-import type { FinderReport } from '@src/finder-merge.js';
+import { inlineLiteral, literal } from '@src/literal.js';
+import { runSeatGroup } from '@src/seat-group.js';
+import type { FinderMerge, FinderReport } from '@src/finder-merge.js';
 import { claudeMcpDefinitions, resolveClaudeGrants } from '@src/mcp.js';
 import {
   clearSlotFork,
@@ -102,16 +104,19 @@ import {
   writeCheckpoint,
 } from '@src/run.js';
 import {
+  assumptionSection,
   findRephrase,
   isSameQuestion,
   normalize,
   pairAnswers,
+  reconcileAssumed,
   reconcileQuestionRecords,
   recordSuppressed,
 } from '@src/questions.js';
 import {
   hasFindingShape,
   isDeferrable,
+  isPlanToAddress,
   isReportBasename,
   isToAddress,
   isUnaddressed,
@@ -124,6 +129,7 @@ import {
   parseAnswers,
   parseFindings,
   parseFixOutput,
+  parsePlanDispositions,
   parseTestVerdicts,
   parsePlan,
   parseVote,
@@ -133,15 +139,17 @@ import {
   SEVERITY_RANK,
   severityChangesOf,
 } from '@src/validate.js';
-import type { FixOutput } from '@src/validate.js';
+import type { FixOutput, SaidDisposition } from '@src/validate.js';
 import {
   attachVerdicts,
+  combineVerdicts,
+  disagreements,
   judgeChanges,
   judgePatterns,
   recordedPatterns,
   testChangeCounts,
 } from '@src/judge.js';
-import type { RawVerdict } from '@src/judge.js';
+import type { RawVerdict, SeatJudgement } from '@src/judge.js';
 import {
   markOccupancyWarned,
   occupancyWarning,
@@ -194,6 +202,7 @@ import type {
   RunState,
   RunSummary,
   TurnActivity,
+  UnconfirmedP0,
   Votes,
 } from '@src/types.js';
 
@@ -395,6 +404,121 @@ function recordDispositions(
     { ...settled },
   );
   return settled;
+}
+
+/**
+ * A findings revision's dispositions, read from the same output its plan was
+ * (#453): the list when `parsePlanDispositions` accepts it, or why not.
+ *
+ * Read after `parsePlan` has accepted the plan half, so an unreadable plan has
+ * already failed the turn exactly as it always did; this only ever decides
+ * whether a plan that stands carries a record.
+ */
+type PlanDispositionsRead = { parsed: SaidDisposition[] } | { parsed: null; error: string };
+
+function readPlanDispositions(raw: unknown): PlanDispositionsRead {
+  try {
+    return { parsed: parsePlanDispositions(raw) };
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    return { parsed: null, error: message.split(/\r?\n/)[0] ?? '' };
+  }
+}
+
+/**
+ * A findings revision's dispositions on disk and in the event log, or the
+ * warning that there are none (#453). `recordDispositions` for the plan side,
+ * and the same rules: unreadable is never `not-addressed`, and an unreadable
+ * retry removes the earlier attempt's file.
+ *
+ * Called by `revisePlan` after the plan parses and before the state write that
+ * persists the plan and consumes the findings it answers - record, then
+ * consume, as both review fix sites do. A process that dies between the two
+ * revises again and records again, and the scorecard reads the last event per
+ * label. `round` is the revision's own, already advanced, and `answers` the
+ * critique round before it: `revise-<n>` answers `plan-critique-<n-1>.json`.
+ */
+function recordPlanDispositions(
+  state: RunState,
+  read: PlanDispositionsRead,
+  findings: readonly Finding[],
+  label: string,
+): void {
+  const round = state.planRound;
+  const answers = round - 1;
+  const name = `plan-dispositions-${round}.json`;
+  if (read.parsed === null) {
+    recordAndSay(
+      state,
+      'warn',
+      'plan_dispositions_unreadable',
+      `${label}: the planner's dispositions could not be read, so none are recorded for this revision - ` +
+        'the plan stands as written',
+      { round, label, answers, reason: read.error },
+    );
+    removeArtifact(state, name);
+    return;
+  }
+  const settled = settlePlanDispositions(findings, read.parsed, {
+    round,
+    label,
+    answers,
+    criticSeat: state.criticSeat,
+  });
+  artifact(state, name, settled);
+  recordAndSay(
+    state,
+    settled.dropped.length + settled.duplicates.length > 0 ? 'warn' : 'info',
+    'plan_dispositions',
+    dispositionSummary(settled, 'planner'),
+    { ...settled },
+  );
+}
+
+/**
+ * Which findings the planner rebutted in the revision this critique judged,
+ * and which of them the critique raised again under the same id (#453).
+ *
+ * Read from `plan-dispositions-<round>.json`, the record of the revision that
+ * wrote the plan this critique round judged; no file, an unreadable one, or no
+ * rebuttal in it records nothing. Same id only: a finding raised again under a
+ * new id - which a memoryless finder's `<id>-f<k>` always is - is not seen, so
+ * this undercounts disagreement and never invents it. Recorded here rather than
+ * on the next revision because a critique that approves has no next revision,
+ * and that is exactly the case where the rebuttal stood.
+ */
+function recordRebuttalsRaisedAgain(state: RunState, findings: readonly Finding[]): void {
+  if (state.planRound < 1) return;
+  const text = artifactText(state, `plan-dispositions-${state.planRound}.json`);
+  if (text === null) return;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return;
+  }
+  if (typeof parsed !== 'object' || parsed === null) return;
+  const list: unknown = (parsed as Record<string, unknown>)['dispositions'];
+  if (!Array.isArray(list)) return;
+  const rebutted: string[] = [];
+  for (const d of list as unknown[]) {
+    if (typeof d !== 'object' || d === null) continue;
+    const { id, disposition } = d as Record<string, unknown>;
+    if (typeof id === 'string' && disposition === 'rebutted' && !rebutted.includes(id)) rebutted.push(id);
+  }
+  if (rebutted.length === 0) return;
+  const raised = new Set(findings.map((f) => f.id));
+  const disputed = rebutted.filter((id) => raised.has(id));
+  const notRaisedAgain = rebutted.filter((id) => !raised.has(id));
+  recordAndSay(
+    state,
+    disputed.length > 0 ? 'warn' : 'info',
+    'critique_rebuttal_disputed',
+    `critique-${state.planRound}: ${String(disputed.length)} of ${String(rebutted.length)} finding(s) ` +
+      'rebutted by the planner raised again under the same id' +
+      (disputed.length > 0 ? `: ${disputed.join(', ')}` : ' - none raised again'),
+    { round: state.planRound, rebutted, disputed, notRaisedAgain },
+  );
 }
 
 /**
@@ -842,7 +966,7 @@ async function runPhases(
           // config rather than on what was stored (#425): a resume layers the
           // project file over the run's settings, so a run approved with the
           // setting on and resumed with it off must get the old prompt.
-          toAddress(cfg, state.planNonBlocking ?? []),
+          planToAddress(cfg, state.planNonBlocking ?? []),
           // An approved plan can predate the answers to its advisory questions
           // (#277); the implementer is told them, and that they win.
         ) + P.advisoryAnswers(state.advisoryAnswers, 'implementer'),
@@ -1022,7 +1146,10 @@ function approvePlan(
   // is now a P2 with a `by: 'human'` move and no guard's `downgraded`, so it is
   // treated as any approved P2 is. Accepting a plan says the finding need not
   // block it, not that it is no longer work.
-  const nonBlocking = toAddress(cfg, findings);
+  //
+  // A P1 the critique vote moved goes too (#405): it is a P2 now, and an
+  // unconfirmed claim is still one the implementer can settle.
+  const nonBlocking = planToAddress(cfg, findings);
   // The sentence, chosen before it is said, because since #223 saying it and
   // recording it are one call and the call sits below the two assignments
   // its data reads. The two branches and their wording are unchanged, and so
@@ -1044,7 +1171,10 @@ function approvePlan(
   // unconditionally so an approving round that declined nothing cannot
   // leave an earlier round's value standing, and written on the same state
   // save that clears the pending findings below.
-  state.declined = findings.filter(isDeferrable);
+  // Not a vote-moved finding (#405): `declined` tells the implementer a
+  // finding is real and agreed to belong elsewhere, and an unconfirmed claim is
+  // neither. It goes to FOLLOW-UPS.md as unconfirmed by vote regardless.
+  state.declined = findings.filter((f) => isDeferrable(f) && !movedByVote(f));
   // For the same reason and on the same save (#425): an approving round with
   // nothing to hand on removes the field rather than leaving an earlier
   // round's standing - and removes rather than empties it, so a run with
@@ -1339,17 +1469,52 @@ async function planPhase(
     // `withConcurrentCompaction` surfaces it once `work` has resolved. Anything
     // left outside the callback would be skipped for a critique the run has
     // already paid for.
-    const critique = await withConcurrentCompaction(
+    const { found: critique, held } = await withConcurrentCompaction(
       state,
       cfg,
       async () => {
         const critiqued = await runCritique(state, cfg, cwd, plan, roles, turns, planActivity);
+        // The critique's finders and its vote (#405), in that order and before
+        // everything below, so the artifact, the deferrals, the pending
+        // findings and the gate all read one report: merged, voted, with
+        // `foundBy` and `votes`. With both lists empty, exactly the critic's
+        // report: no turn, no key, no event. None of these turns is a plan
+        // round - `planRound` moves only with a revision.
+        const finders = readFinders(cfg, 'critique');
+        const merged =
+          finders.length === 0
+            ? critiqued
+            : (
+                await runFinderSeats(
+                  state,
+                  cfg,
+                  cwd,
+                  roles,
+                  turns,
+                  critiqueFinderPhase(state, cfg, plan, roles, planActivity),
+                  finders,
+                  critiqued,
+                )
+              ).report;
+        const verifiers = readVerifiers(cfg, 'critique');
+        const voted =
+          verifiers.length === 0
+            ? { report: merged, held: [] }
+            : await runVoteSeats(
+                state,
+                cfg,
+                cwd,
+                turns,
+                critiqueVotePhase(state, cfg, plan, roles, await reviewStandardsFor(state, cwd)),
+                verifiers,
+                merged,
+              );
         // Before the artifact and before `recordPendingFindings`, so the round's
         // record shows what the run refused on and the next revision is told
         // about it. A mechanical fact about the artifact on disk, added to the
         // critic's judgement rather than replacing it (#108).
         const planFile = `plan-${state.planRound}.json`;
-        const { report: found, raised } = refusePlaceholderPlan(critiqued, plan.plan_md, planFile);
+        const { report: found, raised } = refusePlaceholderPlan(voted.report, plan.plan_md, planFile);
         if (raised !== null) {
           recordAndSay(
             state,
@@ -1360,6 +1525,16 @@ async function planPhase(
           );
         }
         artifact(state, `plan-critique-${state.planRound}.json`, found);
+        // Who took this round's own turn (#453), saved by
+        // `recordPendingFindings` below: the revision answering this round
+        // credits its findings to this seat, and a resume may move
+        // `roles.critic` in between. `state.reviewSeat`'s pattern.
+        state.criticSeat = {
+          round: state.planRound,
+          provider: roles.critic.provider,
+          model: roles.critic.model ?? 'default',
+        };
+        recordRebuttalsRaisedAgain(state, found.findings);
         collectDeferred(state, found.findings);
         writeFollowUps(state, plan);
         // In here for the same reason the artifact is: a budget escalation the
@@ -1367,7 +1542,7 @@ async function planPhase(
         // Cleared again below the moment the gate says there is nothing to
         // consume.
         recordPendingFindings(state, 'plan', found.findings);
-        return found;
+        return { found, held: voted.held };
       },
       turns.claude,
       'critic',
@@ -1380,6 +1555,22 @@ async function planPhase(
     // goes. A window drawing it only on a failure would have four counts while
     // the news was bad and nothing while it was good.
     sayFindings('plan', critique.findings, decision, cfg.loop.p1Tolerance);
+    // `critique.unconfirmedP0: "halt"` (#405), the review's stop for the plan:
+    // after the artifact and the pending findings, because the stop is about a
+    // record that has to exist. The P0 is not moved. A resume with no answer
+    // takes the pending findings to the revision, blocking, and casts no vote
+    // again; one whose person demoted it takes #394's acceptance above.
+    if (held.length > 0) {
+      throw new Escalation(
+        EXIT.NEEDS_HUMAN,
+        `The critique verifiers did not confirm ${held.length} P0 finding(s), and ` +
+          'critique.unconfirmedP0 is "halt". Each is still P0. Leave it alone and it keeps blocking: ' +
+          'the resume sends it to the plan revision. To demote one, fill in its block under ' +
+          '"Change a severity" below, then resume.',
+        null,
+        held,
+      );
+    }
     if (decision.pass) {
       approvePlan(state, cfg, plan, critique.findings, decision);
       break;
@@ -2272,6 +2463,16 @@ function renderOutstanding(
  */
 function toAddress(cfg: Config, findings: readonly unknown[]): Finding[] {
   return cfg.loop.fixNonBlocking ? findings.filter(isToAddress) : [];
+}
+
+/**
+ * `toAddress` for an approved plan (#405): the same switch, and a P2 the
+ * critique vote moved goes to the implementer too (`isPlanToAddress`). Equal to
+ * `toAddress` on every run without critique verifiers, which is every run that
+ * has no vote-moved plan finding.
+ */
+function planToAddress(cfg: Config, findings: readonly unknown[]): Finding[] {
+  return cfg.loop.fixNonBlocking ? findings.filter(isPlanToAddress) : [];
 }
 
 /** How FOLLOW-UPS.md names each `UnaddressedFinding` outcome (#425). */
@@ -4233,7 +4434,8 @@ async function withRateLimitRetry<T>(
         // refusal do it, for two reasons: the loop would otherwise narrate
         // `rate_limit_resumed` on a wait that did not resume, and it would
         // announce a turn it is about to refuse to start.
-        throw new Cancelled(cancelRequested() ?? 'the run was stopped during a rate-limit wait');
+        // `stopReason`: a seat's wait may have been cut short by its group (#403).
+        throw new Cancelled(stopReason() ?? 'the run was stopped during a rate-limit wait');
       }
       log.step(`Resuming "${label}" after rate-limit wait`, {
         id: 'rate_limit_resumed',
@@ -4480,12 +4682,22 @@ async function revisePlan(
       planInPrompt: state.plan !== null,
       cwd,
       label,
+      // The plan and a disposition per finding (#453), on the revision that
+      // answers a critique only: every other planner turn sends the role's own
+      // schema exactly as before.
+      ...(args.findings === undefined ? {} : { jsonSchema: REVISE_SCHEMA }),
     },
     turns,
     roles,
   );
 
-  const plan = parsePlan(readStructured(outcome));
+  const raw = readStructured(outcome);
+  // An unreadable plan fails the turn here, exactly as it always did. The
+  // dispositions are split off the same output and never reach the plan.
+  const plan = parsePlan(raw);
+  // Before the write below that persists the plan and consumes the findings it
+  // answers, so a revision is never consumed without its record (#453).
+  if (args.findings !== undefined) recordPlanDispositions(state, readPlanDispositions(raw), args.findings, label);
   state.plan = plan;
   // Consumed by the same write that persists the plan answering them, which is
   // the earliest instant at which a second revision would be buying work the
@@ -5023,6 +5235,38 @@ function recordDowngrades(state: RunState, downgraded: readonly Finding[]): void
   }
 }
 
+/**
+ * The critique prompt for this round: what the critic is sent, and what every
+ * additional critique finder is sent with `hasMemory` false (#405). One
+ * builder, so the critic's prompt and a finder's cannot come to differ in
+ * anything but the memory note and a finder's focus.
+ */
+function critiquePromptFor(
+  state: RunState,
+  plan: Plan,
+  roles: RoleTable,
+  planActivity: TurnActivity | undefined,
+  hasMemory: boolean,
+): string {
+  return (
+    P.critiquePrompt(
+      plan.plan_md,
+      plan.assumptions,
+      plan.out_of_scope,
+      state.planRound + 1,
+      hasMemory,
+      state.environment,
+      roles,
+      // The plan's own bar, not a snapshot: this runs before the gate, and
+      // the critic is what decides whether the bar is any good.
+      plan.acceptance_criteria,
+      planActivity,
+      // Answers no revision has folded in yet (#277). Empty on every run that
+      // skipped no revision, so this prompt is byte-identical there.
+    ) + P.advisoryAnswers(state.advisoryAnswers, 'critic')
+  );
+}
+
 async function runCritique(
   state: RunState,
   cfg: Config,
@@ -5046,21 +5290,7 @@ async function runCritique(
     cfg,
     {
       role: 'critic',
-      prompt: P.critiquePrompt(
-        plan.plan_md,
-        plan.assumptions,
-        plan.out_of_scope,
-        state.planRound + 1,
-        roleHasMemory(state, cfg, 'critic', roles),
-        state.environment,
-        roles,
-        // The plan's own bar, not a snapshot: this runs before the gate, and
-        // the critic is what decides whether the bar is any good.
-        plan.acceptance_criteria,
-        planActivity,
-        // Answers no revision has folded in yet (#277). Empty on every run that
-        // skipped no revision, so this prompt is byte-identical there.
-      ) + P.advisoryAnswers(state.advisoryAnswers, 'critic'),
+      prompt: critiquePromptFor(state, plan, roles, planActivity, roleHasMemory(state, cfg, 'critic', roles)),
       cwd,
       label: `critique-${state.planRound}`,
     },
@@ -5077,6 +5307,503 @@ async function runCritique(
     parseFindings(readStructured(outcome)),
     outcome.activity,
   );
+}
+
+/**
+ * What a phase hands the shared finder and vote runners (#452).
+ *
+ * The review (#388) and the plan critique (#405) run one mechanism: finders
+ * after the first, merged by claim in config order, then every blocking finding
+ * to every verifier, tallied in (finding, verifier) order - up to the section's
+ * own `maxParallel` at once, as one `runSeatGroup` (#403). A phase supplies only
+ * what differs, as data and small callbacks, so `runFinderSeats` and
+ * `runVoteSeats` never ask which phase they are running for, and each phase
+ * keeps its own labels, prompts, events and sentences byte for byte.
+ */
+interface SeatPhase {
+  /** The role every seat plays. `roles[role]` is the first finder, `foundBy` seat `roles.<role>`. */
+  role: 'reviewer' | 'critic';
+  /** The archive's round: `state.reviewRound`, or `state.planRound`. */
+  round: number;
+  /** The section's own bound, and the setting it was read from, for the backstop's sentence. */
+  maxParallel: number;
+  setting: 'review.maxParallel' | 'critique.maxParallel';
+}
+
+/** An event the runner records and narrates, in the phase's own words and keys. */
+interface SeatEvent {
+  id: string;
+  message: string;
+  data: Record<string, unknown>;
+}
+
+interface FinderPhase<T = never> extends SeatPhase {
+  /** The `kind` on a finder's `turn_started` and `turn_finished`. */
+  kind: 'review' | 'critique';
+  /** The step line's verb: `<holder> <doing> (finder <k>)`. */
+  doing: string;
+  table: (f: FinderEntry) => RoleTable;
+  /**
+   * The finder's turns, in order: one per diff part for the review, the one for
+   * the critique. More than one is merged by `mergeReviewReports`, as a chunked
+   * reviewer's are; one is taken as it came.
+   */
+  parts: (f: FinderEntry) => readonly { label: string; prompt: string }[];
+  /** The event a failed finder records, and the noun its sentence opens with. */
+  failed: { id: string; noun: string };
+  merged: (m: { seats: number; reported: number; raised: number; merge: FinderMerge }) => SeatEvent;
+  /**
+   * A phase's own reading of each part's output, kept per part in the finder's
+   * slot (#404). The runner never interprets it: the review reads a finder's
+   * test verdicts through this and combines them itself; the critique sets none.
+   */
+  extra?: (structured: unknown) => T;
+}
+
+/** A reporting finder's slot: its report, and the phase's `extra` for each part, in part order (#404). */
+type FinderSlot<T> = FinderReport & { extras: T[] };
+
+/** What a round's vote came to, for the phase's tally sentence. */
+interface VoteTotals {
+  findings: number;
+  verifiers: number;
+  votes: number;
+  confirmed: number;
+  unconfirmed: number;
+  moved: number;
+  held: number;
+  undecided: number;
+  /** Blocking findings the phase exempted from the vote, counted rather than voted on. */
+  exempt: number;
+  /** `confirmed … undecided (still blocking)`: the part of the sentence both phases share. */
+  said: string;
+}
+
+interface VotePhase extends SeatPhase {
+  /** A P0 or P1 the vote leaves alone: one that reproduced, or one deferred. */
+  exempt: (f: Finding) => boolean;
+  /** One finding's ballot prompt, the same for every verifier. */
+  prompt: (f: Finding) => string;
+  table: (v: VerifierEntry) => RoleTable;
+  /** A ballot's label, from the finding's 1-based place in the report (`n`) and the verifier's number (`k`). */
+  label: (n: number, k: number) => string;
+  quorum: number | null;
+  unconfirmedP0: UnconfirmedP0;
+  tallied: (t: VoteTotals) => SeatEvent;
+}
+
+/**
+ * A seat turn, told as finished when seat turns may overlap (#403).
+ *
+ * Only then do their `turn_started` frames carry the label and a
+ * `turn_finished` follow: a window keeps several turns live by label, and needs
+ * to be told when each one ends. At 1 the turns cannot overlap, and the
+ * narration is exactly what it was.
+ */
+async function seatFinishing<T>(
+  phase: SeatPhase,
+  label: string,
+  kind: string,
+  work: () => Promise<T>,
+): Promise<T> {
+  if (phase.maxParallel <= 1) return work();
+  try {
+    return await work();
+  } finally {
+    log.detail(`${label} finished`, {
+      id: 'turn_finished',
+      data: { label, role: phase.role, kind, round: phase.round },
+    });
+  }
+}
+
+/**
+ * The additional finders (#388 Part B, #405), after the first, and the merge
+ * across all of them.
+ *
+ * Each finder is the phase's role on a swapped seat (`phase.table`): the same
+ * `runTurn`, so its timeout, charge, heartbeat and path style follow the seat.
+ * A finder never sees another's findings: every one is handed the prompt the
+ * first was, memoryless, plus its focus.
+ *
+ * Up to `phase.maxParallel` finders at once (#403), as one `runSeatGroup`;
+ * `1`, the default, is one after another exactly as before. A finder's own
+ * parts stay in sequence, so a finder that fails stops at its first failed
+ * part. Each writes its report into its own slot, and the merge reads the slots
+ * in config order, so `foundBy`, the merged findings and the renamed `-f<k>`
+ * ids are the same whichever finder finished first.
+ */
+async function runFinderSeats<T = never>(
+  state: RunState,
+  cfg: Config,
+  cwd: string,
+  roles: RoleTable,
+  turns: AgentTurns,
+  phase: FinderPhase<T>,
+  entries: readonly FinderEntry[],
+  first: FindingsReport,
+): Promise<{ report: FindingsReport; slots: FinderSlot<T>[] }> {
+  const parallel = phase.maxParallel > 1;
+  const reported: (FinderSlot<T> | undefined)[] = entries.map(() => undefined);
+  const tasks = entries.map((f, j) => async (): Promise<void> => {
+    const table = phase.table(f);
+    const reports: FindingsReport[] = [];
+    const extras: T[] = [];
+    let label = '';
+    try {
+      for (const part of phase.parts(f)) {
+        label = part.label;
+        log.step(`${holderLabel(phase.role, table)} ${phase.doing} (finder ${f.k})`, {
+          id: 'turn_started',
+          data: {
+            role: phase.role,
+            kind: phase.kind,
+            round: phase.round,
+            finder: f.k,
+            seat: f.path,
+            ...(parallel ? { label } : {}),
+          },
+        });
+        const outcome = await seatFinishing(phase, label, phase.kind, () =>
+          runTurn(
+            state,
+            cfg,
+            { role: phase.role, prompt: part.prompt, cwd, label: part.label, seatPath: f.path },
+            turns,
+            table,
+          ),
+        );
+        // Judged by what this turn did, attributed to the role it played. What
+        // else the phase reads from the turn - a review finder's test verdicts
+        // - is kept beside the report, per part, and combined by the phase
+        // itself (#404). The first finder still owns `reviewCoverage`.
+        const structured = readStructured(outcome);
+        reports.push(
+          groundAndRecord(
+            state,
+            cwd,
+            phase.role,
+            table,
+            parseFindings(structured),
+            outcome.activity,
+          ),
+        );
+        if (phase.extra !== undefined) extras.push(phase.extra(structured));
+      }
+    } catch (err: unknown) {
+      // A stop, a ceiling, a rate limit waited out past its cap: the round
+      // ends exactly as it would for the first finder.
+      if (err instanceof Escalation || err instanceof Cancelled) throw err;
+      // And a ceiling this failure itself crossed. `chargeFailure` charged it
+      // and *returned* the ceiling rather than throwing it, so that a role's
+      // failure reaches cli.ts as itself - but a seat's failure is about to be
+      // absorbed here, and absorbing it must not absorb the brake with it.
+      enforceCeilings(state, cfg, f.setting.provider === 'claude');
+      // Anything else costs this finder only. Losing an extra seat can only
+      // leave out what that seat alone would have raised, so the round falls
+      // back to what a default config does - and the record says so.
+      const message = err instanceof Error ? err.message : String(err);
+      const error = message.split(/\r?\n/)[0] ?? '';
+      const provider = f.setting.provider;
+      const model = f.setting.model ?? 'default';
+      recordAndSay(
+        state,
+        'warn',
+        phase.failed.id,
+        `${phase.failed.noun} finder ${f.k} (${f.path}, ${provider}/${model}) failed on ${label}: ${error}`,
+        { round: phase.round, finder: f.k, seat: f.path, label, error },
+      );
+      return;
+    }
+    const [single] = reports;
+    reported[j] = {
+      k: f.k,
+      seat: f.path,
+      provider: f.setting.provider,
+      model: f.setting.model ?? 'default',
+      report: reports.length === 1 && single !== undefined ? single : mergeReviewReports(reports),
+      extras,
+    };
+  });
+  await runSeatGroup(state, phase.maxParallel, tasks, phase.setting);
+
+  const holder = roles[phase.role];
+  // Config order, whatever order they finished in (#403 decision 3).
+  const slots = reported.filter((r): r is FinderSlot<T> => r !== undefined);
+  const all: FinderReport[] = [
+    { k: 0, seat: `roles.${phase.role}`, provider: holder.provider, model: holder.model ?? 'default', report: first },
+    ...slots,
+  ];
+  const merge = mergeAcrossFinders(all);
+  const seats = entries.length + 1;
+  const raised = all.reduce((n, r) => n + r.report.findings.length, 0);
+  // Recorded, not narration only: this is the one account of how many finders
+  // reported in the attempt that wrote this round's artifact. A resumed round
+  // is bought again from scratch, so a failure from an attempt that never got
+  // here leaves no merge event behind - the summary and the window read this,
+  // never a tally of failures.
+  const said = phase.merged({ seats, reported: all.length, raised, merge });
+  recordAndSay(state, 'info', said.id, said.message, said.data);
+  return { report: merge.report, slots };
+}
+
+/**
+ * The vote on every blocking finding the phase does not exempt (#388 Part C,
+ * #405), after the merge and before the gate.
+ *
+ * Each eligible finding goes to every verifier, every ballot of the round in
+ * one `runSeatGroup` of up to `phase.maxParallel` at once (#403) - `1`, the
+ * default, is every vote on finding 1, then every vote on finding 2, as before.
+ * Each ballot is written into its (finding, verifier) slot and tallied from the
+ * slots in that order, so `votes` and the ballot order are the same whichever
+ * verifier answered first. A verifier is the phase's role on a swapped seat
+ * whose job is a vote (`phase.table`): the same `runTurn`, so its timeout,
+ * charge, heartbeat and path style follow the seat. It is shown the claim and
+ * nothing about who made it, and never another verifier's vote.
+ *
+ * Not voted on: a P2 or P3, which includes everything a guard already moved;
+ * and a finding `phase.exempt` names - one whose own reproducer reproduced, an
+ * observation the vote has nothing to add to, or a plan finding marked
+ * `defer: true`. Each round's vote stands alone: a finding raised again next
+ * round is voted on again, by fresh turns that know no earlier tally.
+ */
+async function runVoteSeats(
+  state: RunState,
+  cfg: Config,
+  cwd: string,
+  turns: AgentTurns,
+  phase: VotePhase,
+  verifiers: readonly VerifierEntry[],
+  report: FindingsReport,
+): Promise<{ report: FindingsReport; held: Finding[] }> {
+  const parallel = phase.maxParallel > 1;
+  const blocking = (f: Finding): boolean => f.severity === 'P0' || f.severity === 'P1';
+  // 1-based in the report as voted on: the `<n>` of the label.
+  const eligible = report.findings
+    .map((f, i) => ({ f, n: i + 1 }))
+    .filter(({ f }) => blocking(f) && !phase.exempt(f));
+  const exempt = report.findings.filter((f) => blocking(f) && phase.exempt(f)).length;
+
+  const votes = new Map<string, Votes>();
+  let cast = 0;
+  const slots: Ballot[][] = eligible.map(() => []);
+  const tasks: (() => Promise<void>)[] = [];
+  for (const [i, { f, n }] of eligible.entries()) {
+    const prompt = phase.prompt(f);
+    const ballots: Ballot[] = slots[i] ?? [];
+    for (const [j, v] of verifiers.entries()) {
+      tasks.push(async (): Promise<void> => {
+        const table = phase.table(v);
+        const req: TurnRequest = { role: phase.role, prompt, cwd, label: phase.label(n, v.k), seatPath: v.path };
+        log.step(`${holderLabel(phase.role, table)} is checking ${f.id} (verifier ${v.k})`, {
+          id: 'turn_started',
+          data: {
+            role: phase.role,
+            kind: 'vote',
+            round: phase.round,
+            verifier: v.k,
+            seat: v.path,
+            finding: f.id,
+            ...(parallel ? { label: req.label } : {}),
+          },
+        });
+        cast += 1;
+        try {
+          const outcome = await seatFinishing(phase, req.label, 'vote', () => runTurn(state, cfg, req, turns, table));
+          const said = parseVote(readStructured(outcome));
+          // The verifier's own path convention, because it typed the paths -
+          // the read `groundAndRecord` makes for a finder.
+          const grounded = groundVoteEvidence(said.evidence, cwd, state.dir, pathStyleFor(state, phase.role, table));
+          const counted = countBallot(said.vote, grounded.unresolved);
+          ballots[j] = {
+            seat: v.path,
+            provider: v.setting.provider,
+            model: v.setting.model ?? 'default',
+            vote: said.vote,
+            counted: counted.counted,
+            reason: said.reason,
+            evidence: grounded.evidence,
+            ...(counted.countedReason === undefined ? {} : { countedReason: counted.countedReason }),
+          };
+        } catch (err: unknown) {
+          // A stop, a ceiling, a rate limit waited out past its cap: not a vote.
+          if (err instanceof Escalation || err instanceof Cancelled) throw err;
+          // Nor a ceiling this failed turn itself crossed: `chargeFailure` has
+          // already charged it and held the ceiling rather than throwing it, and
+          // counting the failure as a ballot would go on to buy the next vote
+          // over the budget. Cost only for a Claude seat, `applyCharge`'s rule.
+          enforceCeilings(state, cfg, v.setting.provider === 'claude');
+          // Anything else is a vote not cast, and counts as one: `cannot-tell`,
+          // which can only keep the finding blocking. Too few usable votes must
+          // never let a finding through.
+          const ballot = failedBallot(v, err);
+          ballots[j] = ballot;
+          log.warn(`Verifier ${v.k} (${v.path}) failed on ${req.label}, counted as cannot-tell: ${ballot.reason}`);
+        }
+      });
+    }
+  }
+  await runSeatGroup(state, phase.maxParallel, tasks, phase.setting);
+  // Tallied in (finding, verifier) order once every ballot is in, never as
+  // they arrive (#403 decision 3). A group that threw never gets here, so no
+  // partial vote is ever recorded.
+  for (const [i, { f }] of eligible.entries()) {
+    votes.set(f.id, tally(slots[i] ?? [], phase.quorum));
+  }
+
+  const applied = applyVotes(report, votes, phase.unconfirmedP0);
+  recordDowngrades(state, applied.downgraded);
+
+  const outcomes = [...votes.values()];
+  const count = (o: Votes['outcome']): number => outcomes.filter((v) => v.outcome === o).length;
+  const confirmed = count('confirmed');
+  const unconfirmed = count('unconfirmed');
+  const undecided = count('undecided');
+  const moved = applied.downgraded.length;
+  const held = applied.held.length;
+  const kept = unconfirmed - moved - held;
+  const fate = [
+    moved > 0 ? `${moved} moved to P2` : '',
+    kept > 0 ? `${kept} still blocking` : '',
+    held > 0 ? `${held} held for you` : '',
+  ].filter((s) => s !== '');
+  // Recorded, not narration only: the summary and the window read the last of
+  // these for the round, never a tally of failed turns - a resumed round that
+  // never reached here leaves none behind (Part B's rule for finders).
+  const said = phase.tallied({
+    findings: eligible.length,
+    verifiers: verifiers.length,
+    votes: cast,
+    confirmed,
+    unconfirmed,
+    moved,
+    held,
+    undecided,
+    exempt,
+    said:
+      `${eligible.length} findings to vote × ${verifiers.length} verifiers, ${cast} votes; ` +
+      `${confirmed} confirmed, ${unconfirmed} unconfirmed` +
+      `${fate.length > 0 ? ` (${fate.join(', ')})` : ''}, ${undecided} undecided (still blocking)`,
+  });
+  recordAndSay(state, 'info', said.id, said.message, said.data);
+  return { report: applied.report, held: applied.held };
+}
+
+/**
+ * The plan critique's finders (#405), for `runFinderSeats`.
+ *
+ * A plan is never split, so each finder is one turn per plan round. Each is a
+ * critic whose seat was swapped (`seatTable` on the critic's row): read-only, a
+ * fresh conversation every turn, handed the critic's prompt for this round with
+ * no memory - the no-memory `continuityNote` from round 2 on, the #435
+ * asymmetry - plus its focus. Up to `critique.maxParallel` at once (#452), its
+ * own bound rather than the review's.
+ */
+function critiqueFinderPhase(
+  state: RunState,
+  cfg: Config,
+  plan: Plan,
+  roles: RoleTable,
+  planActivity: TurnActivity | undefined,
+): FinderPhase {
+  const round = state.planRound;
+  return {
+    role: 'critic',
+    kind: 'critique',
+    round,
+    maxParallel: cfg.critique.maxParallel,
+    setting: 'critique.maxParallel',
+    doing: 'is critiquing the plan',
+    table: (f) => seatTable(roles, f.setting, undefined, 'critic'),
+    parts: (f) => [
+      {
+        label: `critique-${round}-f${f.k}`,
+        prompt: P.withFocus(critiquePromptFor(state, plan, roles, planActivity, false), f.focus),
+      },
+    ],
+    failed: { id: 'critique_finder_failed', noun: 'Critique' },
+    merged: ({ seats, reported, raised, merge }) => ({
+      id: 'critique_finders_merged',
+      message:
+        `plan critique round ${round + 1}: ${seats} finders, ${reported} of ${seats} reported, ` +
+        `${raised} findings → ${merge.report.findings.length} after merge ` +
+        `(${merge.byCitation} merged by citation, ${merge.byTitle} by title)`,
+      data: {
+        round,
+        finders: seats,
+        reported,
+        findings: raised,
+        merged: merge.report.findings.length,
+        byCitation: merge.byCitation,
+        byTitle: merge.byTitle,
+      },
+    }),
+  };
+}
+
+/**
+ * The plan critique's vote (#405), for `runVoteSeats`.
+ *
+ * The critique has no reproducer, so nothing is exempt for having reproduced.
+ * Exempt instead is a finding marked `defer: true`, though `parseFindings`
+ * clears `defer` on every P0 and P1 a turn returns, so today that is only a
+ * finding stored that way. A verifier is a critic whose seat was swapped and
+ * whose job is a vote (`seatTable` with `PLAN_VOTE_SCHEMA` on the critic's
+ * row), shown the claim, the task, the plan and REVIEW.md, and never the id,
+ * the severity, who raised it or another ballot.
+ */
+function critiqueVotePhase(
+  state: RunState,
+  cfg: Config,
+  plan: Plan,
+  roles: RoleTable,
+  reviewMd: Awaited<ReturnType<typeof reviewStandardsFor>>,
+): VotePhase {
+  const round = state.planRound;
+  return {
+    role: 'critic',
+    round,
+    maxParallel: cfg.critique.maxParallel,
+    setting: 'critique.maxParallel',
+    exempt: (f) => f.defer === true,
+    prompt: (f) =>
+      P.critiqueVotePrompt(
+        {
+          title: f.title,
+          detail: f.detail,
+          suggested_fix: f.suggested_fix,
+          ...(f.evidence === undefined ? {} : { evidence: f.evidence }),
+        },
+        state.task,
+        plan,
+        state.environment,
+        roles,
+        reviewMd,
+        // The artifact this round's plan was written to, which a `not-real`
+        // pointing at the plan can cite and have resolve.
+        `plan-${round}.json`,
+      ),
+    table: (v) => seatTable(roles, v.setting, PLAN_VOTE_SCHEMA, 'critic'),
+    label: (n, k) => `critique-${round}-vote-${n}-v${k}`,
+    quorum: cfg.critique.quorum,
+    unconfirmedP0: cfg.critique.unconfirmedP0,
+    tallied: (t) => ({
+      id: 'critique_votes_tallied',
+      message: `plan critique round ${round + 1}: ${t.said}${t.exempt > 0 ? `; ${t.exempt} deferred, not voted` : ''}`,
+      data: {
+        round,
+        findings: t.findings,
+        verifiers: t.verifiers,
+        votes: t.votes,
+        confirmed: t.confirmed,
+        unconfirmed: t.unconfirmed,
+        moved: t.moved,
+        held: t.held,
+        undecided: t.undecided,
+        deferred: t.exempt,
+      },
+    }),
+  };
 }
 
 async function runReview(
@@ -5277,296 +6004,6 @@ async function runReview(
       reviewMd,
     );
   };
-  /**
-   * The additional finders (#388 Part B), after the first has reviewed every
-   * part, and the merge across all of them.
-   *
-   * Each finder is a reviewer whose seat was swapped (`seatTable`): the same
-   * `runTurn`, so its timeout, charge, heartbeat and path style follow the seat.
-   * In sequence, never at once - several children of one run would need the
-   * cancel latch, the charge seam, `saveState` and the heartbeat proven safe
-   * with two, which is its own change. A finder never sees another's findings:
-   * every one is handed the same prompt the first was, memoryless.
-   */
-  const runFinders = async (
-    entries: readonly FinderEntry[],
-    firstReport: FindingsReport,
-  ): Promise<FindingsReport> => {
-    const reported: FinderReport[] = [];
-    for (const f of entries) {
-      const table = seatTable(roles, f.setting);
-      const parts: FindingsReport[] = [];
-      let label = '';
-      try {
-        for (const i of chunks.keys()) {
-          label = chunked
-            ? `review-${state.reviewRound}-f${f.k}-part${i + 1}`
-            : `review-${state.reviewRound}-f${f.k}`;
-          log.step(`${holderLabel('reviewer', table)} is reviewing the implementation (finder ${f.k})`, {
-            id: 'turn_started',
-            data: { role: 'reviewer', kind: 'review', round: state.reviewRound, finder: f.k, seat: f.path },
-          });
-          const outcome = await runTurn(
-            state,
-            cfg,
-            {
-              role: 'reviewer',
-              prompt: P.withFocus(reviewPromptFor(i, false, false), f.focus),
-              cwd,
-              label,
-              seatPath: f.path,
-            },
-            turns,
-            table,
-          );
-          // Judged by what this turn did, attributed to the role it played. Its
-          // test verdicts are parsed by nothing here and so dropped: the first
-          // finder owns the round's `testChanges` and `reviewCoverage`, because
-          // two judges' verdicts on one file would need a rule for disagreeing,
-          // and inventing one is out of scope (#388 decision 6).
-          parts.push(
-            groundAndRecord(
-              state,
-              cwd,
-              'reviewer',
-              table,
-              parseFindings(readStructured(outcome)),
-              outcome.activity,
-            ),
-          );
-        }
-      } catch (err: unknown) {
-        // A stop, a ceiling, a rate limit waited out past its cap: the round
-        // ends exactly as it would for the first finder.
-        if (err instanceof Escalation || err instanceof Cancelled) throw err;
-        // And a ceiling this failure itself crossed. `chargeFailure` charged it
-        // and *returned* the ceiling rather than throwing it, so that a role's
-        // failure reaches cli.ts as itself - but a seat's failure is about to be
-        // absorbed here, and absorbing it must not absorb the brake with it.
-        enforceCeilings(state, cfg, f.setting.provider === 'claude');
-        // Anything else costs this finder only. Losing an extra seat can only
-        // leave out what that seat alone would have raised, so the round falls
-        // back to what a default config does - and the record says so.
-        const message = err instanceof Error ? err.message : String(err);
-        const error = message.split(/\r?\n/)[0] ?? '';
-        const provider = f.setting.provider;
-        const model = f.setting.model ?? 'default';
-        recordAndSay(
-          state,
-          'warn',
-          'review_finder_failed',
-          `Review finder ${f.k} (${f.path}, ${provider}/${model}) failed on ${label}: ${error}`,
-          { round: state.reviewRound, finder: f.k, seat: f.path, label, error },
-        );
-        continue;
-      }
-      const [single] = parts;
-      reported.push({
-        k: f.k,
-        seat: f.path,
-        provider: f.setting.provider,
-        model: f.setting.model ?? 'default',
-        report: parts.length === 1 && single !== undefined ? single : mergeReviewReports(parts),
-      });
-    }
-
-    const all: FinderReport[] = [
-      {
-        k: 0,
-        seat: 'roles.reviewer',
-        provider: roles.reviewer.provider,
-        model: roles.reviewer.model ?? 'default',
-        report: firstReport,
-      },
-      ...reported,
-    ];
-    const merge = mergeAcrossFinders(all);
-    const seats = entries.length + 1;
-    const raised = all.reduce((n, r) => n + r.report.findings.length, 0);
-    // Recorded, not narration only: this is the one account of how many
-    // finders reported in the attempt that wrote this round's artifact. A
-    // resumed round re-reviews from scratch, so a failure from an attempt that
-    // never got here leaves no merge event behind - the summary and the window
-    // read this, never a tally of failures.
-    recordAndSay(
-      state,
-      'info',
-      'review_finders_merged',
-      `review round ${state.reviewRound + 1}: ${seats} finders × ${chunks.length} part(s), ` +
-        `${all.length} of ${seats} reported, ${raised} findings → ${merge.report.findings.length} ` +
-        `after merge (${merge.byCitation} merged by citation, ${merge.byTitle} by title)`,
-      {
-        round: state.reviewRound,
-        finders: seats,
-        parts: chunks.length,
-        reported: all.length,
-        findings: raised,
-        merged: merge.report.findings.length,
-        byCitation: merge.byCitation,
-        byTitle: merge.byTitle,
-      },
-    );
-    return merge.report;
-  };
-  /**
-   * The vote on every blocking finding that was not reproduced (#388 Part C),
-   * after the reproducers and before the gate.
-   *
-   * Each eligible finding goes to every verifier, in sequence - every vote on
-   * finding 1, then every vote on finding 2 - for the reason the finders run in
-   * sequence. A verifier is a reviewer whose seat was swapped and whose job is a
-   * vote (`seatTable` with `VOTE_SCHEMA`): the same `runTurn`, so its timeout,
-   * charge, heartbeat and path style follow the seat. It is shown the claim and
-   * nothing about who made it, and never another verifier's vote.
-   *
-   * Not voted on: a P2 or P3, which includes everything a guard already moved;
-   * and a finding whose own reproducer reproduced, which is an observation the
-   * vote has nothing to add to - it blocks, whatever `unconfirmedP0` says.
-   */
-  const runVotes = async (
-    verifiers: readonly VerifierEntry[],
-    report: FindingsReport,
-  ): Promise<{ report: FindingsReport; held: Finding[] }> => {
-    const blocking = (f: Finding): boolean => f.severity === 'P0' || f.severity === 'P1';
-    const reproduced = (f: Finding): boolean =>
-      reproducerOutcomesOf(f).some((o) => o.verdict === 'reproduced');
-    // 1-based in the report as voted on, after reproducers: the `<n>` of the label.
-    const eligible = report.findings
-      .map((f, i) => ({ f, n: i + 1 }))
-      .filter(({ f }) => blocking(f) && !reproduced(f));
-    const notVoted = report.findings.filter((f) => blocking(f) && reproduced(f)).length;
-
-    const votes = new Map<string, Votes>();
-    let cast = 0;
-    for (const { f, n } of eligible) {
-      // The diff parts its evidence cites, or every part when it cites none
-      // of them: a claim about a file the diff never touched is still a claim
-      // about this change, and the verifier can read the rest of the tree.
-      const cited = new Set(
-        readEvidence(f.evidence).flatMap((e) => (typeof e.path === 'string' ? [e.path] : [])),
-      );
-      const touching = chunks.filter((c) => c.files.some((file) => cited.has(file)));
-      const shown = touching.length > 0 ? touching : chunks;
-      const prompt = P.votePrompt(
-        {
-          title: f.title,
-          detail: f.detail,
-          suggested_fix: f.suggested_fix,
-          ...(f.evidence === undefined ? {} : { evidence: f.evidence }),
-        },
-        shown.flatMap((c) => c.files),
-        shown.map((c) => c.diff).join('\n'),
-        plan.plan_md,
-        plan.out_of_scope,
-        state.environment,
-        roles,
-        reviewMd,
-      );
-      const ballots: Ballot[] = [];
-      for (const v of verifiers) {
-        const table = seatTable(roles, v.setting, VOTE_SCHEMA);
-        const req: TurnRequest = {
-          role: 'reviewer',
-          prompt,
-          cwd,
-          label: `vote-${state.reviewRound}-${n}-v${v.k}`,
-          seatPath: v.path,
-        };
-        log.step(`${holderLabel('reviewer', table)} is checking ${f.id} (verifier ${v.k})`, {
-          id: 'turn_started',
-          data: {
-            role: 'reviewer',
-            kind: 'vote',
-            round: state.reviewRound,
-            verifier: v.k,
-            seat: v.path,
-            finding: f.id,
-          },
-        });
-        cast += 1;
-        try {
-          const outcome = await runTurn(state, cfg, req, turns, table);
-          const said = parseVote(readStructured(outcome));
-          // The verifier's own path convention, because it typed the paths -
-          // the read `groundAndRecord` makes for the reviewer.
-          const grounded = groundVoteEvidence(
-            said.evidence,
-            cwd,
-            state.dir,
-            pathStyleFor(state, 'reviewer', table),
-          );
-          const counted = countBallot(said.vote, grounded.unresolved);
-          ballots.push({
-            seat: v.path,
-            provider: v.setting.provider,
-            model: v.setting.model ?? 'default',
-            vote: said.vote,
-            counted: counted.counted,
-            reason: said.reason,
-            evidence: grounded.evidence,
-            ...(counted.countedReason === undefined ? {} : { countedReason: counted.countedReason }),
-          });
-        } catch (err: unknown) {
-          // A stop, a ceiling, a rate limit waited out past its cap: not a vote.
-          if (err instanceof Escalation || err instanceof Cancelled) throw err;
-          // Nor a ceiling this failed turn itself crossed: `chargeFailure` has
-          // already charged it and held the ceiling rather than throwing it, and
-          // counting the failure as a ballot would go on to buy the next vote
-          // over the budget. Cost only for a Claude seat, `applyCharge`'s rule.
-          enforceCeilings(state, cfg, v.setting.provider === 'claude');
-          // Anything else is a vote not cast, and counts as one: `cannot-tell`,
-          // which can only keep the finding blocking. Too few usable votes must
-          // never let a finding through.
-          const ballot = failedBallot(v, err);
-          ballots.push(ballot);
-          log.warn(`Verifier ${v.k} (${v.path}) failed on ${req.label}, counted as cannot-tell: ${ballot.reason}`);
-        }
-      }
-      votes.set(f.id, tally(ballots, cfg.review.quorum));
-    }
-
-    const applied = applyVotes(report, votes, cfg.review.unconfirmedP0);
-    recordDowngrades(state, applied.downgraded);
-
-    const outcomes = [...votes.values()];
-    const count = (o: Votes['outcome']): number => outcomes.filter((v) => v.outcome === o).length;
-    const confirmed = count('confirmed');
-    const unconfirmed = count('unconfirmed');
-    const undecided = count('undecided');
-    const moved = applied.downgraded.length;
-    const held = applied.held.length;
-    const kept = unconfirmed - moved - held;
-    const fate = [
-      moved > 0 ? `${moved} moved to P2` : '',
-      kept > 0 ? `${kept} still blocking` : '',
-      held > 0 ? `${held} held for you` : '',
-    ].filter((s) => s !== '');
-    // Recorded, not narration only: the summary and the window read the last
-    // of these for the round, never a tally of failed turns - a resumed round
-    // that never reached here leaves none behind (Part B's rule for finders).
-    recordAndSay(
-      state,
-      'info',
-      'review_votes_tallied',
-      `review round ${state.reviewRound + 1}: ${eligible.length} findings to vote × ` +
-        `${verifiers.length} verifiers, ${cast} votes; ${confirmed} confirmed, ${unconfirmed} unconfirmed` +
-        `${fate.length > 0 ? ` (${fate.join(', ')})` : ''}, ${undecided} undecided (still blocking); ` +
-        `${notVoted} reproduced, not voted`,
-      {
-        round: state.reviewRound,
-        findings: eligible.length,
-        verifiers: verifiers.length,
-        votes: cast,
-        confirmed,
-        unconfirmed,
-        moved,
-        held,
-        undecided,
-        reproduced: notVoted,
-      },
-    );
-    return { report: applied.report, held: applied.held };
-  };
   for (const [i, chunk] of chunks.entries()) {
     const listed = listedFor(chunk);
     // Read inside the loop: the slot is marked started by the turn that
@@ -5642,29 +6079,109 @@ async function runReview(
     }
   }
 
-  const testChanges = state.testChanges;
-  if (testChanges !== undefined) {
-    // Narration with no event, under `recordAndSay`'s rule: the fact is already
-    // durable in `state.testChanges` and in the round's artifact, and a census of
-    // a round is exactly what that rule keeps out of `state.events`. Warn only
-    // when something was not judged justified - a round that only added tests
-    // the reviewer accepted is information, not a caveat (#112).
-    const counts = testChangeCounts(testChanges.files);
+  // Narration with no event, under `recordAndSay`'s rule: the fact is already
+  // durable in `state.testChanges` and in the round's artifact, and a census of
+  // a round is exactly what that rule keeps out of `state.events`. Warn only
+  // when something was not judged justified - a round that only added tests
+  // the reviewer accepted is information, not a caveat (#112). `seated` only
+  // for a round with finders, whose record is every reporting seat's (#404).
+  const sayTestChanges = (tc: TestChanges, seated?: { seats: number; disagreed: number }): void => {
+    const counts = testChangeCounts(tc.files);
     const say = counts.notJustified + counts.unjudged > 0 ? log.warn : log.info;
     say(
-      `Review round ${testChanges.round}: ${counts.files} change(s) to the judge - ` +
+      `Review round ${tc.round}: ${counts.files} change(s) to the judge - ` +
         `${counts.justified} justified, ${counts.notJustified} not justified, ` +
-        `${counts.unjudged} unjudged`,
-      { id: 'test_changes_judged', data: { round: testChanges.round, ...counts } },
+        `${counts.unjudged} unjudged` +
+        (seated === undefined ? '' : `; ${seated.seats} seat(s), ${seated.disagreed} disagreed`),
+      { id: 'test_changes_judged', data: { round: tc.round, ...counts, ...(seated ?? {}) } },
     );
-  }
+  };
+  // With no additional finder, exactly the report of every round before #388:
+  // no extra turn, no `foundBy`, no event - and the judge record is the
+  // reviewer's, said here as it always was.
+  const finders = readFinders(cfg);
+  if (finders.length === 0 && state.testChanges !== undefined) sayTestChanges(state.testChanges);
 
   const [only] = reports;
   const first = reports.length === 1 && only !== undefined ? only : mergeReviewReports(reports);
-  // With no additional finder, exactly the report of every round before #388:
-  // no extra turn, no `foundBy`, no event.
-  const finders = readFinders(cfg);
-  const merged = finders.length === 0 ? first : await runFinders(finders, first);
+  const round = state.reviewRound;
+  const finderRun =
+    finders.length === 0
+      ? undefined
+      : await runFinderSeats<RawVerdict[]>(
+          state,
+          cfg,
+          cwd,
+          roles,
+          turns,
+          {
+            role: 'reviewer',
+            kind: 'review',
+            round,
+            maxParallel: cfg.review.maxParallel,
+            setting: 'review.maxParallel',
+            doing: 'is reviewing the implementation',
+            table: (f) => seatTable(roles, f.setting),
+            // Every part of the diff, as the first finder reviewed it, each
+            // handed the same arguments the first was (#388 Part B): a finder
+            // differs only in having no memory, which a memoryless reviewer
+            // already renders.
+            parts: (f) =>
+              [...chunks.keys()].map((i) => ({
+                label: chunked ? `review-${round}-f${f.k}-part${i + 1}` : `review-${round}-f${f.k}`,
+                prompt: P.withFocus(reviewPromptFor(i, false, false), f.focus),
+              })),
+            failed: { id: 'review_finder_failed', noun: 'Review' },
+            // Each part's test verdicts, combined below with the reviewer's (#404).
+            extra: parseTestVerdicts,
+            merged: ({ seats, reported, raised, merge }) => ({
+              id: 'review_finders_merged',
+              message:
+                `review round ${round + 1}: ${seats} finders × ${chunks.length} part(s), ` +
+                `${reported} of ${seats} reported, ${raised} findings → ${merge.report.findings.length} ` +
+                `after merge (${merge.byCitation} merged by citation, ${merge.byTitle} by title)`,
+              data: {
+                round,
+                finders: seats,
+                parts: chunks.length,
+                reported,
+                findings: raised,
+                merged: merge.report.findings.length,
+                byCitation: merge.byCitation,
+                byTitle: merge.byTitle,
+              },
+            }),
+          },
+          finders,
+          first,
+        );
+  const merged = finderRun === undefined ? first : finderRun.report;
+  // Every reporting seat's verdicts, combined failing closed, and only then
+  // said (#404). Written after the finders: until here the record is the
+  // reviewer's own, from the loop above, so a stop during the finders leaves
+  // what a round without them would have. A finder that failed has no slot and
+  // contributes nothing. Each seat is attached from the reviewer's listed files
+  // part by part, since a finder was shown the same parts.
+  if (finderRun !== undefined && state.testChanges !== undefined) {
+    const judgements: SeatJudgement[] = [
+      {
+        seat: 'roles.reviewer',
+        provider: roles.reviewer.provider,
+        model: roles.reviewer.model ?? 'default',
+        files: attachVerdicts(listedPerPart, verdictsPerPart),
+      },
+      ...finderRun.slots.map((s) => ({
+        seat: s.seat,
+        provider: s.provider,
+        model: s.model,
+        files: attachVerdicts(listedPerPart, s.extras),
+      })),
+    ];
+    const combined = combineVerdicts(judgements);
+    state.testChanges = { ...state.testChanges, files: combined };
+    saveState(state);
+    sayTestChanges(state.testChanges, { seats: judgements.length, disagreed: disagreements(combined) });
+  }
   // Inside `runReview` and after the merge, which are two separate decisions
   // (#113).
   //
@@ -5691,7 +6208,76 @@ async function runReview(
   // record belongs in the one artifact the caller writes. With no verifier,
   // exactly the report of every round before it: no turn, no `votes`, no event.
   const verifiers = readVerifiers(cfg);
-  const voted = verifiers.length === 0 ? { report: proven, held: [] } : await runVotes(verifiers, proven);
+  const voted =
+    verifiers.length === 0
+      ? { report: proven, held: [] }
+      : await runVoteSeats(
+          state,
+          cfg,
+          cwd,
+          turns,
+          {
+            role: 'reviewer',
+            round,
+            maxParallel: cfg.review.maxParallel,
+            setting: 'review.maxParallel',
+            // A finding whose own reproducer reproduced is an observation the
+            // vote has nothing to add to - it blocks, whatever `unconfirmedP0`
+            // says.
+            exempt: (f) => reproducerOutcomesOf(f).some((o) => o.verdict === 'reproduced'),
+            prompt: (f) => {
+              // The diff parts its evidence cites, or every part when it cites
+              // none of them: a claim about a file the diff never touched is
+              // still a claim about this change, and the verifier can read the
+              // rest of the tree.
+              const cited = new Set(
+                readEvidence(f.evidence).flatMap((e) => (typeof e.path === 'string' ? [e.path] : [])),
+              );
+              const touching = chunks.filter((c) => c.files.some((file) => cited.has(file)));
+              const shown = touching.length > 0 ? touching : chunks;
+              return P.votePrompt(
+                {
+                  title: f.title,
+                  detail: f.detail,
+                  suggested_fix: f.suggested_fix,
+                  ...(f.evidence === undefined ? {} : { evidence: f.evidence }),
+                },
+                shown.flatMap((c) => c.files),
+                shown.map((c) => c.diff).join('\n'),
+                plan.plan_md,
+                plan.out_of_scope,
+                state.environment,
+                roles,
+                reviewMd,
+              );
+            },
+            table: (v) => seatTable(roles, v.setting, VOTE_SCHEMA),
+            label: (n, k) => `vote-${round}-${n}-v${k}`,
+            quorum: cfg.review.quorum,
+            unconfirmedP0: cfg.review.unconfirmedP0,
+            tallied: (t) => ({
+              id: 'review_votes_tallied',
+              message: `review round ${round + 1}: ${t.said}; ${t.exempt} reproduced, not voted`,
+              data: {
+                round,
+                findings: t.findings,
+                verifiers: t.verifiers,
+                votes: t.votes,
+                confirmed: t.confirmed,
+                unconfirmed: t.unconfirmed,
+                moved: t.moved,
+                held: t.held,
+                undecided: t.undecided,
+                reproduced: t.exempt,
+              },
+            }),
+          },
+          verifiers,
+          proven,
+        );
+  // Read here, after the finders, so the artifact carries the record
+  // `state.json` does - with finders, the combined one (#404).
+  const testChanges = state.testChanges;
   return {
     report: testChanges === undefined ? voted.report : { ...voted.report, testChanges },
     unconfirmedP0: voted.held,
@@ -6132,9 +6718,9 @@ export function writeEscalation(state: RunState, escalation: Escalation): string
   const lines: string[] = [
     '# Needs your input\n',
     `**Run:** \`${state.id}\``,
-    `**Task:** ${state.task}`,
+    `**Task:** ${inlineLiteral(state.task)}`,
     '',
-    `## Why the run stopped\n\n${escalation.message}\n`,
+    `## Why the run stopped\n\n${literal(escalation.message)}\n`,
   ];
 
   if (escalation.questions && escalation.questions.length > 0) {
@@ -6142,12 +6728,12 @@ export function writeEscalation(state: RunState, escalation: Escalation): string
     lines.push('Answer inline under each question, then resume with:\n');
     lines.push(`\`\`\`\nvibe resume ${state.id}\n\`\`\`\n`);
     escalation.questions.forEach((q, i) => {
-      lines.push(`### ${i + 1}. ${q.question}`);
+      lines.push(`### ${i + 1}. ${inlineLiteral(q.question)}`);
       lines.push(`*Kind:* ${q.kind}`);
-      if (q.options.length > 0) lines.push(`*Options:* ${q.options.join(' | ')}`);
+      if (q.options.length > 0) lines.push(`*Options:* ${q.options.map(inlineLiteral).join(' | ')}`);
       // No line for no default (#394): the stall question has none on purpose,
       // and an empty default line would read as one.
-      if (q.recommended.trim() !== '') lines.push(`*Claude would default to:* ${q.recommended}`);
+      if (q.recommended.trim() !== '') lines.push(`*Claude would default to:* ${inlineLiteral(q.recommended)}`);
       lines.push('\n**Your answer:**\n\n> \n');
     });
   }
@@ -6158,10 +6744,18 @@ export function writeEscalation(state: RunState, escalation: Escalation): string
     const voted = escalation.findings.every((f) => f.severity === 'P0' && f.votes?.outcome === 'unconfirmed');
     lines.push(voted ? '## Unconfirmed P0 findings\n' : '## Outstanding P1 findings\n');
     for (const f of escalation.findings) {
-      lines.push(`### ${f.title} \`${f.id}\`\n${f.detail}\n\n*Suggested fix:* ${f.suggested_fix}\n`);
+      lines.push(`### ${inlineLiteral(f.title)} \`${f.id}\`\n${literal(f.detail)}\n\n*Suggested fix:* ${inlineLiteral(f.suggested_fix)}\n`);
       if (voted && f.votes !== undefined) lines.push(`${describeVotes(f.votes).join('\n')}\n`);
     }
   }
+
+  // The assumptions the run is carrying, on every kind of stop (#465). A person
+  // may have just answered one of them in other words - one round later, at a
+  // similarity the threshold rightly refuses - and only they can say so. Read
+  // through `reconcileAssumed` so a question a human already answered is not
+  // offered again; no `create`, so nothing beyond its existing repair is written.
+  const { remaining } = reconcileAssumed(state);
+  if (remaining.length > 0) lines.push(assumptionSection(remaining));
 
   // Before the raise block, because it is the cheaper decision of the two: a
   // person who disagrees with a finding's severity does not have to write one

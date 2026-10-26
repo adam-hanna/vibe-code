@@ -1,4 +1,5 @@
-import type { FileChange, JudgeFile, JudgeVerdict, VerifyConfig } from '@src/types.js';
+import type { AgentProvider } from '@src/runtime.js';
+import type { FileChange, JudgeFile, JudgeSeatVerdict, JudgeVerdict, VerifyConfig } from '@src/types.js';
 
 /**
  * A change that touches the run's own judge (#112).
@@ -191,4 +192,65 @@ export function testChangeCounts(files: readonly JudgeFile[]): TestChangeCounts 
     else notJustified += 1;
   }
   return { files: files.length, justified, notJustified, unjudged };
+}
+
+/** One review seat's judge files, each with that seat's own verdict (#404). */
+export interface SeatJudgement {
+  seat: string;
+  provider: AgentProvider;
+  model: string;
+  /** `attachVerdicts` over the round's listed files and this seat's verdicts. */
+  files: JudgeFile[];
+}
+
+/**
+ * The round's judge record from every seat that reported, failing closed (#404).
+ *
+ * Per file: any seat that said not justified makes it not justified; otherwise
+ * any seat that left it unjudged makes it unjudged; only when every seat said
+ * justified is it justified. A dissent is never outvoted. A verdict is one
+ * judge's statement about the judge itself, and #112 records that statement
+ * rather than adjudicating it - a majority that waves a rewritten assertion
+ * through is exactly the silence the record exists to break. A finder that
+ * failed is not in `seats` at all, as it contributes no findings either, so it
+ * cannot make a file unjudged.
+ *
+ * `seats[0]` is `roles.reviewer` and the rest are in config order, so the
+ * reason carried by the combined verdict - the first dissent's, or the first
+ * seat's - is the same whichever finder finished first. Every seat was attached
+ * from the same listed files; one that somehow lacks a file reads as unjudged
+ * for it, never as agreeing.
+ */
+export function combineVerdicts(seats: readonly SeatJudgement[]): JudgeFile[] {
+  const [first] = seats;
+  if (first === undefined) return [];
+  return first.files.map((file) => {
+    const verdicts: JudgeSeatVerdict[] = seats.map((s) => ({
+      seat: s.seat,
+      provider: s.provider,
+      model: s.model,
+      verdict: s.files.find((f) => f.path === file.path)?.verdict ?? 'unjudged',
+    }));
+    const dissent = verdicts.find((v) => v.verdict !== 'unjudged' && !v.verdict.justified);
+    const verdict: JudgeFile['verdict'] =
+      dissent !== undefined
+        ? dissent.verdict
+        : verdicts.some((v) => v.verdict === 'unjudged')
+          ? 'unjudged'
+          : (verdicts[0]?.verdict ?? 'unjudged');
+    const { path, oldPath, status, added, removed } = file;
+    return { path, oldPath, status, added, removed, verdict, verdicts };
+  });
+}
+
+/**
+ * Files the seats disagreed on: at least one said justified and another said
+ * not justified (#404). An unjudged seat beside a justified one is an omission,
+ * not a disagreement. Zero for a record with no `verdicts`.
+ */
+export function disagreements(files: readonly JudgeFile[]): number {
+  return files.filter((f) => {
+    const said = (f.verdicts ?? []).flatMap((v) => (v.verdict === 'unjudged' ? [] : [v.verdict.justified]));
+    return said.includes(true) && said.includes(false);
+  }).length;
 }
