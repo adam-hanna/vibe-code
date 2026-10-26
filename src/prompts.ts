@@ -2,6 +2,7 @@ import { describedRole, ROLES } from '@src/roles.js';
 import { EVIDENCE_RULE, REPRODUCER_RULE } from '@src/schemas.js';
 import { inspectedItems } from '@src/evidence.js';
 import { describeOutcome } from '@src/reproducer.js';
+import { nearPairs } from '@src/finder-merge.js';
 import { movedByVote } from '@src/stored.js';
 import { authorOf, readEvidence, reproductionAt, severityChangesOf } from '@src/validate.js';
 import type { RoleTable } from '@src/roles.js';
@@ -1632,7 +1633,7 @@ export function fixPrompt(
 
 Evaluate **every P1**, then resolve valid defects or rebut incorrect findings with evidence. Address a P2 only when it belongs to the task or is necessary to a coherent repair and the fix is contained and low-risk. Defer separable improvements, even when they would be a small edit. Skip P3s unless they are incidental to required work.
 
-${findings.map(formatFinding).join('\n\n')}${deferralNote(findings, 'fixer')}
+${findings.map(formatFinding).join('\n\n')}${deferralNote(findings, 'fixer')}${nearNote(findings)}
 
 ${block(BLOCK.fix, FIX_BREADTH)}
 
@@ -1939,6 +1940,27 @@ ${f.detail}${fix}${citation(f, '\n')}${raisedNote(f)}${movedNote(f)}${provenNote
  * whose findings were all deferred never reaches it. FOLLOW-UPS.md, written
  * every round regardless of the gate, is the record that always exists.
  */
+/**
+ * The pairs of findings that may be one defect, said to the fixer (#462).
+ *
+ * Different seats describing one bug usually cite lines a step apart, so the
+ * merge keeps them as two findings - deliberately, because a line-window merge
+ * measured on the bench would also have merged two real defects (see
+ * `NEAR_LINES`). The fixer reads the code, so it is the one asked. Empty, and
+ * the prompt byte-identical, when no pair qualifies, which is every review
+ * without finders.
+ */
+function nearNote(findings: readonly Finding[]): string {
+  const pairs = nearPairs(findings);
+  if (pairs.length === 0) return '';
+  const lines = pairs.map(
+    (p) =>
+      `- \`${p.first}\` and \`${p.second}\`: both cite \`${p.path}\`, ` +
+      (p.gap === 0 ? 'on the same line' : `${p.gap} line${p.gap === 1 ? '' : 's'} apart`),
+  );
+  return `\n\n## Findings that may be one defect\n\nDifferent reviewers raised each pair below, citing the same file a few lines apart. They were kept as separate findings because two real defects can sit a line apart. Read the code and decide: if a pair is one defect, fix it once and give both ids the same disposition, saying in the second one's reason which id it duplicates; if it is two, handle each on its own.\n\n${lines.join('\n')}`;
+}
+
 function deferralNote(findings: readonly Finding[], audience: 'planner' | 'fixer'): string {
   if (!findings.some((f) => f.defer === true)) return '';
 

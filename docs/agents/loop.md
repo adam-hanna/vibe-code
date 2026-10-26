@@ -554,6 +554,18 @@ of them at once (#403; `1`, the default, is one after another) - see *Seats at o
   normalised path, same line, both present) or when `similarity(title) >= REPHRASE_THRESHOLD`.
   That threshold was measured for question rephrasing and recycled finding labels, not for this
   population, and is reused rather than tuned until runs with several finders exist to measure.
+  **Near citations are flagged to the fixer, never merged** (#462). The bench's panel reviews
+  showed one bug reported by two seats under two ids, cited lines a step apart (153 against
+  154, 267 against 266). A census of every cross-seat pair the merge kept apart while citing
+  one file, 31 of them labelled by hand, found a 1-line gap was the same defect 6 times and two
+  different ones 2 times; 2-3 lines, 2 and 0; 5 or more, 0 and 8. Titles did not separate the
+  1-line pairs. So any window that merges the duplicates also merges real defects, which hides
+  one from the fixer, and the merge rule stays as it was. `nearPairs` finds pairs from disjoint
+  seats within `NEAR_LINES` (3, the widest same-defect gap) and `fixPrompt` names them under
+  *Findings that may be one defect*; the fixer, which reads the code, decides. Only findings
+  with `foundBy` take part, so a review without finders renders the prompt it always did. What
+  it does not reach: a pair with no line on one side (the semver operator pair cited a path
+  only), and the vote, which still votes each finding of a pair on its own.
   Greedy in finder order; one finder is never merged with itself. The winner is the most
   blocking (`SEVERITY_RANK`, now in `src/validate.ts`), ties to the earliest; it brings its own
   text and its own `downgraded`, because a guard's record is never moved onto a finding it did
