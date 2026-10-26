@@ -1,3 +1,4 @@
+import { inlineLiteral } from '@src/literal.js';
 import { groundFindings, move } from '@src/evidence.js';
 import {
   artifact,
@@ -492,8 +493,9 @@ export function moveSection(findings: readonly Finding[]): string {
   const blocks = findings.map(
     (f) =>
       `### ${MOVE_HEADING} \`${f.id}\`\n\n` +
-      `*${f.title}*\n\n` +
-      `*Currently:* ${currently(f)}\n` +
+      // The finding's and a guard's words, into NEEDS-INPUT.md (#472).
+      `*${inlineLiteral(f.title)}*\n\n` +
+      `*Currently:* ${inlineLiteral(currently(f))}\n` +
       `*Move to:* <P0, P1, P2 or P3 - leave this to change nothing>\n\n` +
       `${WHY}\n\n>\n`,
   );
