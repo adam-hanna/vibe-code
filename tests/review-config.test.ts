@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { configDiff, DEFAULTS, loadConfig, PROJECT_ONLY, writeConfigPatch } from '@src/config.js';
+import { configDiff, DEFAULT_FINDER_FOCUS, DEFAULTS, loadConfig, PROJECT_ONLY, writeConfigPatch } from '@src/config.js';
 
 /**
  * The `review` section (#388 Part A): accepted and validated. What the runs do
@@ -40,9 +40,16 @@ function withGlobal<T>(at: string, body: () => T): T {
   }
 }
 
-test('the defaults are no extra seats, a majority, and an unconfirmed P0 that blocks', () => {
+test('the defaults are one resolved finder, no verifiers, a majority, and an unconfirmed P0 that blocks', () => {
+  // `DEFAULTS` still holds no finder (#447): the seat depends on where the
+  // reviewer sits, so it is resolved by `loadConfig`, not stored.
   assert.deepEqual(DEFAULTS.review, { finders: [], verifiers: [], quorum: null, unconfirmedP0: 'block', maxParallel: 1 });
-  assert.deepEqual(loadConfig(project({})).review, DEFAULTS.review);
+  assert.deepEqual(loadConfig(project({})).review, {
+    ...DEFAULTS.review,
+    finders: [{ provider: 'claude', effort: 'high', focus: DEFAULT_FINDER_FOCUS }],
+  });
+  // And a file that names the list empty is exactly the old default.
+  assert.deepEqual(loadConfig(project({ review: { finders: [] } })).review, DEFAULTS.review);
 });
 
 test('seats are written like roles, and a finder may name a focus', () => {

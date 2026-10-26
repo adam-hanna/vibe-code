@@ -40,7 +40,9 @@ test('seats are written like roles, a finder may name a focus, and it is apart f
   const cfg = loadConfig(project({ critique }));
   // `maxParallel` filled from the default, as every key a file leaves out is (#452).
   assert.deepEqual(cfg.critique, { ...critique, maxParallel: 1 });
-  assert.deepEqual(cfg.review, DEFAULTS.review, 'the review panel is not the critique panel');
+  // What a project naming no review seats gets, the default finder included
+  // (#447): nothing of the critique's reached it.
+  assert.deepEqual(cfg.review, loadConfig(project({})).review, 'the review panel is not the critique panel');
 });
 
 test('every refusal is the review\'s, under critique. paths', () => {

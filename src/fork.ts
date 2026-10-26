@@ -1,6 +1,6 @@
 ﻿import { copyFileSync, existsSync, readFileSync, rmSync } from 'node:fs';
 import path from 'node:path';
-import { applyOverrides, environmentStale, loadConfig } from '@src/config.js';
+import { applyOverrides, environmentStale, loadConfig, storedConfig } from '@src/config.js';
 import { checkStoredConsistency, checkTokenShare } from '@src/consistency.js';
 import type { TokenShareClamp } from '@src/consistency.js';
 import * as git from '@src/git.js';
@@ -262,7 +262,9 @@ export async function planFork(
   // check, so this is where a stored config that no longer validates refuses.
   const load = (o: ConfigOverrides, r: RolePatches): Config =>
     checkpointState.config === undefined
-      ? loadConfig(targetDir, o, r)
+      // Never the default finder (#447): a checkpoint with no stored config is
+      // from a run that started before there was one, and its finders are fixed.
+      ? storedConfig(loadConfig(targetDir, o, r, { defaultFinders: false }))
       : applyOverrides(checkpointState.config, o, r);
   const cfg = load(overrides, roles);
 

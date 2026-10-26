@@ -789,3 +789,20 @@ test('a fork with no --role carries the parent\'s environment facts through', as
 
   assert.deepEqual(child.environment, facts);
 });
+
+test('a checkpoint with no stored config forks with no default finder (#447)', async () => {
+  // The harness's runs store no config, which is a run from before
+  // `state.config` - and so from before there was a default finder. A run's
+  // finders are fixed when it starts, so the fork's fallback load must not
+  // resolve one, and must not store where its finders came from.
+  const parent = await parentRun('no default finder');
+  const n = committedPoint(parent);
+  const snapshot = JSON.parse(readFileSync(path.join(parent.dir, `checkpoint-${n}.json`), 'utf8')) as RunState;
+  assert.equal(snapshot.config, undefined, 'the fixture is the case: a checkpoint with no stored config');
+
+  const { child } = await fork(parent, n);
+
+  assert.deepEqual(child.config?.review.finders, []);
+  assert.equal(Object.hasOwn(child.config ?? {}, 'findersDefaulted'), false);
+  assert.deepEqual(loadRun(parent.targetDir, child.id).config?.review.finders, []);
+});

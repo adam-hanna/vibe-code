@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { blankRow, quorumPatch, readSeats, ready, seatsPatch, toRow, toSeat, UNCONFIRMED_P0_CHOICES } from './seatform';
+import { blankRow, findersDefaultState, quorumPatch, readSeats, ready, seatsPatch, toRow, toSeat, UNCONFIRMED_P0_CHOICES, USE_DEFAULT_FINDERS } from './seatform';
 import type { SeatRow } from './seatform';
 
 /**
@@ -93,5 +93,25 @@ describe('the quorum and the P0 choices', () => {
   test('the three values the core accepts, each with a meaning', () => {
     expect(UNCONFIRMED_P0_CHOICES.map((c) => c.value)).toEqual(['block', 'halt', 'demote']);
     for (const c of UNCONFIRMED_P0_CHOICES) expect(c.meaning).not.toBe('');
+  });
+});
+
+describe('the default finder (#447)', () => {
+  test('where the finders come from is whether a file names the key, [] included', () => {
+    const named = { review: { finders: [] } };
+    const other = { review: { quorum: 2 } };
+    expect(findersDefaultState('project', {}, {})).toBe('default');
+    expect(findersDefaultState('project', other, other)).toBe('default');
+    expect(findersDefaultState('project', named, {})).toBe('named');
+    expect(findersDefaultState('project', named, named)).toBe('named');
+    expect(findersDefaultState('project', {}, named)).toBe('inherited');
+    // The global view edits the global file, so it is the one that names it.
+    expect(findersDefaultState('global', named, named)).toBe('named');
+    expect(findersDefaultState('global', {}, {})).toBe('default');
+  });
+
+  test('"use the default" clears the key, and removing the last finder saves []', () => {
+    expect(USE_DEFAULT_FINDERS).toEqual({ review: { finders: null } });
+    expect(seatsPatch('finders', [])).toEqual({ review: { finders: [] } });
   });
 });

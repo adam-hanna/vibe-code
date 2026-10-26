@@ -28,6 +28,7 @@ import type { Gate, GateRow } from './gateform';
 import {
   appendFocus,
   blankRow as blankSeatRow,
+  findersDefaultState,
   FOCUS_EXAMPLES,
   inheritedTimeout,
   keepQuorumLegal,
@@ -39,6 +40,7 @@ import {
   seatsPatch,
   toRow as toSeatRow,
   UNCONFIRMED_P0_CHOICES,
+  USE_DEFAULT_FINDERS,
 } from './seatform';
 import type { Seat, SeatKind, SeatRow, SeatSection, TimeoutSettings } from './seatform';
 import type { Listing } from './models';
@@ -1802,6 +1804,9 @@ export function Settings({
   const roles = effective.roles ?? {};
   const review = effective.review ?? {};
   const critique = effective.critique ?? {};
+  // Whether the review's finders are the resolved default, named by this file,
+  // or inherited from the settings for all projects (#447).
+  const findersState = findersDefaultState(scope, raw, frame.globalRaw);
   // What a seat's blank model means: its agent's own setting, as the role rows read it.
   const inheritedModel = (provider: string): string | undefined =>
     provider === 'claude' || provider === 'codex' ? effective[provider]?.model : undefined;
@@ -2992,7 +2997,29 @@ export function Settings({
           P2 or P3 never reaches the vote. A P1 the vote does not confirm is moved to P2; a vote
           that cannot tell keeps it blocking.
         </p>
-        <h4 className={S.h4}>finders</h4>
+        {/* The default finder (#447): drawn from what is in force, with only
+            whether a file names the list read off `raw`. The review's alone -
+            the critique's panel below has no default. */}
+        <h4 className={S.h4}>
+          finders {findersState === 'default' && readSeats(review.finders).length > 0 && source('review', 'finders')}
+        </h4>
+        {findersState === 'default' && readSeats(review.finders).length > 0 && (
+          <p className={S.note}>
+            This is the default: one finder on the other agent from the reviewer above, measured to catch what
+            the reviewer missed. Removing it saves an empty list, which turns the extra finder off.
+          </p>
+        )}
+        {findersState === 'named' && (
+          <div className={S.row}>
+            <Button variant="secondary" size="sm" disabled={busy} onClick={() => save(USE_DEFAULT_FINDERS)}>
+              use the default
+            </Button>
+            <span className={S.why}>
+              removes the finders from this file, so it follows what is set above it: your settings for all
+              projects if they name finders, and otherwise the default.
+            </span>
+          </div>
+        )}
         <SeatList
           kind="finders"
           seats={readSeats(review.finders)}

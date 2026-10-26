@@ -635,6 +635,34 @@ of them at once (#403; `1`, the default, is one after another) - see *Seats at o
   same `latestReport`; only the carried reviewer also has its earlier findings and earlier
   reports in context, and no reviewer is shown the dispositions. Reopening it needs a way to
   count a fresh finder's re-raise, and then the bench in #435's comments is the place to run it.
+- **One finder by default, and no vote** (#447, the owner's decision of 2026-10-26). The same
+  bench measured the panel: the finder caught 3 bugs the reviewer missed, and 3 of 4 reviews
+  with it flagged a test edit that hid bugs against 0 of 4 without it; all 8 bench votes
+  confirmed their finding, 1 of the archive's 2 demotions was wrong, and the votes cost 3.8M
+  tokens. The finder added 6.9M tokens to the reviewer's 29.6M. So a run with no
+  `review.finders` in any layer gets one seat on the vendor `roles.reviewer` is not on, no
+  model, `high` when it is Claude and no effort (so `codex.effort`) when it is Codex, and the
+  bench's focus. **Resolved, not stored:** `DEFAULTS.review.finders` stays `[]` because the
+  seat depends on the reviewer's provider, which any layer or `--role` moves, so
+  `withDefaultFinders` in `src/config.ts` applies `defaultReviewFinders(roles)` once the layers
+  are merged and `--role` applied, unless a layer *named* the key (present in its `review`,
+  `[]` included). `loadConfig` calls it, and so does `serve.ts` for `globalEffective`, which
+  does not go through `loadConfig`. A table on one provider gets none: a default must not add
+  a CLI nobody chose. **Never resolved on a resume or a fork:** a run's finders are fixed when
+  it starts. The stored-config road (`withProjectFile`/`applyOverrides`) never calls it, and
+  the fallback for a run with no stored config passes `loadConfig`'s
+  `{ defaultFinders: false }`, from `resumeConfig` and `fork.ts` only. **Where the
+  `(default)` mark comes from:** `LoadedConfig.findersDefaulted`, outside `Config`. Since
+  `configPath` already reaches `state.json` (`startRun` stores the `LoadedConfig`),
+  `storedConfig` strips the new field at every store. `seat-runners-pin`'s
+  `explicit-empty-finders` case, recorded before the change, pins that a loop naming `[]` does
+  exactly what it did and that `storedConfig` of its config is the bytes stored before; it
+  drives `orchestrate` directly, so what `startRun` actually writes is read off disk by
+  `default-review-finder.test.ts`, as the resume and fork fallbacks are. The mark is not inferred by comparing against
+  `defaultReviewFinders`, so a hand-written seat equal to the default is not labelled. The
+  settings screen's "use the default" sends `review.finders: null`, which
+  `tidyReviewFinders` turns into a deleted key (and drops an emptied `review`); `null` means
+  nothing new at load time.
 
 **Part C runs the vote.** Inside `runReview`, after the merge and `proveFindings` and before
 the return, so the caller still writes `code-review-<n>.json` once and the votes are in it

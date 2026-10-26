@@ -147,3 +147,29 @@ describe('the layout', () => {
     expect(settings).toMatch(/<Button variant="secondary" size="sm" disabled=\{busy\} onClick=\{\(\) => setRows\(\[\.\.\.latest\.current, blankSeatRow\(\)\]\)\}>\s*<span aria-hidden="true">\+<\/span>\s*\{`add a \$\{noun\}`\}/);
   });
 });
+
+describe('the default finder is said in the review section alone (#447)', () => {
+  const reviewAt = settings.indexOf('more review seats, and a vote (#388)');
+  const critiqueAt = settings.indexOf('more critique seats, and a vote (#405)');
+  const reviewSection = settings.slice(reviewAt, critiqueAt);
+  const critiqueSection = settings.slice(critiqueAt);
+
+  test('the review section draws the note and the clear from the frame, not a seat of its own', () => {
+    expect(reviewAt).toBeGreaterThan(0);
+    expect(critiqueAt).toBeGreaterThan(reviewAt);
+    expect(reviewSection).toContain("findersState === 'default'");
+    expect(reviewSection).toContain('This is the default');
+    expect(reviewSection).toContain('Removing it saves an empty list');
+    expect(reviewSection).toContain("findersState === 'named'");
+    expect(reviewSection).toContain('save(USE_DEFAULT_FINDERS)');
+    expect(settings).toContain('findersDefaultState(scope, raw, frame.globalRaw)');
+    // No default seat is restated in the app.
+    expect(settings).not.toContain('fail-closed paths');
+  });
+
+  test('the critique section has neither the note nor the clear', () => {
+    expect(critiqueSection).not.toContain('findersState');
+    expect(critiqueSection).not.toContain('USE_DEFAULT_FINDERS');
+    expect(critiqueSection).not.toContain('This is the default');
+  });
+});

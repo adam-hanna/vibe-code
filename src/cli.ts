@@ -8,6 +8,8 @@ import {
   environmentStale,
   loadConfig,
   globalConfigPath,
+  singleProvider,
+  storedConfig,
   withProjectFile,
 } from '@src/config.js';
 import {
@@ -779,7 +781,7 @@ async function startRun(
   targetDir: string,
   task: string,
   planOnly: boolean,
-  cfg: Config,
+  cfg: LoadedConfig,
   allocated: AllocatedRun,
   extraContext: string | null,
   flags: ParsedArgs['flags'],
@@ -792,7 +794,9 @@ async function startRun(
   // has no worktree while its branch is checked out in one (#223).
   const state = createRun(targetDir, task, planOnly, {
     allocated,
-    config: cfg,
+    // Without `findersDefaulted` (#447): where a value came from is not a
+    // setting, and a run that named its finders stores what it always did.
+    config: storedConfig(cfg),
     extraContext,
     worktree: cfg.git.worktree,
     requestedBranch: flags.branch,
@@ -904,7 +908,9 @@ export function resumeConfig(targetDir: string, state: RunState, flags: ParsedAr
   // to agree about it or the diff compares configs built different ways.
   const load = (overrides: ConfigOverrides, roles: RolePatches): Config =>
     stored === undefined
-      ? loadConfig(targetDir, overrides, roles)
+      // A run's finders are fixed when it starts (#447), and a run with no
+      // stored config started before there was a default finder to resolve.
+      ? storedConfig(loadConfig(targetDir, overrides, roles, { defaultFinders: false }))
       // **The project's file on top of the run's memory** (#223). Without it the
       // settings screen could not reach a run that had already started, so a run
       // stopped on a ceiling could not be resumed past it by raising that
@@ -1642,7 +1648,11 @@ export type RunLoop = (state: RunState, cfg: Config, resume: boolean) => Promise
  *
  * Exported so a test can read the lines without starting a run.
  */
-export function reportRoles(cfg: Config): void {
+export function reportRoles(
+  cfg: Config,
+  /** Whether `review.finders` is the resolved default (#447), marked `(default)`. */
+  findersDefaulted = false,
+): void {
   const table = rolesFor(cfg);
   const changed = ROLE_NAMES.filter(
     (role) => JSON.stringify(cfg.roles[role]) !== JSON.stringify(DEFAULT_ROLE_PROVIDERS[role]),
@@ -1675,7 +1685,9 @@ export function reportRoles(cfg: Config): void {
   // changed role, and only when there are any: a run that seats none prints
   // what it always has.
   const finders = readFinders(cfg);
-  if (finders.length > 0) log.info(`Finders: ${finders.map(({ setting }) => spelled(setting)).join(' ')}`);
+  if (finders.length > 0) {
+    log.info(`Finders: ${finders.map(({ setting }) => spelled(setting)).join(' ')}${findersDefaulted ? ' (default)' : ''}`);
+  }
   // The verifiers (#388 Part C), the same way: only when there are any.
   const verifiers = readVerifiers(cfg);
   if (verifiers.length > 0) log.info(`Verifiers: ${verifiers.map(({ setting }) => spelled(setting)).join(' ')}`);
@@ -1746,8 +1758,9 @@ function reportResolvedRoles(cfg: Config): void {
 
 /**
  * The review seats `review` names (#388), under the role table - and nothing at
- * all when it names none, so doctor under the defaults prints what it always
- * has.
+ * all when it names none. Under the defaults that is the one default finder
+ * (#447), whose row says `(default)`; a table on one provider has none, and
+ * says why in one line.
  *
  * Two blocks, because they cost differently. The finders (#388 Part B) each
  * review every chunk after `roles.reviewer`, at one extra turn per chunk per
@@ -1759,8 +1772,14 @@ function reportResolvedRoles(cfg: Config): void {
  * The majority is printed as the definition it is - more than half - and not
  * as a recommendation.
  */
-function reportReviewSeats(cfg: Config): void {
-  reportSeatSection(cfg, 'review', {
+function reportReviewSeats(cfg: Config, findersDefaulted = false): void {
+  // Said only when no finder is seated and the table leaves no other vendor
+  // for one (#447): an explicit `[]` there is as true a case as the default's.
+  const only = singleProvider(cfg.roles);
+  if (only !== null && readFinders(cfg).length === 0) {
+    log.info(`  no default finder: every role is on ${only}; set review.finders to add one`);
+  }
+  reportSeatSection(cfg, 'review', findersDefaulted, {
     finders: '  review finders (each reviews every chunk; one extra turn per chunk per finder):',
     verifiers:
       '  review verifiers (each votes on every blocking finding not reproduced; one extra turn per such finding per verifier):',
@@ -1774,7 +1793,7 @@ function reportReviewSeats(cfg: Config): void {
  * blocking plan finding per round.
  */
 function reportCritiqueSeats(cfg: Config): void {
-  reportSeatSection(cfg, 'critique', {
+  reportSeatSection(cfg, 'critique', false, {
     finders: '  critique finders (each critiques every plan round; one extra turn per plan round per finder):',
     verifiers:
       '  critique verifiers (each votes on every blocking plan finding not deferred; one extra turn per such finding per verifier):',
@@ -1790,6 +1809,8 @@ function quorumText(quorum: number | null, n: number): string {
 function reportSeatSection(
   cfg: Config,
   section: 'review' | 'critique',
+  /** Whether the finders are the resolved default (#447), so each row says so. */
+  findersDefaulted: boolean,
   headings: { finders: string; verifiers: string },
 ): void {
   const finders = readFinders(cfg, section);
@@ -1818,7 +1839,10 @@ function reportSeatSection(
   ];
   if (finders.length > 0) {
     log.info(headings.finders);
-    const rows = finders.map((f): [string, string] => [`finder ${f.k}`, seat(f.setting, f.focus)]);
+    const rows = finders.map((f): [string, string] => [
+      `finder ${f.k}${findersDefaulted ? ' (default)' : ''}`,
+      seat(f.setting, f.focus),
+    ]);
     print(verifiers.length === 0 ? [...rows, parallel] : rows);
   }
   if (verifiers.length === 0) return;
@@ -2112,7 +2136,9 @@ export async function execute(
     if (anyRecovery(recovery)) reportRecovery(recovery);
   };
 
-  reportRoles(cfg);
+  // The mark is a fresh run's alone (#447): a resume passes a plain `Config`,
+  // whose finders are whatever the run stored, default or not.
+  reportRoles(cfg, 'findersDefaulted' in cfg && cfg.findersDefaulted === true);
 
   // Installed here and released in the `finally`, so the stamp's lifetime is
   // exactly the lock's: this process is either driving this run or it is not,
@@ -3537,7 +3563,7 @@ async function cmdDoctor(args: readonly string[]): Promise<ExitCode> {
     if (globalAt !== null && existsSync(globalAt)) log.info(`  also your settings for all projects: ${globalAt}`);
     log.info(`  claude ${shownModel(cfg.claude.model, 'claude')}/${cfg.claude.effort} - codex ${shownModel(cfg.codex.model, 'codex')}/${cfg.codex.effort}`);
     reportResolvedRoles(cfg);
-    reportReviewSeats(cfg);
+    reportReviewSeats(cfg, cfg.findersDefaulted);
     reportCritiqueSeats(cfg);
     // Which MCP servers each role reaches and how each provider enforces it
     // (#138), in the words `src/mcp.ts` keeps for every surface that says it.

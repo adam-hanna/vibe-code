@@ -30,6 +30,7 @@ import {
   mergeConfig,
   readGlobalConfig,
   readRawConfig,
+  withDefaultFinders,
   writeConfigPatch,
 } from '@src/config.js';
 import { GATEABLE, GATE_MODES, UNGATEABLE } from '@src/gates.js';
@@ -881,13 +882,16 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
                   path: msg.scope === 'global' ? loaded.configPath : (path ?? loaded.configPath),
                 };
               })();
+        const globalRaw = readGlobalConfig();
         send({
           type: 'config',
           id: msg.id,
           ...project,
-          globalRaw: readGlobalConfig(),
+          globalRaw,
           globalPath: globalConfigPath(),
-          globalEffective: mergeConfig(DEFAULTS, readGlobalConfig()),
+          // Not `loadConfig`, so the default finder is resolved here by the same
+          // rule (#447): what a project that says nothing would get.
+          globalEffective: withDefaultFinders(mergeConfig(DEFAULTS, globalRaw), [globalRaw]).cfg,
           gateable: GATEABLE,
           modes: GATE_MODES,
           ungateable: UNGATEABLE,

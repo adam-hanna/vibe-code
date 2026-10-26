@@ -1,12 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { orchestrate } from '@src/orchestrator.js';
 import * as log from '@src/log.js';
 import type { Narration } from '@src/log.js';
-import { DEFAULTS } from '@src/config.js';
+import { DEFAULTS, loadConfig, storedConfig } from '@src/config.js';
 import { agents, config, freshRun, p1, planFixture, report, reviewingRun, work } from './helpers/loop-harness.js';
 import type { Handlers } from './helpers/loop-harness.js';
 import type { Config, CritiqueConfig, Evidence, Finding, ReviewConfig, RunState } from '@src/types.js';
@@ -40,6 +41,8 @@ interface Pinned {
   calls: string[];
   prompts: [string, string][];
   artifacts: Record<string, string>;
+  /** The config as a run stores it in `state.config`, when the case pins one (#447). */
+  stored?: unknown;
 }
 
 function normal(state: RunState, text: string): string {
@@ -107,6 +110,7 @@ function pinned(name: string, got: Pinned): void {
   assert.deepEqual(got.narration, want.narration, 'the narration moved');
   assert.deepEqual(got.events, want.events, 'the recorded events moved');
   assert.deepEqual(got.artifacts, want.artifacts, 'an artifact moved');
+  assert.deepEqual(got.stored, want.stored, 'the stored config moved');
 }
 
 const REAL = { vote: 'real', reason: 'It is there.', evidence: [] };
@@ -220,4 +224,47 @@ test('a critique round with two finders and three verifiers at maxParallel 1 is 
   ]);
   assert.ok(got.calls.includes('critique-0-vote-3-v3') && got.calls.includes('critique-1-f2'), got.calls.join(', '));
   pinned('critique', got);
+});
+
+// ---- an explicit empty finder list (#447) -----------------------------------
+
+/**
+ * A run whose file says `"review": { "finders": [] }` is byte-identical to one
+ * from before the default finder existed (#447): the whole loop - plan,
+ * critique, implement, review - and `storedConfig` of its config, the value
+ * `startRun` hands `createRun`. The loop is driven directly, so what `startRun`
+ * writes to disk is read back in `default-review-finder.test.ts`.
+ *
+ * Recorded on 32f49e3, before the default was resolved, so the record is of
+ * the code that had no default to opt out of. There the stored config was the
+ * loaded one as it stood; it is `storedConfig` of it now, which is what
+ * `startRun` hands `createRun`, and the record was not re-made. The config is built by
+ * `loadConfig` from a file, not from `DEFAULTS`, because the file naming the
+ * key is the whole case; the file also neuters what `config()` neuters.
+ */
+test('a full loop whose file sets review.finders to [] is pinned whole, stored config included', async () => {
+  const state = freshRun({ prefix: 'vibe-pin-empty-finders-', task: 'pin the opt-out', planOnly: false, git: true, commit: true });
+  const project = mkdtempSync(path.join(tmpdir(), 'vibe-pin-empty-finders-config-'));
+  writeFileSync(
+    path.join(project, 'vibe.config.json'),
+    JSON.stringify({
+      codex: { readRateLimits: false },
+      context: { enabled: false },
+      progress: { enabled: true, intervalMs: 60_000 },
+      verify: { enabled: false },
+      git: { commitEachRound: false },
+      budget: { planShare: 0 },
+      review: { finders: [] },
+    }),
+    'utf8',
+  );
+  const loaded = loadConfig(project);
+  const stored = JSON.parse(JSON.stringify(storedConfig(loaded)).split(project).join('<project>')) as unknown;
+  const handlers: Handlers = {
+    claude: (label) => (label === 'plan' || label.startsWith('revise-') ? planFixture() : work(state, `${label}.txt`)),
+    codex: () => report([]),
+  };
+  const got = await drive(state, loaded, handlers, false, ['PLAN.md', 'code-review-0.json', 'FOLLOW-UPS.md']);
+  assert.deepEqual(got.calls, ['plan', 'critique-0', 'implement', 'review-0']);
+  pinned('explicit-empty-finders', { ...got, stored });
 });
