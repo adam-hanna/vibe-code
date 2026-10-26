@@ -153,6 +153,53 @@ saying why, so `RoundCard.questions` is attached by arrival through the same `du
 census goes through. It is a count and a link rather than the text — the column is 364px and a
 question is a paragraph — and the Questions tab is where the text is, one section per round.
 
+**A person settles the assumptions; the threshold does not move (#465).** A run defers an
+advisory question the answerer declines and carries on with the planner's fallback. A round
+later the planner can ask the same thing in other words, now blocking, and the person answers
+that. `reconcileAssumed` retires an assumption only when a person answered *the same question*,
+exactly or at `REPHRASE_THRESHOLD`. In the bench run (`lru-h`) the two wordings scored
+**0.395**, so `ASSUMED.md` called a decision made one round later a guess. The plan was right
+and the record was wrong. Lowering the threshold is not the fix: it was measured
+(`src/similarity.ts`), and the highest-scoring pair in the #65 census that was *not* one
+question scored 0.4. A threshold that caught 0.395 would match questions that differ.
+
+So the person decides, in the file they are already editing. `writeEscalation` lists the
+assumptions still in force under `## Assumptions the run is already making`, on every kind of
+stop, before `## Change a severity`. Each is `### A<n>. <question>` with a
+`**Your decision:**` blockquote. The rules that keep it from disturbing anything else:
+
+- **The marker is not `**Your answer:**`.** `cmdResume` picks its path by whether the file
+  holds that string *anywhere*, and `parseHumanAnswers`, `src/answers.ts` and the app's reader
+  key on it. A different marker leaves all of them as they were, and a findings stop stays a
+  findings stop.
+- **Planner text is rendered inert.** The question and its fallback are free strings, so
+  `inert` puts each on one line and collapses every run of asterisks to one. Nothing can begin
+  a `### ` or `>` line, and no `**Your answer:**` survives at any asterisk count.
+  `normalize(inert(q)) === normalize(q)`, so the heading still matches.
+- **`parseDecisions` reads only that section,** from its heading to the next `## `. Finding
+  titles are rendered verbatim as `### ` headings, so a finding titled `A1. …` would otherwise
+  be read as a decision nobody wrote.
+- **Refuse, never repair (#141).** The resume stops with nothing spent and the file in place
+  when a block has:
+  - text off the `> ` lines;
+  - a heading that matches no deferred question (a stale file);
+  - two blocks for one question;
+  - a `**Your answer:**` typed anywhere in the section.
+- **The heading text is the key, never the number.** Answers in the same file change which
+  assumptions remain before decisions are read.
+- **A decision is a human answer to that exact question.** It goes through
+  `recordHumanAnswers` under the deferred question's own stored wording, so it is retired by
+  the exact rule and `REPHRASED.md` says nothing. On the answers path it joins the person's
+  answers in `pendingAnswers`. On the findings and moves-only paths it does not, because that
+  would buy a revision the stop did not ask for; `userDecisions` carries it to every turn.
+  Decisions never stand in for a blocking answer: a question stop with only decisions filled
+  is still "No answers found".
+
+`ASSUMED.md` meanwhile lists the person's answers after the assumptions, under
+`## Your answers in this run`, verbatim and **matched to nothing**. It is where a reader checks
+whether one already settles an assumption the run could not pair it with. Showing and filling
+decisions in the window or on the phone is a follow-up.
+
 **`vibe plan` is deliberately not a row.** #140 asked for `planOnly` to resolve to
 `gates['plan-approved'] = 'stop'`; it does not, because they are two different things rather
 than two mechanisms for one. `planOnly` says there is no next phase, so the run *completes* —

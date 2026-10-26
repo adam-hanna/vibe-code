@@ -56,6 +56,33 @@ describe('a person\'s answers, read from the files the loop keeps', () => {
     expect(cli).toContain(String.raw`firstLine.replace(/^\d+\.\s*/, '')`);
   });
 
+  test('a decision on an assumption is not read as an answer (#465)', () => {
+    // The core lists the assumptions a run is carrying after the questions, each
+    // under `**Your decision:**` rather than the answer marker. Deciding one is
+    // not something the pane shows yet, so the reader must pass over it.
+    const withAssumptions = [
+      FILE,
+      '',
+      '## Assumptions the run is already making',
+      '',
+      'The run deferred these and is continuing on the planner\'s fallback.',
+      '',
+      '### A1. Which cache?',
+      '*Proceeding with:* LRU',
+      '',
+      '**Your decision:**',
+      '',
+      '> Decided: LRU.',
+      '',
+      '### A2. Which queue?',
+      '',
+      '**Your decision:**',
+      '',
+      '> ',
+    ].join('\n');
+    expect(parseAnswered(withAssumptions)).toEqual(parseAnswered(FILE));
+  });
+
   test('the pane draws yours first, on both the live round and the recorded ones', () => {
     expect(pane.match(/mine=\{mine\.get\(questionKey\(/g)).toHaveLength(2);
     expect(pane).toMatch(/your answer/);

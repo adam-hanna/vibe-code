@@ -436,6 +436,79 @@ function renderAssumed(state: RunState, remaining: readonly DeferredQuestion[]):
     lines.push(`*Proceeded with:* ${q.recommended}`);
     lines.push(`*Why Codex declined:* ${q.reason}\n`);
   }
+
+  // Beside the assumptions, and matched to none of them (#465). A person who
+  // answered a rewording of one of these scored below the threshold, so the run
+  // cannot say they are the same question - but the person can, and this is
+  // where they look. No claim is made about any pair; the list is verbatim.
+  const answers = state.humanAnswers ?? [];
+  if (answers.length > 0) {
+    lines.push('## Your answers in this run\n');
+    lines.push(
+      'The run did not match these to the assumptions above, so check whether any of them',
+    );
+    lines.push('already settles one.\n');
+    for (const [i, a] of answers.entries()) {
+      lines.push(`### ${i + 1}. ${a.question}`);
+      lines.push(`*You answered:* ${a.answer}\n`);
+    }
+  }
+  return lines.join('\n');
+}
+
+// ---- deciding an assumption in NEEDS-INPUT.md (#465) ------------------------
+
+/**
+ * The marker under which a person decides an assumption the run is making.
+ *
+ * Deliberately not `**Your answer:**`: `cmdResume` picks its path by whether
+ * the file holds that marker anywhere, and `parseHumanAnswers`, `answers.ts`
+ * and the app's reader all key on it. A different marker leaves every one of
+ * them exactly as it was, and a findings stop stays a findings stop.
+ */
+export const DECISION_MARKER = '**Your decision:**';
+
+/** The heading `parseDecisions` bounds itself to, and the only place it reads. */
+export const ASSUMPTIONS_HEADING = '## Assumptions the run is already making';
+
+/**
+ * A planner-written field, as one line no parser of `NEEDS-INPUT.md` can mistake
+ * for structure.
+ *
+ * The question and its fallback are free strings, and this section is written on
+ * findings stops too - where a stray `**Your answer:**` would flip the resume onto
+ * the answers path, and a newline followed by `### ` would forge a block. So
+ * whitespace collapses (nothing can begin a line) and every run of asterisks
+ * becomes one (no `**` survives, whatever count surrounds a marker - collapsing
+ * pairs let `***Your answer:***` through as the marker itself).
+ *
+ * `normalize` folds every non-word run, so `normalize(inert(q)) === normalize(q)`
+ * and the rendered heading still matches its question through `isSameQuestion`.
+ */
+export function inert(s: string): string {
+  return s.replace(/\s+/g, ' ').replace(/\*+/g, '*').trim();
+}
+
+/**
+ * The block listing the assumptions in force, for `writeEscalation`.
+ *
+ * Numbered `A<n>` so it cannot collide with the questions' `<n>`; the number is
+ * display only, and the heading text is what a decision is matched on. The
+ * fallback line is left out when there is none, as #394 does for questions.
+ */
+export function assumptionSection(remaining: readonly DeferredQuestion[]): string {
+  const lines: string[] = [
+    `${ASSUMPTIONS_HEADING}\n`,
+    "The run deferred these and is continuing on the planner's fallback. If one is already",
+    'settled by an answer above, or you want to decide it now, write your decision under it;',
+    'leave it empty to keep the fallback.\n',
+  ];
+  for (const [i, q] of remaining.entries()) {
+    lines.push(`### A${i + 1}. ${inert(q.question)}`);
+    const fallback = inert(q.recommended);
+    if (fallback !== '') lines.push(`*Proceeding with:* ${fallback}`);
+    lines.push(`\n${DECISION_MARKER}\n\n> \n`);
+  }
   return lines.join('\n');
 }
 
