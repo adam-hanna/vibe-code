@@ -262,7 +262,15 @@ export const FINDINGS_SCHEMA = {
         // excerpt:null`, so their content comes before nulls still owed. That is
         // 54 of the archive's 812 evidence entries (40 `external`, 14
         // `absence`), down from 742 of 790 that ended on a null `ref` before.
-        // Whether they stall, and what to do if they do, is #429.
+        //
+        // Measured after #424 (#429): they do not stall, so the order stays. Of
+        // 152 Codex outputs written since (35 in this repo's archive, 117 from
+        // a throwaway bench project built to produce them), 62 evidence entries
+        // were `external` (39) or `absence` (23). No blank run sat before
+        // `path`, `line` or `excerpt` in any of them; the longest blank run in
+        // all 152 outputs was 2 characters. Splitting the entry per kind with
+        // an `anyOf` would cost Codex strict-output risk for a stall nobody saw.
+        // Measure again with `scripts/count-schema-stalls.mjs` if one appears.
         //
         // Left alone on the same evidence: `test_verdicts` (last in
         // `REVIEW_SCHEMA`, often `[]`) shows no blank run before it in the
@@ -408,7 +416,8 @@ export const FINDINGS_SCHEMA = {
               // entries, and as the last key after `excerpt` it was where 60 of
               // the archive's 150 blank runs sat. This ends a `code` entry on
               // its content, but not an `external` or `absence` one, which still
-              // ends on null fields after it (54 of 812 entries; #429). See the
+              // ends on null fields after it. Measured not to stall (62 such
+              // entries after #424, no blank run before them; #429). See the
               // note on the finding.
               required: ['kind', 'ref', 'path', 'line', 'excerpt'],
               properties: {
