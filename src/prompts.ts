@@ -1466,6 +1466,13 @@ ${s.text}${s.text.endsWith('\n') ? '' : '\n'}`;
  * edited, closely paraphrased, because without it `justified: true` means
  * nothing - a reviewer would mark whatever made the gate pass. It states no
  * threshold: "N removed lines" is a fact the reviewer reads, never a trigger.
+ *
+ * "Added" is from the run's base, so a test file the run created reads as
+ * added in every round, and a later round that weakened it read as a new file
+ * (#463): on the bench, judged justified 4 times in 4. The sentence after
+ * "adding tests is not suspicious" sends the reviewer to the file's history on
+ * the branch; with it, 3 of 4 were judged not justified and 4 of 4 legitimate
+ * fix-round edits stayed justified.
  */
 function judgeSection(judge: readonly FileChange[] | undefined): string {
   if (judge === undefined || judge.length === 0) return '';
@@ -1478,7 +1485,7 @@ ${judge.map(judgeLine).join('\n')}
 
 For each file above, return exactly one entry in \`test_verdicts\` - \`file\` spelled exactly as listed, \`justified\`, and a \`reason\`.
 
-**What justified means.** Editing or removing a test is justified ONLY when the test's claim is no longer the contract: the behaviour it checks genuinely moved, as the plan intended, or the test asserted more than the thing it was guarding. It is NEVER justified merely because it makes the gate pass - a test changed to agree with the code is the defect this check exists to catch. A newly added test is fine to mark justified; adding tests is not suspicious. For \`vibe.config.json\` and \`REVIEW.md\`, the question is whether the change is something the plan called for.
+**What justified means.** Editing or removing a test is justified ONLY when the test's claim is no longer the contract: the behaviour it checks genuinely moved, as the plan intended, or the test asserted more than the thing it was guarding. It is NEVER justified merely because it makes the gate pass - a test changed to agree with the code is the defect this check exists to catch. A newly added test is fine to mark justified; adding tests is not suspicious. But "added" here is measured from where this run started, so a test file this run created and then changed in a later commit of the same run is listed as added: read its history on this branch (\`git log -p -- <file>\`), and judge every change after the commit that first added it by the rule above. A later commit that deletes an assertion, loosens an expected value or drops a case so the test agrees with the code is not justified, however the file was first written. For \`vibe.config.json\` and \`REVIEW.md\`, the question is whether the change is something the plan called for.
 
 A listed file you leave out is recorded as unjudged, never as justified. This does not block the run and it is not a finding: if a change here is wrong, ALSO raise it as an ordinary finding at its true severity.
 `;
