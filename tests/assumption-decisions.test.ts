@@ -461,6 +461,55 @@ test('a finding that looks like a decision is never read as one', () => {
   assert.deepEqual(parseDecisions(noSection, [DEFERRED]), { decisions: [], problems: [] });
 });
 
+test('on a question stop, the resume takes the answer and the decision together', async () => {
+  // The shipped answers path, not the harness's copy of it: a regression that
+  // dropped decisions from what `cmdResume` records would pass every bench case.
+  const state = stoppedWith(new Escalation(EXIT.NEEDS_HUMAN, 'a question', [questionFixture({ question: Y })]));
+  const file = at(state, 'NEEDS-INPUT.md');
+  writeFileSync(file, readFileSync(file, 'utf8').replace('**Your answer:**\n\n> ', '**Your answer:**\n\n> The oldest.'), 'utf8');
+  writeUnderDecision(state, '> Decided: LRU.');
+
+  const { said, after, loopRan, pendingAtLoop } = await resume(state);
+  assert.match(said, /Picked up 1 answer\(s\) and 1 decision\(s\)/);
+  assert.equal(has(state, 'NEEDS-INPUT.md'), false);
+  assert.equal(retired(state).some((n) => n.startsWith('answered-')), true);
+  assert.deepEqual(after.humanAnswered, [Y, X]);
+  const pending = (after.pendingAnswers ?? []).map((a) => [a.question, a.answer]);
+  assert.deepEqual(pending, [
+    [Y, 'The oldest.'],
+    [X, 'Decided: LRU.'],
+  ]);
+  if (loopRan) assert.deepEqual(pendingAtLoop, after.pendingAnswers);
+  if (has(state, 'ASSUMED.md')) assert.equal(read(state, 'ASSUMED.md').includes(`### 1. ${X}`), false);
+});
+
+test('a plan stop resumed on severity moves alone takes the decision and revises nothing', async () => {
+  const { state } = await stalledPlan();
+  state.deferredQuestions.push(DEFERRED);
+  saveState(state);
+  const carried = takeCarried(state, 'plan');
+  const id = carried[0]?.id ?? '';
+  // A question stop - the file carries the answer marker - left unanswered.
+  writeEscalation(state, new Escalation(EXIT.NEEDS_HUMAN, 'a question', [questionFixture({ question: Y })], carried));
+  const file = at(state, 'NEEDS-INPUT.md');
+  const raw = readFileSync(file, 'utf8');
+  const head = raw.indexOf(`### Move: \`${id}\``);
+  assert.notEqual(head, -1, 'the carried finding has a move block');
+  const rest = raw
+    .slice(head)
+    .replace(/\*Move to:\* <[^>]*>/, '*Move to:* P2')
+    .replace('**Why:**\n\n>', '**Why:**\n\n> Not blocking.');
+  writeFileSync(file, `${raw.slice(0, head)}${rest}`, 'utf8');
+  writeUnderDecision(state, '> Decided: LRU.');
+  assert.deepEqual(parseHumanAnswers(read(state, 'NEEDS-INPUT.md')), []);
+
+  const { said, after } = await resume(state);
+  assert.match(said, /taking your severity changes/);
+  assert.equal(retired(state).some((n) => n.startsWith('stalled-')), true);
+  assert.deepEqual(after.humanAnswered, [X]);
+  assert.equal(after.pendingAnswers, null, 'no revision the stop did not ask for');
+});
+
 test('a lookalike finding does not stop a findings resume, and only the real decision is taken', async () => {
   const state = stoppedWith(findingsStop([lookalike('A9. Nothing anybody deferred')]));
   writeUnderDecision(state, '> The real decision.');
