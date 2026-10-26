@@ -156,7 +156,7 @@ When the next critique raises a rebutted finding again under the same id, the ru
 
 ### Changes to the run's own judge
 
-The tests and `vibe.config.json` decide whether a run passed, so a round that edits them is grading its own work. When a round changes a file matching `verify.testPaths`, or `vibe.config.json`, the reviewer is shown each one and must say whether the change was justified. A change is justified only when the test's claim is no longer the contract, and never because it makes the gate pass. Each file's status, its lines added and removed, and the verdict are recorded in `state.json` and the round's `code-review-<n>.json`. A file the reviewer did not address is recorded as `unjudged`. None of this stops the run, but the end-of-run summary names any file that was not judged justified.
+The tests and `vibe.config.json` decide whether a run passed, so a round that edits them is grading its own work. When a round changes a file matching `verify.testPaths`, or `vibe.config.json`, the reviewer is shown each one and must say whether the change was justified. A change is justified only when the test's claim is no longer the contract, and never because it makes the gate pass. A test file the run itself added counts as an edit too when a later round changes it: the reviewer is told to read its history on the branch, so a fix round that loosens a test it wrote earlier is judged like any other edit. Each file's status, its lines added and removed, and the verdict are recorded in `state.json` and the round's `code-review-<n>.json`. A file the reviewer did not address is recorded as `unjudged`. None of this stops the run, but the end-of-run summary names any file that was not judged justified.
 
 ### The repository's review standards (REVIEW.md)
 

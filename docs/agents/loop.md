@@ -394,6 +394,19 @@ is that such an edit can no longer pass in silence. `src/judge.ts` decides which
   moved, or the test asserted more than the thing it guards. It is never justified because it
   makes the gate pass. Adding a test is not suspicious. For `vibe.config.json`, the question is
   whether the plan called for the change.
+
+  **"Added" is measured from where the run started, so the prompt says what that hides**
+  (#463). A test file the run itself created is listed as `added` in every review round, so a
+  later commit of the same run that weakens it, such as a fix round loosening an expected
+  value to agree with the code, used to read as a new file and be judged justified. On the
+  bench (commits that weakened tests to hide planted bugs, reviewed with no finders) the
+  reviewer judged them justified 4 times in 4, while noting the assertions "miss several
+  defects". The prompt now tells it to read the file's history on the branch (`git log -p`)
+  and to judge every change after the commit that first added it by the editing rule. With
+  that sentence: 3 of 4 judged not justified, and 4 of 4 legitimate fix-round edits to such
+  files (two lru, two retry, with deletions) still judged justified. It is a sentence, not a
+  record: the facts listed stay the diff from the base, and the history is read by the
+  reviewer, so a file whose history it does not read is judged as before.
 - **`unjudged` is the fail-closed answer.** A listed file with no verdict from the part that
   showed it is recorded as `unjudged`, never as justified, because that is the case the issue
   exists to catch. A verdict naming an unlisted file attaches to nothing. If two verdicts name
