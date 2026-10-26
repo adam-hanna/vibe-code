@@ -123,7 +123,7 @@ A reproducer that failed before a final fix and passes after it closes the findi
 
 ### More finders, and a vote
 
-By default one reviewer reviews each round. [`review`](./configuration#review) can add two kinds of seat, each on Claude or Codex with its own model and effort, and each a fresh, read-only turn that never resumes a conversation:
+By default a review round has the reviewer and one finder, on the agent the reviewer is not on, and no vote: see [the default finder](./configuration#review). [`review`](./configuration#review) can change the finders and add verifiers, each on Claude or Codex with its own model and effort, and each a fresh, read-only turn that never resumes a conversation:
 
 - **Finders** review the same diff after the reviewer, each without seeing what the others found. Their findings are merged by claim: two findings are one defect when they cite the same file and line or say the same thing in their titles, and otherwise both are kept. A finder whose turn fails, other than by a stop or a ceiling, contributes nothing, and the round goes on with the rest.
 

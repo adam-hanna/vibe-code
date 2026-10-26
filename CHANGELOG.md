@@ -7,6 +7,13 @@ for a change that breaks an existing config or an existing run.
 Each entry links the pull request that made it and, where there is one, the issue it
 closes.
 
+## Unreleased
+
+### Upgrading
+
+- **A default review now has one extra finder, so it spends more.** With no `review.finders` in any settings file, the review seats one finder on the agent `roles.reviewer` is not on: Claude at effort `high` under the default roles, or Codex at `codex.effort` when the reviewer is on Claude, with no model named and a focus on error handling, fail-closed paths and tests that assert what the change claims. It costs one extra turn per diff part per review round. On the bench that measured it (45 review loops) it added 6.9M tokens to the reviewer's 29.6M, about 23%, and it caught 3 bugs the reviewer missed. There is still no vote by default. When every role is on one agent there is no default finder. A run started before this change resumes with the finders it stored, which is none. To opt out, set `"review": { "finders": [] }`. `vibe doctor` and the line before the first turn mark the default finder `(default)`, and the settings screen shows it, with a "use the default" control when a file names the list.
+  (closes #447)
+
 ## 1.8.0 - 2026-10-23
 
 Thirty-two pull requests since 1.7.1. **Nothing here breaks an existing config:** no key was renamed or removed, no flag was removed, and `PROTOCOL_VERSION` is still 2. Two sections were added to `vibe.config.json` (`review` and `updates`), two keys under `loop` (`stallAfter` and `fixNonBlocking`), four block names under `prompts` (`stall` and three for the pilot), and one flag (`--branch`). What a running setup can notice is listed under Upgrading.

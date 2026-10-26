@@ -915,6 +915,13 @@ export type PromptOverrides = Readonly<Record<string, string>>;
 
 export interface LoadedConfig extends Config {
   configPath: string | null;
+  /**
+   * Whether `review.finders` is the resolved default rather than a list some
+   * layer named (#447). Only for the `(default)` mark `vibe doctor` and a fresh
+   * run's first lines print. Never a setting, so never on `Config` and never in
+   * `state.config`: `storedConfig` strips it before a run is written.
+   */
+  findersDefaulted: boolean;
 }
 
 /** Deep-partial shape accepted from vibe.config.json and CLI overrides. */

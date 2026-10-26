@@ -116,7 +116,7 @@ test('a write answers with the config that resulted, not with the patch', () => 
   const session = createSession((m) => void sent.push(m), {
     invoke: () => Promise.resolve(0),
     writeConfig: () => ({ path: 'C:/repo/vibe.config.json' }),
-    config: () => ({ ...DEFAULTS, configPath: 'C:/repo/vibe.config.json' }),
+    config: () => ({ ...DEFAULTS, configPath: 'C:/repo/vibe.config.json', findersDefaulted: false }),
   });
   session.receive(line({ type: 'config', id: 1, dir: 'C:/repo', patch: { gates: { 'plan-round': 'auto' } } }));
 
@@ -140,7 +140,7 @@ test('a read is answered during a run, and a write is refused with a reason', as
   const sent: Outbound[] = [];
   const session = createSession((m) => void sent.push(m), {
     invoke: () => new Promise<number>(() => undefined),
-    config: () => ({ ...DEFAULTS, configPath: null }),
+    config: () => ({ ...DEFAULTS, configPath: null, findersDefaulted: false }),
     writeConfig: () => {
       throw new Error('a write should not have been attempted');
     },
@@ -162,7 +162,7 @@ test('a refusal reaches the window as an error, carrying the validator’s sente
   const sent: Outbound[] = [];
   const session = createSession((m) => void sent.push(m), {
     invoke: () => Promise.resolve(0),
-    config: () => ({ ...DEFAULTS, configPath: null }),
+    config: () => ({ ...DEFAULTS, configPath: null, findersDefaulted: false }),
     writeConfig: () => {
       throw new Error('gates["plan-round"] must be one of auto, step, stop');
     },

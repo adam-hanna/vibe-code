@@ -150,6 +150,34 @@ export function seatsPatch(
   return { [section]: { [kind]: rows.filter(ready).map((r) => toSeat(r, kind)) } };
 }
 
+/**
+ * "Use the default" for the review's finders (#447): the core deletes the key
+ * when a patch says `null` for it, so the file follows the default again -
+ * which moves with the reviewer - rather than holding a copy of today's seat.
+ * The review's alone: the critique's panel has no default to return to.
+ */
+export const USE_DEFAULT_FINDERS: Record<string, unknown> = { review: { finders: null } };
+
+/**
+ * Where the review's finders come from, for the file being edited (#447):
+ * `named` when that file sets `review.finders`, `inherited` when only the
+ * settings for all projects do (a project view), and `default` when neither
+ * does and the list in force is the one the core resolved. Named means the key
+ * is there, `[]` included - `inFile`'s test - and the seat itself is never
+ * read here: it comes from the effective config, so no default is restated.
+ */
+export function findersDefaultState(
+  scope: 'project' | 'global',
+  raw: Record<string, unknown>,
+  globalRaw: Record<string, unknown>,
+): 'default' | 'inherited' | 'named' {
+  const names = (file: Record<string, unknown>): boolean =>
+    (file['review'] as Record<string, unknown> | undefined)?.['finders'] !== undefined;
+  if (names(raw)) return 'named';
+  if (scope === 'project' && names(globalRaw)) return 'inherited';
+  return 'default';
+}
+
 /** The quorum field's text as the core wants it: blank is a majority (`null`). */
 export function quorumPatch(text: string, section: SeatSection = 'review'): Record<string, unknown> {
   const t = text.trim();

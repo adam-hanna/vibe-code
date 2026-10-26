@@ -174,6 +174,9 @@ async function doctor(critique: unknown): Promise<{ code: number; lines: string[
     JSON.stringify({
       codex: { readRateLimits: false, model: 'gpt-fixture', effort: 'high', timeoutMs: 111_000 },
       claude: { model: 'claude-fixture', effort: 'low', planTimeoutMs: 333_000 },
+      // No review finder, the default one included (#447): these cases are the
+      // critique's block, and say no review block is printed beside it.
+      review: { finders: [] },
       ...(critique === undefined ? {} : { critique }),
     }),
     'utf8',
