@@ -239,8 +239,25 @@ comment: a real plan may say "see below" in a sentence, and a substring rule wou
 
 That field is what makes a human finding possible without corrupting the record. `src/raise.ts`
 holds the whole surface: a block appended to every `NEEDS-INPUT.md`, parsed on the same resume
-that reads the answers, merged into `pendingFindings` rather than replacing them. Four things
+that reads the answers, merged into `pendingFindings` rather than replacing them. Five things
 about it are load-bearing:
+
+- **Agent text in the file cannot carry a marker** (#472). Every parser of `NEEDS-INPUT.md` keys
+  on markers: `cmdResume` on `**Your answer:**` anywhere in the file, `parseHumanAnswers` on
+  line-initial `### `, this module on its `**…:**` and `*…:*` labels, and `parseDecisions` on the
+  assumptions heading. The rest of the file is the agents' words, which used to be written as
+  they came, so a finding quoting `**Your answer:**` sent a findings stop down the answers path,
+  which refused with *No answers found*. Of 501 findings in the archive and the bench, 5 quoted
+  it, all from #465's own run reviewing that feature. `literal()` (`src/literal.ts`) now goes
+  over every agent-written field `writeEscalation`, `describeVotes` and `moveSection` render: the
+  task, the stop message, each question's text, options and default, each finding's title,
+  detail and fix, the guard's reason and the vote reasons. It escapes the asterisks of each
+  marker in `MARKERS` and puts a backslash before a `#`, `>` or `*` that starts a line (after up
+  to three spaces), and changes nothing else, so text holding none of these renders byte for
+  byte as before. A field rendered after other text on its line is escaped only after a
+  newline, so a title such as `#flush drains #pending` is untouched. The parsers did not move.
+  `MARKERS` is checked against the parsers' own constants and every `**Label:**` the raise and
+  move templates print, so a new marker there fails a test until it is listed.
 
 - **Grounding runs; the inert guard does not.** A `*File:* src/run.ts:120` is an `Evidence`
   entry of kind `code`, so `checkEvidence` is nearly a no-op on one — but running it keeps one

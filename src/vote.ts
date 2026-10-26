@@ -1,3 +1,4 @@
+import { inlineLiteral } from '@src/literal.js';
 import type { RoleSetting } from '@src/roles.js';
 import type { Ballot, Votes, VoteValue } from '@src/types.js';
 
@@ -85,8 +86,9 @@ export function describeVotes(v: Votes): string[] {
       `(quorum ${v.quorum}) - ${v.outcome}`,
     ...v.ballots.map((b) => {
       const counted =
-        b.counted === b.vote ? '' : ` (counted as ${b.counted}${b.countedReason === undefined ? '' : ` - ${b.countedReason}`})`;
-      return `- \`${b.seat}\` (${b.provider}/${b.model}): ${b.vote}${counted} - ${b.reason}`;
+        b.counted === b.vote ? '' : ` (counted as ${b.counted}${b.countedReason === undefined ? '' : ` - ${inlineLiteral(b.countedReason)}`})`;
+      // A verifier's words, into NEEDS-INPUT.md (#472).
+      return `- \`${b.seat}\` (${b.provider}/${b.model}): ${b.vote}${counted} - ${inlineLiteral(b.reason)}`;
     }),
   ];
 }

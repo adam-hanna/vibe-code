@@ -52,6 +52,7 @@ import {
 } from '@src/roles.js';
 import type { Access, FinderEntry, Role, RoleSpec, RoleTable, VerifierEntry } from '@src/roles.js';
 import { mergeAcrossFinders } from '@src/finder-merge.js';
+import { inlineLiteral, literal } from '@src/literal.js';
 import { runSeatGroup } from '@src/seat-group.js';
 import type { FinderMerge, FinderReport } from '@src/finder-merge.js';
 import { claudeMcpDefinitions, resolveClaudeGrants } from '@src/mcp.js';
@@ -6717,9 +6718,9 @@ export function writeEscalation(state: RunState, escalation: Escalation): string
   const lines: string[] = [
     '# Needs your input\n',
     `**Run:** \`${state.id}\``,
-    `**Task:** ${state.task}`,
+    `**Task:** ${inlineLiteral(state.task)}`,
     '',
-    `## Why the run stopped\n\n${escalation.message}\n`,
+    `## Why the run stopped\n\n${literal(escalation.message)}\n`,
   ];
 
   if (escalation.questions && escalation.questions.length > 0) {
@@ -6727,12 +6728,12 @@ export function writeEscalation(state: RunState, escalation: Escalation): string
     lines.push('Answer inline under each question, then resume with:\n');
     lines.push(`\`\`\`\nvibe resume ${state.id}\n\`\`\`\n`);
     escalation.questions.forEach((q, i) => {
-      lines.push(`### ${i + 1}. ${q.question}`);
+      lines.push(`### ${i + 1}. ${inlineLiteral(q.question)}`);
       lines.push(`*Kind:* ${q.kind}`);
-      if (q.options.length > 0) lines.push(`*Options:* ${q.options.join(' | ')}`);
+      if (q.options.length > 0) lines.push(`*Options:* ${q.options.map(inlineLiteral).join(' | ')}`);
       // No line for no default (#394): the stall question has none on purpose,
       // and an empty default line would read as one.
-      if (q.recommended.trim() !== '') lines.push(`*Claude would default to:* ${q.recommended}`);
+      if (q.recommended.trim() !== '') lines.push(`*Claude would default to:* ${inlineLiteral(q.recommended)}`);
       lines.push('\n**Your answer:**\n\n> \n');
     });
   }
@@ -6743,7 +6744,7 @@ export function writeEscalation(state: RunState, escalation: Escalation): string
     const voted = escalation.findings.every((f) => f.severity === 'P0' && f.votes?.outcome === 'unconfirmed');
     lines.push(voted ? '## Unconfirmed P0 findings\n' : '## Outstanding P1 findings\n');
     for (const f of escalation.findings) {
-      lines.push(`### ${f.title} \`${f.id}\`\n${f.detail}\n\n*Suggested fix:* ${f.suggested_fix}\n`);
+      lines.push(`### ${inlineLiteral(f.title)} \`${f.id}\`\n${literal(f.detail)}\n\n*Suggested fix:* ${inlineLiteral(f.suggested_fix)}\n`);
       if (voted && f.votes !== undefined) lines.push(`${describeVotes(f.votes).join('\n')}\n`);
     }
   }

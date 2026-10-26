@@ -25,6 +25,7 @@ src/seat-group.ts    a round's finder or verifier turns, review.maxParallel or c
 src/dispositions.ts  a review fix round's or a findings revision's dispositions joined onto its findings, with seats and (plan side) votes, pure (#393, #453)
 src/questions.ts     when two wordings are one question: the threshold, and REPHRASED.md
 src/raise.ts         what a person does to a run's findings: raise one, move a severity
+src/literal.ts       agent text made inert before it is written into NEEDS-INPUT.md (#472)
 src/roles.ts         who does what: the role table, refusals, warnings
 src/config.ts        DEFAULTS, config merge, validation, and the global file under the project's
 src/consistency.ts   cross-field rules over status/phase/planOnly, applied by loadRun
