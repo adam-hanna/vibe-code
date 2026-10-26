@@ -587,26 +587,29 @@ of them at once (#403; `1`, the default, is one after another) - see *Seats at o
   from scratch, so a `review_finder_failed` from the attempt it replaced must not lower the
   count. The cost half comes from `chargedTurns`, `turn_failed` included. The window's "found by
   n of m" takes `m` from the same frame, which `replayRun` carries, and never the configured count.
-- **⚑ The first finder keeps its memory.** `roles.reviewer` keeps its conversation across
+- **The first finder keeps its memory, and that stays** (#435). `roles.reviewer` keeps its conversation across
   rounds (the Codex `review` thread by default, Claude's `main` session if it is seated on
   Claude) while additional finders are fresh every round, so it is less independent than the
   others. Accepted, because a fresh first seat would break the default run's identity.
-  **Still open (#435).** The trade is memory of what it raised and of the fixer's reports
-  (fewer findings re-raised under new ids) against independence (fewer findings anchored on its
-  own last round). What would settle it is a measurement across runs with `review.finders` set:
-  how often, from round 2 on, the first finder re-raises a finding the fixer reported fixed or
-  rebutted, against how often a fresh finder does, read from `foundBy` and
-  `fix-dispositions-<n>.json`. As of #435 no such run exists: none of the 27 runs archived in
-  the main checkout's `.vibe/runs/` has a `review-<n>-f<k>` or `vote-` turn, so there is no
-  number and none is given. #435 changed only the user-facing pages (`configuration.md`,
-  `how-it-works.md`, the README's `review.finders` row), which now say it. The facts they
+  **Decided, on a measurement that cannot settle it** (2026-10-26). The trade is memory of what
+  it raised and of the fixer's reports against independence from its own last round. The test
+  was to be how often, from round 2 on, the first finder re-raises a finding the fixer reported
+  fixed or rebutted, against how often a fresh finder does. The 27 archived runs had no finder
+  turn, so a bench was built to produce them: 45 review loops on a throwaway library, 24 with a
+  finder, some on commits with planted bugs and a weaker fixer to provoke incomplete fixes. It
+  gave 12 findings in rounds 2 and later. The reviewer re-raised 2 under the same id, both after
+  the fixer reported them fixed, and both were then fixed in the next round. A fresh finder's
+  re-raise cannot be counted: it never has the old id, and matching by citation counted
+  neighbouring bugs as the same one. Nothing measured favours a fresh first seat, and making it
+  fresh would change the default run, so it stays. The user-facing pages (`configuration.md`,
+  `how-it-works.md`, the README's `review.finders` row) say so. The facts they
   state: a Codex reviewer is on `SLOTS.review`, carried under `codex.persistSession`, and
   `--no-codex-session` makes it fresh along with every Codex role; a Claude reviewer is on
   `main`, the planner's and implementer's session, whose `persists` is constant; additional
   finders are on `fresh-claude`/`fresh-codex` and get `hasMemory: false`. Every seat gets the
   same `latestReport`; only the carried reviewer also has its earlier findings and earlier
-  reports in context, and no reviewer is shown the dispositions. If it changes, it goes behind
-  a setting or is justified by that measurement, and a run with no finders stays byte-identical.
+  reports in context, and no reviewer is shown the dispositions. Reopening it needs a way to
+  count a fresh finder's re-raise, and then the bench in #435's comments is the place to run it.
 
 **Part C runs the vote.** Inside `runReview`, after the merge and `proveFindings` and before
 the return, so the caller still writes `code-review-<n>.json` once and the votes are in it
