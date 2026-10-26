@@ -423,9 +423,14 @@ test('an unrelated answer removes nothing, and the count matches the file', asyn
 
   assert.equal(state.resolvedByHuman, undefined, 'nothing was disposed of');
   const assumed = read(state, ASSUMED);
-  const entries = [...assumed.matchAll(/^### \d+\. /gm)].length;
+  // The assumptions only: since #465 a run a person answered also lists those
+  // answers after them, under their own heading and matched to nothing.
+  const yours = assumed.indexOf('## Your answers in this run');
+  assert.notEqual(yours, -1, 'the answer is listed beside the assumption');
+  const entries = [...assumed.slice(0, yours).matchAll(/^### \d+\. /gm)].length;
   assert.equal(entries, 1);
-  assert.ok(assumed.includes(W1));
+  assert.ok(assumed.slice(0, yours).includes(W1));
+  assert.ok(assumed.slice(yours).includes(UNRELATED));
   // #65 complained about the number as much as about the file. Both come out of
   // one filter now, so they cannot disagree.
   assert.match(readFileSync(transcript, 'utf8'), new RegExp(`WARN  ${entries} question\\(s\\) ran`));

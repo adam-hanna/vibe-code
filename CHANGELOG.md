@@ -9,6 +9,10 @@ closes.
 
 ## Unreleased
 
+### Added
+
+- **Settle the run's assumptions in `NEEDS-INPUT.md`.** When a run stops for you while it is carrying questions it continued past on the planner's fallback, the file lists them under `## Assumptions the run is already making`, each with a `**Your decision:**` block. Write a decision to record it as your answer to that exact question: every later turn sees it, and `ASSUMED.md` stops calling it a guess. Leave it empty to keep the fallback. This works on every kind of stop, and it never replaces answering a blocking question. A partly filled block, a block for a question the run did not defer, or a `**Your answer:**` written inside the section stops the resume before anything is spent. `ASSUMED.md` now also ends with `## Your answers in this run`, listing your answers beside the assumptions without matching them, so you can see whether one already settles an assumption. The similarity threshold is unchanged: the rewording that prompted this scored 0.395, below the measured 0.6. ([#465](https://github.com/adam-hanna/vibe-code/issues/465))
+
 ### Upgrading
 
 - **A default review now has one extra finder, so it spends more.** With no `review.finders` in any settings file, the review seats one finder on the agent `roles.reviewer` is not on: Claude at effort `high` under the default roles, or Codex at `codex.effort` when the reviewer is on Claude, with no model named and a focus on error handling, fail-closed paths and tests that assert what the change claims. It costs one extra turn per diff part per review round. On the bench that measured it (45 review loops) it added 6.9M tokens to the reviewer's 29.6M, about 23%, and it caught 3 bugs the reviewer missed. There is still no vote by default. When every role is on one agent there is no default finder. A run started before this change resumes with the finders it stored, which is none. To opt out, set `"review": { "finders": [] }`. `vibe doctor` and the line before the first turn mark the default finder `(default)`, and the settings screen shows it, with a "use the default" control when a file names the list.

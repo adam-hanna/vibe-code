@@ -20,8 +20,8 @@ Most files are conditional: a missing one means the run had nothing to put in it
 | `verify-<review>-<verify>-<gate>-<attempt>.log` | The full output of every attempt of a gate that did not pass cleanly. |
 | `artifacts/<gate>/round-<n>/` | Files a failing gate's `artifacts` setting copied. |
 | `reproducers/<finding-id>/` | A reviewer's reproducer test, kept after it is removed from the working tree. |
-| `NEEDS-INPUT.md` | Written when the run stops for you. Renamed `answered-<n>.md` once a resume has read your answers. |
-| `ASSUMED.md` | Questions the run proceeded on with the planner's own answer, which you did not answer yourself. |
+| `NEEDS-INPUT.md` | Written when the run stops for you. Renamed `answered-<n>.md` once a resume has read your answers, or `stalled-<n>.md` when the stop reported findings. When the run is carrying assumptions (questions it continued past on the planner's fallback), it lists them under `## Assumptions the run is already making`: write your decision under an assumption's **Your decision:** to settle it, or leave it empty to keep the fallback. |
+| `ASSUMED.md` | Questions the run proceeded on with the planner's own answer, which you did not answer or decide yourself. When you answered anything during the run, it ends with `## Your answers in this run`, listing those answers without matching them to the assumptions, so you can check whether one already settles an assumption. |
 | `REPHRASED.md` | Questions the run treated as ones already asked or answered, with the score that matched them. If two entries are not the same question, that is worth reporting as a bug. |
 | `OUTSTANDING.md` | P1 findings carried under `loop.p1Tolerance`: fixed in a final round that is deliberately not re-reviewed. |
 | `FOLLOW-UPS.md` | Findings the critic or the reviewer said belong in a different change, review findings the verifiers' vote moved to P2 (marked *Unconfirmed by vote*), and the plan's declared out-of-scope work. **The file to read after a clean run.** |

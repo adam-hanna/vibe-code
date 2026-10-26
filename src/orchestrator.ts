@@ -103,10 +103,12 @@ import {
   writeCheckpoint,
 } from '@src/run.js';
 import {
+  assumptionSection,
   findRephrase,
   isSameQuestion,
   normalize,
   pairAnswers,
+  reconcileAssumed,
   reconcileQuestionRecords,
   recordSuppressed,
 } from '@src/questions.js';
@@ -6745,6 +6747,14 @@ export function writeEscalation(state: RunState, escalation: Escalation): string
       if (voted && f.votes !== undefined) lines.push(`${describeVotes(f.votes).join('\n')}\n`);
     }
   }
+
+  // The assumptions the run is carrying, on every kind of stop (#465). A person
+  // may have just answered one of them in other words - one round later, at a
+  // similarity the threshold rightly refuses - and only they can say so. Read
+  // through `reconcileAssumed` so a question a human already answered is not
+  // offered again; no `create`, so nothing beyond its existing repair is written.
+  const { remaining } = reconcileAssumed(state);
+  if (remaining.length > 0) lines.push(assumptionSection(remaining));
 
   // Before the raise block, because it is the cheaper decision of the two: a
   // person who disagrees with a finding's severity does not have to write one

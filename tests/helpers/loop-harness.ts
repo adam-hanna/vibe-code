@@ -5,13 +5,13 @@ import path from 'node:path';
 import { Cancelled, CANCEL_ENDING, cancelRequested, currentTurnGroup, registerInterruptible } from '@src/cancel.js';
 import { attachSpend } from '@src/charge.js';
 import type { ClaudeTurnOptions } from '@src/claude.js';
-import { parseHumanAnswers, recordHumanAnswers } from '@src/cli.js';
+import { parseDecisions, parseHumanAnswers, recordHumanAnswers } from '@src/cli.js';
 import type { CodexTurnOptions } from '@src/codex.js';
 import { DEFAULTS } from '@src/config.js';
 import { Escalation, EXIT, orchestrate, writeEscalation } from '@src/orchestrator.js';
 import type { AgentTurns } from '@src/orchestrator.js';
 import { attachEnding } from '@src/proc.js';
-import { mergeHumanAnswers, reconcileQuestionRecords } from '@src/questions.js';
+import { ASSUMPTIONS_HEADING, DECISION_MARKER, mergeHumanAnswers, reconcileQuestionRecords } from '@src/questions.js';
 import { acceptMoves, acceptRaised, parseMoves, parseRaised, raisePhase } from '@src/raise.js';
 import { createRun, resumePhase, saveState, takePendingFindings } from '@src/run.js';
 import type {
@@ -903,6 +903,13 @@ export function answerNeedsInput(
   writeFileSync(file, filled, 'utf8');
 
   const answers = parseHumanAnswers(filled);
+  // Decisions on the run's assumptions ride with the answers on this path, as
+  // `cmdResume` takes them (#465). A block the parser refuses stops here, as the
+  // resume would stop.
+  const decided = parseDecisions(filled, state.deferredQuestions);
+  if (decided.problems.length > 0) {
+    throw new Error(`the parser refused a decision block: ${decided.problems[0]?.reason ?? ''}`);
+  }
   // `cmdResume` refuses at src/cli.ts:428 - it returns EXIT.NEEDS_HUMAN before
   // touching the state or retiring the file, so an unanswered escalation stays
   // answerable. Mirroring that matters more here than it looks: a harness that
@@ -914,12 +921,46 @@ export function answerNeedsInput(
     );
   }
   // Merged, as `cmdResume` merges: the person wins over the answerer (#169).
-  state.pendingAnswers = mergeHumanAnswers(state.pendingAnswers, answers);
-  recordHumanAnswers(state, answers);
+  const given = [...answers, ...decided.decisions];
+  state.pendingAnswers = mergeHumanAnswers(state.pendingAnswers, given);
+  recordHumanAnswers(state, given);
   saveState(state);
   reconcileQuestionRecords(state);
   renameSync(file, path.join(state.dir, `answered-${state.planRound}.md`));
   return answers;
+}
+
+/**
+ * Write a person's decisions into the assumptions section of NEEDS-INPUT.md
+ * (#465), the way somebody editing the file would, and resume nothing.
+ *
+ * Anchored inside that section only - a finding elsewhere titled `A1. ...` is
+ * not a decision block, and a fixture that filled it would test the wrong thing.
+ * Returns the file as written.
+ */
+export function decideInNeedsInput(state: RunState, decide: (question: string) => string): string {
+  const file = path.join(state.dir, 'NEEDS-INPUT.md');
+  const raw = readFileSync(file, 'utf8');
+  const start = raw.indexOf(`${ASSUMPTIONS_HEADING}\n`);
+  if (start === -1) throw new Error('NEEDS-INPUT.md has no assumptions section to decide in');
+  const after = raw.indexOf('\n## ', start + 1);
+  const end = after === -1 ? raw.length : after;
+
+  // Each block from its heading to its empty `> ` line, with every line of the
+  // decision carrying its own `> ` - the parser reads quote lines only.
+  const section = raw
+    .slice(start, end)
+    .replace(
+      new RegExp(`^### A\\d+\\. (.*)$[\\s\\S]*?${escapeRegExp(DECISION_MARKER)}\\n\\n> `, 'gm'),
+      (block: string, q: string) => `${block}${decide(q).split('\n').join('\n> ')}`,
+    );
+  const filled = `${raw.slice(0, start)}${section}${raw.slice(end)}`;
+  writeFileSync(file, filled, 'utf8');
+  return filled;
+}
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 /** One block, written the way a person filling in the template would leave it. */

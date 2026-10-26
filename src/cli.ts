@@ -37,7 +37,15 @@ import { installPromptOverrides, installStandingInstructions } from '@src/prompt
 import { describeEnding as describeProcessEnding, installEndingStamp } from '@src/ending.js';
 import { commitFork, listForkPoints, planFork } from '@src/fork.js';
 import type { Liveness, LockHandle } from '@src/lock.js';
-import { mergeHumanAnswers, reconcileAssumed, reconcileQuestionRecords } from '@src/questions.js';
+import { ANSWER_MARKER } from '@src/answers.js';
+import {
+  ASSUMPTIONS_HEADING,
+  DECISION_MARKER,
+  isSameQuestion,
+  mergeHumanAnswers,
+  reconcileAssumed,
+  reconcileQuestionRecords,
+} from '@src/questions.js';
 import { acceptMoves, acceptRaised, parseMoves, parseRaised, raisePhase } from '@src/raise.js';
 import type { RaiseProblem, RequestedMove, RequestedMoves } from '@src/raise.js';
 import { assertUsableRunId } from '@src/stored.js';
@@ -88,6 +96,7 @@ import type {
   CliVersions,
   Config,
   ConfigOverrides,
+  DeferredQuestion,
   Effort,
   Finding,
   JudgeFile,
@@ -1101,7 +1110,13 @@ async function resumeRun(
     // Both parses before either is acted on, so an unfinished block anywhere in
     // the file stops the resume before half of it has been applied (#142).
     const moves = parseRequestedMoves(state, raw);
-    if (!reportIncompleteRaises([...moves.problems, ...raised.problems])) return EXIT.NEEDS_HUMAN;
+    // Decisions on the assumptions the run is carrying (#465), parsed with the
+    // other edits and before the path below is chosen, so a block that cannot be
+    // taken stops the resume while nothing has been spent.
+    const decided = parseDecisions(raw, state.deferredQuestions);
+    if (!reportIncompleteRaises([...moves.problems, ...raised.problems, ...decided.problems])) {
+      return EXIT.NEEDS_HUMAN;
+    }
 
     // Moves before raises, on both paths below. A move can only name a finding
     // the run was already carrying - it is rendered from that list - so nothing
@@ -1119,6 +1134,9 @@ async function resumeRun(
     if (!raw.includes('**Your answer:**')) {
       log.info('Previous stop reported findings, not questions - continuing with raised limits.');
       applyEdits();
+      // Recorded, but not handed to `pendingAnswers`: that would buy a revision
+      // this stop did not ask for. `userDecisions` carries it to every turn.
+      takeDecisions(state, decided.decisions);
       renameSync(answersFile, path.join(state.dir, `stalled-${state.planRound}.md`));
       const cliVersions = await detectedCliVersions(flags);
       // Saved before `run_started` says them (#298); see the start path.
@@ -1147,12 +1165,15 @@ async function resumeRun(
       // plan stop a demotion that passes the gate approves the plan - so an
       // empty answer beside a move is an answer, not a file left unfilled.
       applyEdits();
+      takeDecisions(state, decided.decisions);
       log.info('No answers given - taking your severity changes and continuing.');
       renameSync(answersFile, path.join(state.dir, `stalled-${state.planRound}.md`));
     } else if (answers.length === 0) {
       log.fail(`No answers found in ${answersFile}`);
       log.info('Fill in the "**Your answer:**" blocks (replace the empty "> " line), then resume.');
-      const pending = raised.findings.length + moves.moves.length;
+      // Decisions never stand in for a blocking answer (#465): they wait in the
+      // file with everything else.
+      const pending = raised.findings.length + moves.moves.length + decided.decisions.length;
       if (pending > 0) {
         log.info(
           `The ${pending} edit(s) you made are still in the file and will be taken in once the ` +
@@ -1162,19 +1183,27 @@ async function resumeRun(
       return EXIT.NEEDS_HUMAN;
     } else {
       applyEdits();
-      log.ok(`Picked up ${answers.length} answer(s) from NEEDS-INPUT.md`);
+      const decisionCount = decided.decisions.length;
+      log.ok(
+        `Picked up ${answers.length} answer(s)` +
+          (decisionCount > 0 ? ` and ${decisionCount} decision(s)` : '') +
+          ' from NEEDS-INPUT.md',
+      );
+      // A decision is a human answer to that exact deferred question (#465), so
+      // it travels with the answers: into the next revision, and into the record.
+      const given = [...answers, ...decided.decisions];
       // Merged, never overwritten (#169): the answerer's usable answers are
       // already durable in `pendingAnswers` when a run stops after its turn, and
       // a `question-round` stop hands every question back - answered or not. The
       // person wins where both answered one question; the answerer's answer
       // stands where the person left it blank.
-      state.pendingAnswers = mergeHumanAnswers(state.pendingAnswers, answers);
+      state.pendingAnswers = mergeHumanAnswers(state.pendingAnswers, given);
       // On the same write that stores them, so there is no window where the run
       // is holding answers it has no durable record of having been given (#65).
       // `pendingAnswers` is consumed by the loop and cannot be that record - and
       // only the human answers go here, because `humanAnswered` means a person
       // answered and the merged list includes the answerer's.
-      recordHumanAnswers(state, answers);
+      recordHumanAnswers(state, given);
       saveState(state);
       // Immediately, and before preflight: `ASSUMED.md` is authored at the end of
       // a successful run, but this resume may exit at the preflight gate or stop
@@ -1599,6 +1628,138 @@ export function recordHumanAnswers(state: RunState, answers: readonly Answer[]):
   // The existing keys say which questions a person answered, but cannot carry
   // their decisions past consumption of pendingAnswers or a session rotation.
   state.humanAnswers = [...(state.humanAnswers ?? []), ...supplied.map((a) => ({ ...a }))];
+}
+
+/** Decisions a person wrote on the run's assumptions, and the blocks it cannot take. */
+export interface Decisions {
+  decisions: Answer[];
+  problems: RaiseProblem[];
+}
+
+/**
+ * Every `**Your decision:**` a person filled in under the assumptions section
+ * of a `NEEDS-INPUT.md` (#465), each as a human answer to that exact deferred
+ * question.
+ *
+ * **It reads that section and nothing else** - from its heading to the next
+ * `## `. Finding titles are rendered verbatim as `### ` headings, so a finding
+ * called `A1. ...` whose detail mentions the marker would otherwise be read as
+ * a decision nobody wrote, or refuse a valid resume as a stale file.
+ *
+ * Matched by the heading text, never the number: answers in the same file
+ * change which assumptions remain before this is read, so an index would decide
+ * the wrong question. The recorded wording is the deferred question's own, so
+ * `reconcileAssumed` retires it by the exact rule and `REPHRASED.md` says
+ * nothing.
+ *
+ * **Refuse, never repair**, as `parseRaised` does (#141). A block with text off
+ * the `> ` lines, a heading no deferred question matches, or two blocks for one
+ * question are reported and the resume stops with nothing spent. So is the
+ * answer marker typed anywhere in the section, filled or not: `cmdResume`
+ * chooses its path by that string anywhere in the file, so one quoted here would
+ * turn a findings stop into a question stop and the decision would never be
+ * taken. Pure, and exported for the reason `parseHumanAnswers` is.
+ */
+export function parseDecisions(md: string, deferred: readonly DeferredQuestion[]): Decisions {
+  const decisions: Answer[] = [];
+  const problems: RaiseProblem[] = [];
+
+  const lines = md.replace(/\r\n/g, '\n').split('\n');
+  const start = lines.findIndex((l) => l.trim() === ASSUMPTIONS_HEADING);
+  if (start === -1) return { decisions, problems };
+  let end = lines.length;
+  for (let i = start + 1; i < lines.length; i += 1) {
+    if ((lines[i] ?? '').startsWith('## ')) {
+      end = i;
+      break;
+    }
+  }
+  const section = lines.slice(start, end);
+
+  // The marker, anywhere in the section, labelled by the block it sits in.
+  const marked = new Set<string>();
+  let label = ASSUMPTIONS_HEADING;
+  for (const line of section) {
+    if (line.startsWith('### ')) label = line.trim();
+    if (line.includes(ANSWER_MARKER) && !marked.has(label)) {
+      marked.add(label);
+      problems.push({
+        heading: label,
+        reason:
+          `it contains "${ANSWER_MARKER}", which the resume reads as the answer to a question - ` +
+          'remove or reword it (for example without the asterisks)',
+      });
+    }
+  }
+
+  const decided = new Set<DeferredQuestion>();
+  for (const block of section.join('\n').split(/^### /m).slice(1)) {
+    const firstLine = (block.split('\n')[0] ?? '').trim();
+    const named = /^A\d+\.\s*(.*)$/.exec(firstLine);
+    if (named === null || !block.includes(DECISION_MARKER)) continue;
+    const heading = `### ${firstLine}`;
+    if (marked.has(heading)) continue;
+
+    const quoted: string[] = [];
+    let stray = false;
+    for (const raw of block.slice(block.indexOf(DECISION_MARKER) + DECISION_MARKER.length).split('\n')) {
+      const line = raw.trim();
+      if (line.startsWith('>')) quoted.push(line.replace(/^>\s?/, '').trim());
+      else if (line !== '') stray = true;
+    }
+    if (stray) {
+      problems.push({
+        heading,
+        reason:
+          `it has text under ${DECISION_MARKER} that is not on a "> " line - put each line of ` +
+          'your decision after "> ", or empty the block to keep the fallback',
+      });
+      continue;
+    }
+    const text = quoted.join(' ').trim();
+    if (text === '') continue;
+
+    const question = (named[1] ?? '').trim();
+    const match = deferred.find((d) => isSameQuestion(d.question, question));
+    if (match === undefined) {
+      problems.push({
+        heading,
+        reason:
+          `"${question}" is not one of the questions this run deferred, so deciding it would ` +
+          'change nothing. This file may be from an earlier stop.',
+      });
+      continue;
+    }
+    if (decided.has(match)) {
+      problems.push({ heading, reason: 'it decides the same question as an earlier block' });
+      continue;
+    }
+    decided.add(match);
+    decisions.push({
+      question: match.question,
+      answer: text,
+      confidence: 'high',
+      defer_to_human: false,
+      rationale: 'Decided by the user.',
+    });
+  }
+
+  return { decisions, problems };
+}
+
+/**
+ * Take decisions on a path that is not the answers path (#465).
+ *
+ * Recorded as human answers, so `userDecisions` carries them to every later turn
+ * and `ASSUMED.md` stops calling them guesses - and deliberately not put in
+ * `pendingAnswers`, which would buy a revision the stop did not ask for.
+ */
+export function takeDecisions(state: RunState, decisions: readonly Answer[]): void {
+  if (decisions.length === 0) return;
+  recordHumanAnswers(state, decisions);
+  saveState(state);
+  reconcileQuestionRecords(state);
+  log.ok(`Took ${decisions.length} decision(s) on the run's assumptions from NEEDS-INPUT.md`);
 }
 
 /**
