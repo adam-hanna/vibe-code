@@ -1,9 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execute, parseArgs, reportRoles, resumeConfig } from '@src/cli.js';
+import { execute, main, parseArgs, reportRoles, resumeConfig } from '@src/cli.js';
 import {
   DEFAULT_FINDER_FOCUS,
   DEFAULTS,
@@ -32,6 +32,12 @@ import { reviewingRun } from './helpers/loop-harness.js';
  * Each case that reads a global file points `VIBE_GLOBAL_CONFIG` at one of its
  * own and puts it back, as `global-config.test.ts` does.
  */
+
+// `doctor-roles.test.ts`' reason: only so `resolveBin` succeeds where neither
+// CLI is installed, for the case that starts a run through `main`. Nothing
+// here spawns either: the probe is skipped and the loop is a stub.
+process.env['VIBE_CLAUDE_BIN'] = process.execPath;
+process.env['VIBE_CODEX_BIN'] = process.execPath;
 
 const CLAUDE_SEAT = { provider: 'claude', effort: 'high', focus: DEFAULT_FINDER_FOCUS };
 const CODEX_SEAT = { provider: 'codex', focus: DEFAULT_FINDER_FOCUS };
@@ -303,4 +309,46 @@ test('a fresh run says (default); the same finders from a stored config do not',
   assert.deepEqual(await startup(loaded), ['  Finders: claude/high (default)']);
   // What a resume hands `execute`: the run's stored config, which has no provenance.
   assert.deepEqual(await startup(storedConfig(loaded)), ['  Finders: claude/high']);
+});
+
+// ---- what a fresh run stores ------------------------------------------------
+
+/** Start a run through the command, with a loop that does nothing, and read back what it stored. */
+async function startedAndStored(contents: unknown): Promise<{ loopSaw: Config | null; stored: Record<string, unknown> }> {
+  const dir = project({ codex: { readRateLimits: false }, ...(contents as object) });
+  let loopSaw: Config | null = null;
+  const originalLog = console.log;
+  const originalError = console.error;
+  console.log = () => undefined;
+  console.error = () => undefined;
+  try {
+    const code = await main(['plan', 'store the config', '-C', dir, '--skip-probe', '--no-progress'], (_state, cfg) => {
+      loopSaw = cfg;
+      return Promise.resolve(0);
+    });
+    assert.equal(code, 0);
+  } finally {
+    console.log = originalLog;
+    console.error = originalError;
+  }
+  const runs = path.join(dir, '.vibe', 'runs');
+  const [id] = readdirSync(runs);
+  assert.ok(id !== undefined, 'the run was created');
+  const state = JSON.parse(readFileSync(path.join(runs, id, 'state.json'), 'utf8')) as { config?: Record<string, unknown> };
+  assert.ok(state.config !== undefined, 'a fresh run stores its config');
+  return { loopSaw, stored: state.config };
+}
+
+test("a fresh run's state.json holds its finders and never where they came from", async () => {
+  // The store `startRun` makes, read off disk: the default finder is kept as the
+  // run's own, so a resume has it, but the provenance is not a setting.
+  const defaulted = await startedAndStored({});
+  assert.deepEqual((defaulted.stored['review'] as Config['review']).finders, [CLAUDE_SEAT]);
+  assert.equal(Object.hasOwn(defaulted.stored, 'findersDefaulted'), false);
+  assert.ok(Object.hasOwn(defaulted.stored, 'configPath'), 'configPath is stored, as it always was');
+  assert.ok(defaulted.loopSaw !== null, 'the loop ran');
+
+  const optedOut = await startedAndStored({ review: { finders: [] } });
+  assert.deepEqual((optedOut.stored['review'] as Config['review']).finders, []);
+  assert.equal(Object.hasOwn(optedOut.stored, 'findersDefaulted'), false);
 });

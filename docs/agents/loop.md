@@ -654,9 +654,11 @@ of them at once (#403; `1`, the default, is one after another) - see *Seats at o
   `{ defaultFinders: false }`, from `resumeConfig` and `fork.ts` only. **Where the
   `(default)` mark comes from:** `LoadedConfig.findersDefaulted`, outside `Config`. Since
   `configPath` already reaches `state.json` (`startRun` stores the `LoadedConfig`),
-  `storedConfig` strips the new field at every store, and `seat-runners-pin`'s
-  `explicit-empty-finders` case, recorded before the change, pins that a run naming `[]`
-  stores and does exactly what it did. The mark is not inferred by comparing against
+  `storedConfig` strips the new field at every store. `seat-runners-pin`'s
+  `explicit-empty-finders` case, recorded before the change, pins that a loop naming `[]` does
+  exactly what it did and that `storedConfig` of its config is the bytes stored before; it
+  drives `orchestrate` directly, so what `startRun` actually writes is read off disk by
+  `default-review-finder.test.ts`, as the resume and fork fallbacks are. The mark is not inferred by comparing against
   `defaultReviewFinders`, so a hand-written seat equal to the default is not labelled. The
   settings screen's "use the default" sends `review.finders: null`, which
   `tidyReviewFinders` turns into a deleted key (and drops an emptied `review`); `null` means

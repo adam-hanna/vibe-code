@@ -231,7 +231,9 @@ test('a critique round with two finders and three verifiers at maxParallel 1 is 
 /**
  * A run whose file says `"review": { "finders": [] }` is byte-identical to one
  * from before the default finder existed (#447): the whole loop - plan,
- * critique, implement, review - and the config `createRun` stores.
+ * critique, implement, review - and `storedConfig` of its config, the value
+ * `startRun` hands `createRun`. The loop is driven directly, so what `startRun`
+ * writes to disk is read back in `default-review-finder.test.ts`.
  *
  * Recorded on 32f49e3, before the default was resolved, so the record is of
  * the code that had no default to opt out of. There the stored config was the

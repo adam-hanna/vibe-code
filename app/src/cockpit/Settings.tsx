@@ -3015,8 +3015,8 @@ export function Settings({
               use the default
             </Button>
             <span className={S.why}>
-              removes the finders from this file, so it follows the default: one finder on the other agent from
-              the reviewer, or none when every role is on one agent.
+              removes the finders from this file, so it follows what is set above it: your settings for all
+              projects if they name finders, and otherwise the default.
             </span>
           </div>
         )}
