@@ -1163,7 +1163,14 @@ The run then died with `codex wrote no structured output … reason: max_output_
   kind: an `external` entry now ends `ref:"https://…", path:null, line:null, excerpt:null`, and an
   `absence` entry `path:"x", line:null, excerpt:null`. That is 54 of the archive's 812 evidence
   entries (40 `external`, 14 `absence`), down from 742 of 790 that ended on a null `ref` before.
-  Whether those stall, and what changes if they do, is #429.
+  **They don't stall, so the order stays** (#429). After #424, 152 Codex outputs were counted:
+  35 from this repo's archive and 117 from a throwaway bench project whose briefs required spec
+  links and left edge cases open, so reviewers would write `external` and `absence` evidence.
+  They held 62 such entries (39 `external`, 23 `absence`), with no blank run before `path`,
+  `line` or `excerpt` in any of them, and no blank run longer than 2 characters anywhere. A
+  separate evidence object per kind in an `anyOf` was the fix on offer, and it would put Codex's
+  strict output at risk for a stall that was never observed. If one appears, the count above is
+  how to see it.
   `test_verdicts` and the other schemas were left alone, because the archive shows no stall before
   their last fields. The count is how a later archive confirms this, including whether the stall
   simply moved to the new last key.
