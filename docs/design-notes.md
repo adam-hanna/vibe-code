@@ -35,9 +35,13 @@ A clean run means the critic and the reviewer found nothing blocking, which unde
 
 None of that makes a clean run correct. It makes it harder to be wrong without anyone noticing.
 
-## No network code of its own
+## One network request of its own
 
-vibe has no server, no daemon and no HTTP client. Every external call is a child process: `claude`, `codex` and `git`. It installs neither agent CLI, and it uses whatever you are logged into. The published package has no runtime dependencies. The only network code anywhere is in the desktop app: the pilot's API-key mode, and the check for a newer version of the app, which fetches one public file from GitHub and can be switched off.
+vibe has no server and no daemon. Apart from one request, every external call is a child process: `claude`, `codex`, `git`, and the commands you configure, such as your verification gates. It installs neither agent CLI, and it uses whatever you are logged into. The published package has no runtime dependencies.
+
+The one request is the update check. At the end of `vibe run`, `vibe plan` and `vibe doctor` in a terminal, vibe sends one unauthenticated GET to npm's public metadata for its own package, at most once a day, with Node's built-in `fetch`. It carries no identifier, cookie or credential. It is off under `CI`, when stdout is not a terminal, with `VIBE_NO_UPDATE_CHECK=1` and with [`"updates": { "check": false }`](./configuration#updates), and the desktop app never makes it.
+
+The desktop app has network code of its own: the pilot's API-key mode, which calls the vendor's API directly; the check for a newer version of the app, which fetches one public file from GitHub and can be switched off; and remote access for the phone app, which starts only when you turn it on.
 
 ## Prompts go over stdin
 
