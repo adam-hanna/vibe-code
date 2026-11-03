@@ -108,6 +108,7 @@ import type {
 } from '@src/types.js';
 import { findGateScratch } from '@src/artifacts.js';
 import { disagreements, hadVerdict } from '@src/judge.js';
+import { describeReplay, ReplayGateEscapedError, replayCounts, ReplayRestoreError, restoreInFlight } from '@src/test-replay.js';
 
 const USAGE = `
 vibe - automated plan/critique/implement/review loop (Claude Code + Codex)
@@ -2333,6 +2334,11 @@ export async function execute(
   }
 
   try {
+    // Before anything that touches the tree, preflight included (#486). A
+    // process that died mid-replay left earlier versions of tests swapped in,
+    // and preflight creates worktrees, runs git and starts the agents' probes
+    // there. A failure throws to the handler below, so preflight never runs.
+    await restoreInFlight(state, workDirOf(state));
     // First, so a run refused at preflight still says who asked for it, and
     // inside the try, so a save that throws lands in the one handler (#354).
     recordRunOrigin(state, origin);
@@ -2420,6 +2426,7 @@ export async function execute(
     reportReviewCoverage(state);
     reportTestChanges(state);
     reportJudgeEditedAfterReview(state);
+    reportTestReplay(state);
     reportDeferred(state);
     summary(state, started, recovery);
     return incomplete === null ? EXIT.OK : EXIT.UNVERIFIED;
@@ -2444,7 +2451,14 @@ export async function execute(
     // killed child, the latch is still set and this is the one place every path
     // out of `orchestrate` passes through.
     const cancelled = cancelRequested();
-    if (cancelled !== null && !(err instanceof Escalation)) {
+    // Not while a test may still be swapped (#486). The stop is real, but a
+    // restore that failed is the fact a person has to act on, and the generic
+    // "stopped" ending would replace its message - every file and its backup.
+    // Nor over a replayed gate whose processes could not be confirmed stopped:
+    // that one may still be running in the tree, and the message says so.
+    const swapped =
+      err instanceof ReplayRestoreError || err instanceof ReplayGateEscapedError || state.testReplayInFlight !== undefined;
+    if (cancelled !== null && !(err instanceof Escalation) && !swapped) {
       err = new Escalation(
         EXIT.NEEDS_HUMAN,
         `The run was stopped: ${cancelled}. The turn in flight was killed and is redone from ` +
@@ -3172,6 +3186,33 @@ export function reportJudgeEditedAfterReview(state: RunState): void {
   for (const p of restored) parts.push(`\`${p}\` returned to its base content after review round ${r}.`);
   parts.push('The list is in state.json under judgeEditedAfterReview.');
   log.warn(parts.join(' '));
+}
+
+/**
+ * What replaying edited tests at their earliest committed version said (#486),
+ * beside `reportTestChanges` and for its reason: the end of the run is where a
+ * person reads, and the exit code does not move.
+ *
+ * One sentence per record - before the last review, and after it at the end of
+ * the final fix road - naming each file whose earlier version fails, with the
+ * gate, and counting what was preserved. Silent when nothing was replayed. An
+ * earlier version failing is said to be what it is, never tampering: a
+ * legitimate contract change fails the same way.
+ */
+export function reportTestReplay(state: RunState): void {
+  for (const record of [state.testReplay, state.testReplayAfterReview]) {
+    if (record === undefined) continue;
+    const sentence = describeReplay(record);
+    if (sentence === null) continue;
+    if (replayCounts(record).earlierFails > 0) {
+      log.warn(
+        `${sentence} An earlier version that fails is not proof the edit was wrong: a contract that moved fails ` +
+          'the same way. The record is in state.json and test-replay-' + String(record.round) + '.json.',
+      );
+    } else {
+      log.info(sentence);
+    }
+  }
 }
 
 /**

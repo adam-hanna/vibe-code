@@ -653,6 +653,126 @@ asked anything.
   records nothing. That is out of scope here, not an oversight. Runs that never take the final
   fix gain no key, no narration and no line.
 
+**An edited test is replayed at its earliest committed version, against the run's code**
+(#486). The verdicts above depend on a seat reading the file's history, and on the bench the
+one weakening the reviewer missed after #463 was the one whose history it did not read. Only
+execution tells the two kinds of edit apart, so `src/test-replay.ts` runs it. For each listed
+file matching `judgePatterns` it finds the earliest committed version: the base version for a
+file the base had, and for one the run added, its version in the first commit after the base
+that contains it. That version is written back in place, the gates run once against the
+current code, and the head copy is put back. The record is `state.testReplay` (before a
+review) and `state.testReplayAfterReview` (the files #485 lists, at the end of the final fix
+road), each also `test-replay-<round>.json` with the raw review round. It is not part of
+`state.testChanges`, which the issue's wording suggested, for #485's reason: every reader of
+that record keeps its shape and meaning. It records and nothing else. No prompt shows it,
+nothing blocks on it, and the exit code does not move; rendering it into the judge block is a
+later change, measured on the bench first.
+
+- **What is and is not replayed.** `vibe.config.json` and `REVIEW.md` are never tests and are
+  matched by name, so `testPaths: ["**/*"]` cannot swap the gate configuration itself. A file
+  still at its earliest version is `unchanged`, a deletion is `deleted` (restoring a deleted
+  test asks something else), either side of a rename is `renamed`, and a file with no commit
+  after the base (commits off, or a commit that failed) is `no-committed-version`. Each is said
+  in the record, never dropped. With `git.commitEachRound` off only pre-existing tests replay,
+  and a round whose commit failed is folded into the next, so its "first committed version" can
+  already carry a later edit.
+- **In place, between a gate pass and the next turn.** In place because test runners find tests
+  by path. Only right after a gate pass because that pass, `state.gateOutcomes`, is the
+  same-tree baseline a failure needs, and because no agent may read a swapped tree: point (a) is
+  before the review heading and `withConcurrentCompaction`, point (b) right after
+  `recordJudgeEditedAfterReview`. The verdicts are the reproducer's (#113): `preserved` passed
+  every gate; `earlier-fails` failed a named gate that passed on the same tree; anything else -
+  a timeout, an unlaunchable command, a gate with no same-tree pass - is `unproven`. vibe reads
+  exit codes, so `earlier-fails` includes failing to compile. It says the earlier assertion no
+  longer holds against the current code, and turns the judge's question into "is that assertion
+  still the contract?". It is not evidence of tampering: a legitimate contract change fails the
+  same way.
+- **Batched, and split when the batch does not pass.** Every file is swapped at once and the
+  gates run in order, once each, through `runGateCommand` as the baseline does, never
+  `runGate`. A pass clears every file. Any other outcome with more than one file is followed by
+  one pass per file, because a pass certifies itself: a file that passes alone is `preserved`
+  even when the batch timed out. The cost is one run of each replaying gate per round with
+  replayable edits, plus one per file when the batch does not pass; `verify.replay` and
+  `verify.gates[].replay` turn it off, and with no eligible gate nothing happens at all.
+- **A timed-out gate is stopped whole before anything is put back.** `runUserCommand` used to
+  kill only the shell, so `node slow.mjs && echo done` left the runner alive and writing the tree
+  after the timeout was reported - while the replay restored its tests, or the next pass began.
+  Now every gate, not just a replay's, is stopped whole on a timeout and reports only once the
+  gate's pipes close. On POSIX the shell leads a **process group of its own** (`detached`), and a
+  timeout sends one SIGKILL to the group. Membership is fixed at fork, so it survives what a
+  runner can do short of leaving on purpose: a worker whose runner exited and left it reparented
+  to init, or one started with an environment allowlist. Finding processes by parentage from `ps`
+  and by an inherited token alone (the first version of this) missed exactly those, and the
+  `ps` walk signalled the shell's pid even after the shell had been reaped, when that pid could
+  belong to something else. No pid is signalled by itself now; a group's id cannot be reused while
+  a member lives. On Linux the token in `VIBE_GATE_RUN` still finds, in `/proc/<pid>/environ`,
+  a process that left the group with `setsid` but kept its environment. Windows uses
+  `taskkill /T`, only while the shell is alive. **A group of its own takes the gate out of the
+  terminal's foreground group**, which is why it was refused at first: Ctrl-C would reach vibe and
+  not the gate. So while a gate is live, SIGINT, SIGQUIT and SIGHUP are forwarded to its group, and
+  vibe then ends exactly as it would have - the listener removes itself and re-raises against the
+  default disposition, the way `installEndingStamp` does, and is prepended so that stamp's own
+  handler still does the re-raise for the signals it stamps. Ctrl-Z and SIGTERM are not forwarded;
+  neither reached a gate in a way that mattered before. **When teardown cannot be confirmed** - a
+  process out of the group and out of the token's reach still holds the pipes after the kill - the
+  timeout is reported after a grace period with `escaped`, rather than hanging the run. An
+  ordinary gate reports that as a timeout, as before. **A replay stops the run on it**
+  (`ReplayGateEscapedError`, `EXIT.ERROR`, after the head copies are restored and verified),
+  because another pass or the next turn would run beside a process that may still be using the
+  tree. **The in-flight marker is kept even though that restore was verified**: the process may
+  hold the earlier bytes and write them back after vibe has stopped, so the resume restores and
+  checks every head copy again before anything else runs. The escaped gate's pipes are destroyed
+  when its result is reported, or the process still holding their write ends would keep vibe's
+  event loop alive and the run would never exit with its code. The message names the gate and the
+  files, says to stop the process and resume, and points at `verify.gates[].replay: false`.
+  A process that leaves the group *and* closes the pipes is not seen at all; that is a daemon, and
+  out of reach of anything short of a cgroup.
+- **What goes wrong while measuring is `unproven`; only a failed restore, or a gate that could not be confirmed stopped, stops the run.** A
+  backup directory that cannot be made, a test that cannot be written, or any other error in a
+  pass records that file `unproven` and the run carries on. A restore that cannot be verified
+  throws over all of it. On load, a `preserved` or `earlier-fails` entry without the versions it
+  compared or the gates it ran is dropped, and so is a cached verdict that does not cover the gates
+  in its key: a cached pass that ran fewer gates would suppress a run nobody measured.
+- **The swapped bytes must be the committed version.** The earliest version is written with
+  `git cat-file --filters`, so the tree gets what a checkout would put there, and before any gate
+  runs it must read back byte for byte and hash back, through `hash-object`'s clean filter, to the
+  committed blob. A smudge filter that does not round-trip, one that drops a line, say, would
+  otherwise replay something never committed, and a pass would certify assertions that never ran.
+  That file is `unproven`.
+- **Backups are named by the hash of their bytes.** Each head copy goes to
+  `test-replay-<round>/<sha256>.head` under the run directory. Never by path: without
+  `git.worktree` the run directory is inside the tree the gates run in, `.vibe/` is gitignored,
+  and many test runners do not read `.gitignore`, so a backup named `foo.test.js` would run beside
+  the swapped-in version. The SHA-256 of the exact bytes rather than git's id, because two files
+  that differ only in line endings share a blob id under `text`. Every write - backup, swap and
+  restore - walks each path component with `lstat`, as `placeReproducer` does, so a directory
+  replaced by a link is refused rather than followed out of the tree.
+- **A killed replay is put back before anything else runs.** `state.testReplayInFlight` names
+  each path, its backup and its hash, and is saved before the first write and cleared after the
+  last restore. No checkpoint is written while it is set (`writeCheckpoint` refuses), and nothing
+  is committed. The next process restores first thing in `execute`, before preflight - which
+  creates worktrees, runs git and starts the agents' probes in the tree - and again first in
+  `runPhases`, before `prepareGit`, for callers that reach the loop directly. That is earlier
+  than the brief's "first step of `runPhases`", because preflight runs before it. Every backup is
+  checked before the marker is cleared, even for a file already back at its head bytes, and a
+  backup that is missing or does not match stops the run with `EXIT.ERROR` naming each file and
+  backup - after a stop, too, where every other error becomes `NEEDS_HUMAN`, because the generic
+  ending would replace the one message a person has to act on. An unreadable marker is refused on
+  load, never dropped: absence means "nothing is swapped".
+- **`vibe fork` refuses rather than restores.** `planFork` is read-only and a fork never touches
+  the working tree, so restoring for the parent would be a write to the parent's tree. It refuses
+  beside its liveness check, from the same read, and says to resume the parent first.
+- **A cached verdict is keyed on the working tree.** A verdict reused after the code changed
+  claims something nobody re-measured. The key is the path, the earliest blob, the eligible
+  gates' names and commands, and the working tree's id before the swap, from `add -A` and
+  `write-tree` through a disposable index seeded from a copy of the real one. Every git read the
+  replay makes - its listing's `add -N` included - goes through that copy, so the user's staged
+  changes are never touched. An assume-unchanged or skip-worktree entry would hide a code change
+  from that id, so with any such entry the tree is null and the cache is neither read nor
+  written, as when the id cannot be computed. Ignored files are outside the id, as they are
+  outside every diff here. It will rarely hit; a resume re-entering a round where nothing changed
+  is the case it exists for.
+
 **Nothing under `.vibe/runs/` is read through a link, and there is one predicate for all
 three levels.** `linkageOf` in `src/run.ts` is `lstat(...).isSymbolicLink()`, which is true of
 a POSIX symlink, a Node `'junction'` and an `mklink /J` junction alike — one measurement, no

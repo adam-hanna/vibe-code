@@ -1,5 +1,6 @@
-import { spawn } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { hostDirectoryFor } from '@src/hosttools.js';
 import type { ToolchainContract } from '@src/runtime.js';
@@ -20,6 +21,8 @@ export interface ResolvedGate {
   required: boolean;
   /** Whether this gate runs once against the start tree (#484). */
   baseline: boolean;
+  /** Whether this gate runs in a replay of edited tests' earlier versions (#486). */
+  replay: boolean;
   /**
    * What to preserve when this gate FAILS. Empty for a gate that named nothing
    * and for the synthesized legacy gate, which has no key that could name any.
@@ -92,6 +95,14 @@ export interface VerifyResult {
    * failing its own checks.
    */
   unlaunchable: string | null;
+  /**
+   * Set when an attempt timed out and one of its processes was still holding
+   * the gate's output after every kill (#486): vibe could not confirm the gate
+   * had stopped. Absent otherwise, so every result built before it reads the
+   * same. The replay stops the run on it rather than going on beside a process
+   * that may still be using the tree.
+   */
+  escaped?: true;
 }
 
 /**
@@ -205,6 +216,7 @@ export function resolveGates(cfg: VerifyConfig, cwd: string): ResolvedGate[] {
         timeoutMs: cfg.timeoutMs,
         required: true,
         baseline: cfg.baseline,
+        replay: cfg.replay,
         // Nothing: a legacy config has no key that could name an artifact, so
         // an empty list is the observation rather than a default (#62).
         artifacts: [],
@@ -219,6 +231,7 @@ export function resolveGates(cfg: VerifyConfig, cwd: string): ResolvedGate[] {
     timeoutMs: gate.timeoutMs ?? cfg.timeoutMs,
     required: gate.required ?? true,
     baseline: gate.baseline ?? cfg.baseline,
+    replay: gate.replay ?? cfg.replay,
     artifacts: gate.artifacts ?? [],
   }));
 }
@@ -294,9 +307,11 @@ export async function runGateCommand(
   const outputs: string[] = [];
   /** The first failure, which is the one every existing caller means. */
   let first: { run: number; exitCode: number | null; output: string } | null = null;
+  let escaped = false;
 
   for (let run = 1; run <= wanted; run += 1) {
     const result = await runUserCommand(command, cwd, env, gate.timeoutMs);
+    if (result.escaped === true) escaped = true;
     const ok = result.code === 0;
     attempts.push({ run, ok, exitCode: result.code });
     outputs.push(result.output);
@@ -316,6 +331,7 @@ export async function runGateCommand(
         output: excerpt(first.output, null),
         outputs,
         unlaunchable,
+        ...(escaped ? { escaped: true as const } : {}),
       };
     }
   }
@@ -332,6 +348,7 @@ export async function runGateCommand(
     output: excerpt(first.output, null),
     outputs,
     unlaunchable: null,
+    ...(escaped ? { escaped: true as const } : {}),
   };
 }
 
@@ -432,6 +449,11 @@ export interface ExecResult {
   code: number | null;
   /** stdout and stderr interleaved, as a reader of a terminal sees them. */
   output: string;
+  /**
+   * Set when a timed-out command's processes could not all be confirmed gone:
+   * one was still holding its output after every kill (#486). See `stopGate`.
+   */
+  escaped?: true;
 }
 
 /**
@@ -463,34 +485,73 @@ export function runUserCommand(
     // `node "C:\dir\file.mjs"` fails to launch, while the unquoted and
     // forward-slash forms succeed. A quoted Windows path is the obvious thing
     // to write, so it has to work.
+    // Every process this command starts inherits the token, including one that
+    // leaves the gate's process group (#486). A timeout finds those by it. See
+    // `stopGate`.
+    const token = randomUUID();
+    const tagged: NodeJS.ProcessEnv = { ...env, [GATE_TOKEN]: token };
     const child =
       process.platform === 'win32'
         ? spawn(process.env['ComSpec'] ?? 'cmd.exe', ['/d', '/c', command], {
             cwd,
-            env,
+            env: tagged,
             windowsHide: true,
             windowsVerbatimArguments: true,
             stdio: ['ignore', 'pipe', 'pipe'],
           })
-        : spawn('/bin/sh', ['-c', command], {
+        : // A process group of its own, which the shell leads (#486). Membership
+          // is fixed at fork and survives everything a runner can do short of
+          // leaving on purpose: its parent exiting, a reparent to init, a worker
+          // started with an environment allowlist. See `stopGate`.
+          spawn('/bin/sh', ['-c', command], {
             cwd,
-            env,
+            env: tagged,
             windowsHide: true,
+            detached: true,
             stdio: ['ignore', 'pipe', 'pipe'],
           });
+    const group = process.platform !== 'win32' && child.pid !== undefined ? child.pid : null;
+    if (group !== null) forwardTo(group);
 
     let output = '';
     let settled = false;
+    let timedOut = false;
+    let grace: NodeJS.Timeout | null = null;
+    const timeoutNote = (): string => `${output}\n[vibe] verification timed out after ${timeoutMs}ms`;
     const timer = setTimeout(() => {
-      child.kill('SIGKILL');
-      finish(null, `${output}\n[vibe] verification timed out after ${timeoutMs}ms`);
+      // Every process the gate started, not the shell alone (#486), and this
+      // resolves only once its pipes close: `node slow.mjs && echo done` makes
+      // the shell a parent, and killing only it left the runner alive, still
+      // reading and writing the tree after this resolved - while the replay put
+      // its tests back, or the next turn began.
+      timedOut = true;
+      // Asked of the shell before its pid is used (Windows): one that has
+      // already exited may have had its pid handed to an unrelated process.
+      stopGate(group, child.exitCode === null && child.signalCode === null ? child.pid : undefined, token);
+      // A process that left the group on purpose (`setsid`) and kept the pipe
+      // holds `close` back for ever, and is out of reach of every kill here.
+      // After this long the timeout is reported anyway, and says so in
+      // `escaped`: teardown was not confirmed, so a caller that must not go on
+      // beside the gate's processes - the replay - stops instead.
+      grace = setTimeout(() => finish(null, `${timeoutNote()}\n[vibe] ${ESCAPED_NOTE}`, true), KILL_GRACE_MS);
     }, timeoutMs);
 
-    const finish = (code: number | null, text: string): void => {
+    const finish = (code: number | null, text: string, escaped = false): void => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve({ code, output: text });
+      if (grace !== null) clearTimeout(grace);
+      if (group !== null) unforward(group);
+      if (escaped) {
+        // The escaped process still holds the write ends, so this side's pipes
+        // would never close and would keep vibe's event loop alive: the run
+        // would print its ending and then hang until that process exited.
+        // Nothing more is read from them, so they are let go.
+        child.stdout.destroy();
+        child.stderr.destroy();
+        child.unref();
+      }
+      resolve(escaped ? { code, output: text, escaped: true } : { code, output: text });
     };
 
     child.stdout.setEncoding('utf8');
@@ -502,8 +563,152 @@ export function runUserCommand(
       output += d;
     });
     child.on('error', (err: Error) => finish(null, `${output}\n[vibe] ${err.message}`));
-    child.on('close', (code: number | null) => finish(code, output));
+    child.on('close', (code: number | null) => finish(timedOut ? null : code, timedOut ? timeoutNote() : output));
   });
+}
+
+/** How long a killed gate's pipes may stay open before its timeout is reported anyway. */
+const KILL_GRACE_MS = 5_000;
+
+/** Appended to a timed-out gate's output when teardown could not be confirmed. */
+const ESCAPED_NOTE =
+  'a process it started was still holding its output after every process vibe could find was killed; it may still be running';
+
+/**
+ * Kill every process a timed-out gate started (#486). Never throws.
+ *
+ * **POSIX: the gate's process group, and the token.** The shell leads a group
+ * of its own (`detached`), and everything it starts is in it unless it leaves
+ * on purpose. A group is signalled atomically, and a fork racing the signal is
+ * restarted by the kernel rather than leaving a child outside it, so one
+ * `SIGKILL` to the group takes all of it - the runner, a worker whose runner
+ * exited and was reparented to init, a worker started with a filtered
+ * environment. A group's id cannot be reused while any member lives, so this
+ * reaches only the gate's own processes. No pid is signalled by itself: the
+ * shell may have exited and been reaped, and its pid handed to an unrelated
+ * process.
+ *
+ * On Linux, a process that left the group (`setsid`) but kept the environment
+ * still carries the token, and is found in `/proc/<pid>/environ` and killed.
+ * Each scan kills what it finds; a process cannot fork once killed, so a scan
+ * that finds nothing new has found everything.
+ *
+ * What neither reaches - a process that left the group and cleared its
+ * environment, or left the group outside Linux - and kept the pipes is what the
+ * grace period in `runUserCommand` reports as `escaped`.
+ *
+ * **Windows: `taskkill /T`**, as `src/appserver.ts` uses for the same reason,
+ * and only while the shell is alive (`root`), because it addresses a pid.
+ */
+function stopGate(group: number | null, root: number | undefined, token: string): void {
+  if (process.platform === 'win32') {
+    if (root === undefined) return;
+    try {
+      const taskkill = path.join(process.env['SystemRoot'] ?? 'C:\\Windows', 'System32', 'taskkill.exe');
+      spawnSync(taskkill, ['/PID', String(root), '/T', '/F'], { windowsHide: true });
+    } catch {
+      // Fall through to the direct kill.
+    }
+    signal(root, 'SIGKILL');
+    return;
+  }
+  if (group !== null) signal(-group, 'SIGKILL');
+  const killed = new Set<number>();
+  for (;;) {
+    const fresh = tagged(token).filter((p) => !killed.has(p) && p !== process.pid);
+    if (fresh.length === 0) break;
+    for (const p of fresh) {
+      killed.add(p);
+      signal(p, 'SIGKILL');
+    }
+  }
+}
+
+/** The variable each gate's processes inherit, holding that run's token. */
+const GATE_TOKEN = 'VIBE_GATE_RUN';
+
+/**
+ * The pids whose environment holds this gate run's token, on Linux; nothing
+ * elsewhere. Unreadable entries - another user's process, one that has just
+ * exited - are skipped: there is nothing to say about them and nothing to kill.
+ * A token is a fresh UUID per run, so a pid found here is this gate's.
+ */
+function tagged(token: string): number[] {
+  if (process.platform !== 'linux') return [];
+  const needle = Buffer.from(`\0${GATE_TOKEN}=${token}\0`);
+  const first = Buffer.from(`${GATE_TOKEN}=${token}\0`);
+  let entries: string[];
+  try {
+    entries = readdirSync('/proc');
+  } catch {
+    return [];
+  }
+  const out: number[] = [];
+  for (const entry of entries) {
+    if (!/^\d+$/.test(entry)) continue;
+    try {
+      const environ = readFileSync(`/proc/${entry}/environ`);
+      if (environ.includes(needle) || environ.subarray(0, first.length).equals(first)) out.push(Number(entry));
+    } catch {
+      // Gone, or not ours.
+    }
+  }
+  return out;
+}
+
+/**
+ * The terminal's signals, passed on to every live gate's group (#486).
+ *
+ * A gate in a group of its own is out of the terminal's foreground group, so
+ * Ctrl-C, Ctrl-\\ and a closed terminal would reach vibe and not the gate - the
+ * one thing that made a group the wrong choice before. So while a gate is
+ * live, those three are forwarded to it, and then **vibe ends exactly as it
+ * would have**: the listener removes itself first, and when no other listener
+ * is left it re-raises the signal against the default disposition, the way
+ * `installEndingStamp` does. It is prepended so that it runs before that
+ * stamp's own handler, which then does the re-raising.
+ *
+ * Ctrl-Z is not forwarded: a suspended vibe waits on the gate either way, and
+ * reads nothing until it is resumed. SIGTERM is not either; it never reached a
+ * gate before, from another process or a terminal.
+ */
+const FORWARDED: readonly NodeJS.Signals[] = ['SIGINT', 'SIGQUIT', 'SIGHUP'];
+const liveGroups = new Set<number>();
+let armed = false;
+
+function onForwarded(sig: NodeJS.Signals): void {
+  for (const g of liveGroups) signal(-g, sig);
+  // Disarmed before the re-raise, and not re-armed here: a listener still in
+  // place would catch the re-raise, and a stamp handler after this one would
+  // then exit with a code instead of the signal. The next gate re-arms it.
+  disarm();
+  if (process.listenerCount(sig) === 0) signal(process.pid, sig);
+}
+
+function disarm(): void {
+  if (!armed) return;
+  for (const s of FORWARDED) process.removeListener(s, onForwarded);
+  armed = false;
+}
+
+function forwardTo(group: number): void {
+  liveGroups.add(group);
+  if (armed) return;
+  for (const s of FORWARDED) process.prependListener(s, onForwarded);
+  armed = true;
+}
+
+function unforward(group: number): void {
+  liveGroups.delete(group);
+  if (liveGroups.size === 0) disarm();
+}
+
+function signal(pid: number, sig: NodeJS.Signals): void {
+  try {
+    process.kill(pid, sig);
+  } catch {
+    // Gone already is the outcome wanted.
+  }
 }
 
 /**

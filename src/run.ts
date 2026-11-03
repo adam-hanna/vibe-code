@@ -1304,6 +1304,14 @@ export function writeCheckpoint(
   boundary: CheckpointBoundary,
   commit: { sha: string | null; note: CheckpointCommitNote },
 ): RunCheckpointMeta | null {
+  // Never while test files are swapped to an earlier version (#486): a fork of
+  // this checkpoint would start from a tree nobody wrote. The replay itself
+  // writes none, so reaching here with the marker set is a defect, not a state.
+  if (state.testReplayInFlight !== undefined) {
+    throw new Error(
+      'A checkpoint was asked for while earlier versions of the run\'s tests are swapped into the tree; refused.',
+    );
+  }
   const reserved = reserveCheckpoint(state.dir);
   if (reserved === null) {
     log.warn(`could not reserve a checkpoint number in ${state.dir} - continuing without one`);

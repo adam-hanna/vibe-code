@@ -73,7 +73,7 @@ export interface Placement {
  * record is not somewhere a model gets to put files. Neither is a place a test
  * runner would look, so refusing them costs nothing real.
  */
-const REFUSED_ROOTS = new Set(['.git', '.vibe']);
+export const REFUSED_ROOTS = new Set(['.git', '.vibe']);
 
 /**
  * Write the file, or say why not. Never throws.

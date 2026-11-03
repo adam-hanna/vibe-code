@@ -270,6 +270,36 @@ test('a live parent is refused, and nothing is created', async () => {
   assert.deepEqual(runDirs(parent), dirs);
 });
 
+test('a parent stopped mid-replay is refused, and told to resume first; nothing is restored or written (#486)', async () => {
+  const parent = await parentRun('mid replay');
+  // What a replay killed between its swap and its restore leaves in the live
+  // state.json: the marker. The swapped file is in the parent's tree.
+  writeFileSync(path.join(parent.targetDir, 'work-1.txt'), 'an earlier version\n', 'utf8');
+  const statePath = path.join(parent.dir, 'state.json');
+  const live = JSON.parse(readFileSync(statePath, 'utf8')) as Record<string, unknown>;
+  live['testReplayInFlight'] = {
+    round: 0,
+    files: [{ path: 'work-1.txt', backup: `test-replay-0/${'a'.repeat(64)}.head`, sha256: 'a'.repeat(64) }],
+  };
+  writeFileSync(statePath, JSON.stringify(live, null, 2), 'utf8');
+  const dirs = runDirs(parent);
+  const runBefore = fingerprint(parent.dir);
+  const treeBefore = readFileSync(path.join(parent.targetDir, 'work-1.txt'), 'utf8');
+  const branches = gitIn(parent.targetDir, 'branch', '--list');
+
+  await assert.rejects(
+    () => fork(parent, committedPoint(parent)),
+    (err: unknown) =>
+      err instanceof ForkError &&
+      /cannot be forked/.test(err.message) &&
+      /Resume the parent first, which restores the files, then fork/.test(err.message),
+  );
+  assert.deepEqual([...fingerprint(parent.dir)].sort(), [...runBefore].sort(), 'the run directory is byte-identical');
+  assert.equal(readFileSync(path.join(parent.targetDir, 'work-1.txt'), 'utf8'), treeBefore, 'the tree is not restored');
+  assert.deepEqual(runDirs(parent), dirs, 'no run is created');
+  assert.equal(gitIn(parent.targetDir, 'branch', '--list'), branches, 'no branch is created');
+});
+
 test('a checkpoint that needed a repair is refused', async () => {
   const parent = await parentRun('needs repair');
   const n = committedPoint(parent);

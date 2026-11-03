@@ -328,6 +328,7 @@ The verification gate is how vibe knows the code works rather than that a review
 | `verify.artifactMaxBytes` | `null` | A ceiling on what a failing gate's `artifacts` may copy into the run directory. `null` is no ceiling. Over it, nothing is copied and the run says so. |
 | `verify.reproducers` | `true` | Let a reviewer prove a blocking finding with a test file, run by your own gate. See [Reproducers](./how-it-works#reproducers). |
 | `verify.baseline` | `true` | Before the implement turn, run each gate once against the tree the run started from, and record which ones were already failing, in `gate-baseline.json`. A gate that failed there is still a P0 when it fails later; its fixer and the end of the run are told it was inherited. Costs one run of each gate per run, bounded by its `timeoutMs`. Turn it off for one long gate with `verify.gates[].baseline`. |
+| `verify.replay` | `true` | After a gate pass, write the earliest committed version of each edited test file back in place, run the gates once against the current code, and put the edited copy back. Each file is recorded as `preserved` (the earlier version still passes), `earlier-fails` (it fails a named gate that had just passed on the same tree) or `unproven`, in `test-replay-<round>.json` and at the end of the run. Nothing blocks on it. Costs one run of each replaying gate per round that has replayable test edits, plus one per file when that batch does not pass. Turn a slow gate out of it with `verify.gates[].replay: false`, or all of it off with `verify.replay: false`. |
 | `verify.testPaths` | `**/*.test.*`, `**/*.spec.*`, `**/test/**`, `**/tests/**`, `**/__tests__/**`, `**/test_*.py`, `**/*_test.py`, `**/*_test.go` | Which changed files count as tests when the reviewer is asked whether a round edited its own judge. Replaces the built-in list. `vibe.config.json` always counts. |
 
 ### Named gates
@@ -355,9 +356,10 @@ One command can only fail one way. `verify.gates` names as many as the project n
 | `verify.gates[].timeoutMs` | Defaults to `verify.timeoutMs`. |
 | `verify.gates[].required` | Defaults to `true`. An unavailable required gate makes a finished run exit 7. A gate that runs and fails always blocks, whatever this says. |
 | `verify.gates[].baseline` | Defaults to `verify.baseline`. Set `false` on a long end-to-end gate to skip it in the start-tree baseline; it is recorded as `skipped`. |
+| `verify.gates[].replay` | Defaults to `verify.replay`. Set `false` on a slow gate to leave it out of the replay of edited tests; the record names the gates that did run. With no gate left, nothing is replayed. |
 | `verify.gates[].artifacts` | Project-relative files or directories (not globs) to copy into the run directory when this gate fails, one copy per round. Links are refused. |
 
-A failure stops the sequence, so the fixer gets one problem at a time. An unavailable gate does not. The start-tree baseline is the exception: it runs every gate once, whatever the one before it did, because it wants every gate's state. `gates: []` is refused: `enabled: false` is how you turn verification off.
+A failure stops the sequence, so the fixer gets one problem at a time. An unavailable gate does not. The start-tree baseline is the exception: it runs every gate once, whatever the one before it did, because it wants every gate's state. The replay of edited tests stops at the first failure, as verification does, and runs each gate once. `gates: []` is refused: `enabled: false` is how you turn verification off.
 
 ## `progress`
 

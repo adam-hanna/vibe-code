@@ -605,6 +605,12 @@ export interface VerifyGate {
    */
   baseline?: boolean;
   /**
+   * Whether this gate runs when an edited test's earliest committed version is
+   * replayed against the run's code (#486). Defaults to `verify.replay`, in the
+   * precedence `baseline` uses.
+   */
+  replay?: boolean;
+  /**
    * What the command produced, preserved when this gate FAILS (#62).
    *
    * Project-relative paths, each a directory or a file - not globs. `fs.glob`
@@ -689,6 +695,17 @@ export interface VerifyConfig {
    * `verify.gates[].baseline`, which is how a long end-to-end suite opts out.
    */
   baseline: boolean;
+  /**
+   * Whether an edited test's earliest committed version is swapped back in and
+   * run against the run's code, right after a gate pass (#486).
+   *
+   * On by default, for the reason `baseline` is: a record that is off records
+   * nothing, and a seat reading history missed one planted weakening in four.
+   * The cost is one run of each replaying gate per round that has replayable
+   * test edits, plus one per file when that batch does not pass. A slow gate
+   * turns it off for itself with `verify.gates[].replay`.
+   */
+  replay: boolean;
   /**
    * The path patterns that make a changed file part of the run's own judge
    * (#112), replacing - never extending - the built-in convention list in
@@ -1952,6 +1969,81 @@ export interface JudgeEditedAfterReview {
 }
 
 /**
+ * What replaying a judge-listed file's earliest committed version said (#486).
+ *
+ * Three outcomes of a run - `preserved`, `earlier-fails`, `unproven` - and five
+ * reasons nothing was run, each said rather than dropped: `unchanged` (the file
+ * still holds its earliest committed version), `deleted`, `renamed`,
+ * `no-committed-version` and `not-a-test` (`vibe.config.json`, `REVIEW.md`, or
+ * a kept path that matches no test pattern).
+ */
+export type TestReplayVerdict =
+  | 'preserved'
+  | 'earlier-fails'
+  | 'unproven'
+  | 'unchanged'
+  | 'deleted'
+  | 'renamed'
+  | 'no-committed-version'
+  | 'not-a-test';
+
+/** One file of a replay record (#486). */
+export interface TestReplayFile {
+  path: string;
+  verdict: TestReplayVerdict;
+  /** The earliest committed version: the commit it was read at and its blob id. */
+  earliest?: { commit: string; blob: string };
+  /** The head copy's filtered content id, as `git hash-object` gives it. */
+  head?: string;
+  /** On `earlier-fails` only: the gate the earlier version failed. */
+  gate?: string;
+  /** The gates that ran for this verdict, in order. */
+  gates?: string[];
+  /** On `unproven`, and on the reasons nothing ran where there is one to give. */
+  reason?: string;
+  /** The verdict was reused from the cache, on the same tree and gates. */
+  cached?: true;
+}
+
+/**
+ * One replay pass (#486). `round` is the raw `state.reviewRound`, the number
+ * the artifact `test-replay-<round>.json` carries. `tree` is the working tree's
+ * id before the swap, or null when it could not be computed without a guess.
+ */
+export interface TestReplay {
+  round: number;
+  at: 'review' | 'final-fix';
+  tree: string | null;
+  files: TestReplayFile[];
+}
+
+/** Verdicts keyed by (path, earliest blob, tree, gates) (#486, decision 6). */
+export interface TestReplayCache {
+  tree: string;
+  gates: { name: string; command: string }[];
+  files: {
+    path: string;
+    earliest: string;
+    verdict: 'preserved' | 'earlier-fails';
+    gate?: string;
+    gates: string[];
+  }[];
+}
+
+/**
+ * Test files currently swapped to an earlier version (#486). Saved before the
+ * first write to the tree and cleared once every head copy is restored, so a
+ * process killed between the two leaves this for the next one to act on.
+ *
+ * `sha256` is the hex SHA-256 of the head copy's exact bytes, and `backup` is
+ * always `test-replay-<round>/<sha256>.head` under the run directory.
+ */
+export interface TestReplayInFlight {
+  round: number;
+  files: { path: string; backup: string; sha256: string }[];
+}
+
+/**
  * One turn's observed-but-uncharged spend. See `RunState.inFlight`.
  *
  * Keyed by `label` plus `provider` wherever it is looked up, which is unique
@@ -2412,6 +2504,17 @@ export interface RunState {
    * none.
    */
   fixReproductions?: FixReproductions | undefined;
+  /**
+   * The replay of edited tests' earliest committed versions before the latest
+   * review round (#486). Its own record, so `testChanges` keeps its meaning.
+   */
+  testReplay?: TestReplay | undefined;
+  /** The same, for the files #485 lists at the end of the final fix road. */
+  testReplayAfterReview?: TestReplay | undefined;
+  /** Replay verdicts reusable on the same tree and gates (#486). */
+  testReplayCache?: TestReplayCache | undefined;
+  /** Test files swapped to an earlier version right now (#486). */
+  testReplayInFlight?: TestReplayInFlight | undefined;
   /**
    * Who took the most recent review round's own turn (#393): `roles.reviewer`'s
    * provider and model as they were when that round's artifact was written.

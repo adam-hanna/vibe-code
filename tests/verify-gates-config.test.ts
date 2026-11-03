@@ -324,3 +324,41 @@ test('a gate takes verify.baseline unless it sets its own, and the legacy gate f
   const onByDefault = applyOverrides(DEFAULTS, { verify: { command: 'npm test' } } as Partial<Config>);
   assert.deepEqual(resolveGates(onByDefault.verify, '.').map((g) => g.baseline), [true]);
 });
+
+test('verify.replay is checked on the legacy path and behind a gate list (#486)', () => {
+  // `"no"` is truthy, so an unchecked string would replay what the user turned off.
+  assert.throws(withVerify({ replay: 'no' }), { message: /verify\.replay must be true or false/ });
+  assert.throws(
+    withVerify({ replay: 'no', gates: [{ name: 'test', command: 'npm test' }] }),
+    { message: /verify\.replay must be true or false/ },
+  );
+  assert.throws(
+    withVerify({ gates: [{ name: 'test', command: 'npm test', replay: 'no' }] }),
+    { message: /verify\.gates\[0\]\.replay must be true or false/ },
+  );
+  assert.equal(withVerify({ replay: false })().verify.replay, false);
+  assert.equal(DEFAULTS.verify.replay, true, 'on by default: a record that is off records nothing');
+});
+
+test('a gate takes verify.replay unless it sets its own, and the legacy gate follows the section', () => {
+  const listed = applyOverrides(DEFAULTS, {
+    verify: {
+      replay: false,
+      gates: [
+        { name: 'typecheck', command: 'npm run typecheck', replay: true },
+        { name: 'test', command: 'npm test' },
+      ],
+    },
+  } as Partial<Config>);
+  assert.deepEqual(
+    resolveGates(listed.verify, '.').map((g) => [g.name, g.replay]),
+    [
+      ['typecheck', true],
+      ['test', false],
+    ],
+  );
+  const legacy = applyOverrides(DEFAULTS, { verify: { command: 'npm test', replay: false } } as Partial<Config>);
+  assert.deepEqual(resolveGates(legacy.verify, '.').map((g) => g.replay), [false]);
+  const onByDefault = applyOverrides(DEFAULTS, { verify: { command: 'npm test' } } as Partial<Config>);
+  assert.deepEqual(resolveGates(onByDefault.verify, '.').map((g) => g.replay), [true]);
+});

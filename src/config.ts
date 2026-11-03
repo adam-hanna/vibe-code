@@ -251,6 +251,12 @@ export const DEFAULTS: Config = {
     // one run of each gate per run, bounded by its `timeoutMs`; a long gate turns
     // it off for itself with `verify.gates[].baseline`.
     baseline: true,
+    // On, for the reason `baseline` is (#486): a record that is off records
+    // nothing. The cost is one run of each replaying gate per round that has
+    // replayable test edits, plus one per file when that batch does not pass,
+    // each bounded by the gate's `timeoutMs`; a slow gate turns it off for
+    // itself with `verify.gates[].replay`.
+    replay: true,
     // Copied, so a caller mutating its config cannot edit the constant. The list
     // is a naming convention, not a measurement - see `DEFAULT_TEST_PATHS` (#112).
     testPaths: [...DEFAULT_TEST_PATHS],
@@ -1133,7 +1139,16 @@ const PROVIDERS: readonly AgentProvider[] = ['claude', 'codex'];
 
 /** A gate name has to survive being a finding id, so it is kept to one alphabet. */
 const GATE_NAME_RE = /^[a-z0-9][a-z0-9-]*$/;
-const GATE_KEYS = ['name', 'command', 'runs', 'timeoutMs', 'required', 'artifacts', 'baseline'] as const;
+const GATE_KEYS = [
+  'name',
+  'command',
+  'runs',
+  'timeoutMs',
+  'required',
+  'artifacts',
+  'baseline',
+  'replay',
+] as const;
 
 /** The run directory's own name. Copying it into itself is the one self-reference to refuse. */
 const VIBE_DIR = '.vibe';
@@ -1682,6 +1697,11 @@ function validateVerify(verify: VerifyConfig): void {
   if (baseline !== undefined && typeof baseline !== 'boolean') {
     throw new Error('verify.baseline must be true or false');
   }
+  // And again for the replay (#486): `replay: "no"` is truthy too.
+  const replay: unknown = verify.replay;
+  if (replay !== undefined && typeof replay !== 'boolean') {
+    throw new Error('verify.replay must be true or false');
+  }
 
   // Above the `gates === null` return for the same reason again: a property of
   // the whole section. `[]` is legal and means no test patterns at all -
@@ -1779,6 +1799,10 @@ function validateVerify(verify: VerifyConfig): void {
     const gateBaseline = entry['baseline'];
     if (gateBaseline !== undefined && typeof gateBaseline !== 'boolean') {
       throw new Error(`${where}.baseline must be true or false`);
+    }
+    const gateReplay = entry['replay'];
+    if (gateReplay !== undefined && typeof gateReplay !== 'boolean') {
+      throw new Error(`${where}.replay must be true or false`);
     }
 
     // The shape settles these, so they are refused HERE rather than mid-run:
