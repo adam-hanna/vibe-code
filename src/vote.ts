@@ -1,6 +1,6 @@
 import { inlineLiteral } from '@src/literal.js';
 import type { RoleSetting } from '@src/roles.js';
-import type { Ballot, Votes, VoteValue } from '@src/types.js';
+import type { Ballot, ConfirmVerdict, FinalFixConfirmation, Votes, VoteValue } from '@src/types.js';
 
 /**
  * The review vote's tally (#388 Part C), pure and on its own so the whole truth
@@ -55,6 +55,43 @@ export function failedBallot(entry: { path: string; setting: RoleSetting }, err:
     model: entry.setting.model ?? 'default',
     vote: 'cannot-tell',
     counted: 'cannot-tell',
+    reason: `the turn failed: ${message.split(/\r?\n/)[0] ?? ''}`,
+    evidence: [],
+  };
+}
+
+/**
+ * How a confirmation after the final fix is counted (#489), `countBallot`'s
+ * rule with the burden on the other answer.
+ *
+ * Here it is `fixed` that must point at something: the round is never reviewed
+ * again, so "the defect is gone" is the claim nobody else checks. One whose
+ * evidence resolves to nothing is counted `cannot-tell`, and the record keeps
+ * both. `still-present` needs nothing beyond the claim's own evidence.
+ */
+export function countConfirmation(
+  said: ConfirmVerdict,
+  unresolved: string | null,
+): { counted: ConfirmVerdict; countedReason?: string } {
+  if (said === 'fixed' && unresolved !== null) {
+    return { counted: 'cannot-tell', countedReason: `its evidence resolved to nothing: ${unresolved}` };
+  }
+  return { counted: said };
+}
+
+/** The confirmation of a seat whose turn failed: nothing was said, so it confirms nothing. */
+export function failedConfirmation(
+  id: string,
+  seat: NonNullable<FinalFixConfirmation['seat']>,
+  err: unknown,
+): FinalFixConfirmation {
+  const message = err instanceof Error ? err.message : String(err);
+  return {
+    id,
+    verdict: 'cannot-tell',
+    counted: 'cannot-tell',
+    source: 'seat',
+    seat,
     reason: `the turn failed: ${message.split(/\r?\n/)[0] ?? ''}`,
     evidence: [],
   };

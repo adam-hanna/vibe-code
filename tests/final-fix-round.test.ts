@@ -6,6 +6,7 @@ import { orchestrate } from '@src/orchestrator.js';
 import {
   active,
   agents,
+  CITED,
   commits,
   committing,
   config,
@@ -45,10 +46,17 @@ test('the tolerated P1 is fixed, committed and re-verified, but never re-reviewe
       {
         claude: (label) => work(state, `${label}.txt`),
         codex: (() => {
-          let asked = 0;
-          return (): unknown => {
-            asked += 1;
-            if (asked > 1) {
+          let reviewed = 0;
+          return (label: string): unknown => {
+            // The confirmation after the gates (#489) is the one turn on this
+            // handler that may follow, and it is not a review: told apart by label,
+            // because a failure thrown inside it would be counted as a failed
+            // confirmation rather than failing this case.
+            if (label.startsWith('confirm-')) {
+              return { verdict: 'fixed', reason: 'it is gone', evidence: [...CITED] };
+            }
+            reviewed += 1;
+            if (reviewed > 1) {
               assert.fail('the final fix round was reviewed again, which reopens the loop');
             }
             return report([p1('tolerated-one')]);
@@ -60,8 +68,9 @@ test('the tolerated P1 is fixed, committed and re-verified, but never re-reviewe
   );
 
   // Another review round could raise something new and the loop would never
-  // end, which is the situation the tolerance exists to escape.
-  assert.deepEqual(calls, ['review-0', 'final-fix-1']);
+  // end, which is the situation the tolerance exists to escape. The one turn
+  // after the fix is its confirmation (#489), which buys nothing.
+  assert.deepEqual(calls, ['review-0', 'final-fix-1', 'confirm-1-1']);
   assert.equal(state.finalFixDone, true);
   assert.deepEqual((state.outstanding ?? []).map((f) => f.id), ['tolerated-one']);
 
@@ -114,7 +123,8 @@ test('a tolerated P1 from a turn that ran commands still buys the final fix roun
     ),
   );
 
-  assert.deepEqual(calls, ['review-0', 'final-fix-1']);
+  // Then its confirmation after the gates (#489).
+  assert.deepEqual(calls, ['review-0', 'final-fix-1', 'confirm-1-1']);
   assert.equal(state.finalFixDone, true);
 });
 
@@ -146,7 +156,9 @@ test('the same P1 from a turn that ran nothing is no longer carried: it is a P2 
     );
 
     if (fixNonBlocking) {
-      assert.deepEqual(calls, ['review-0', 'final-fix-1'], 'one final round, not reviewed again');
+      // A P1 the guard moved is confirmed after the gates (#489): a record,
+      // not a review, and nothing after it.
+      assert.deepEqual(calls, ['review-0', 'final-fix-1', 'confirm-1-1'], 'one final round, not reviewed again');
       assert.equal(state.finalFixDone, true);
       // Not carried as a P1: the round was bought for a non-blocking finding.
       assert.deepEqual(state.outstanding, []);

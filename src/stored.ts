@@ -4,6 +4,7 @@ import type { AgentEnvironmentFacts, EnvironmentFacts } from '@src/runtime.js';
 import type { AgentProvider, AgentShell } from '@src/runtime.js';
 import type { PathStyle } from '@src/pathstyle.js';
 import type { SlotName } from '@src/slots.js';
+import { readEvidenceEntry, readReproducerOutcome } from '@src/validate.js';
 import type {
   AcceptanceCriterion,
   Answer,
@@ -15,7 +16,11 @@ import type {
   ArtifactEntryOutcome,
   Confidence,
   DeferredQuestion,
+  Evidence,
+  FinalFixConfirmation,
+  FinalFixConfirmations,
   Finding,
+  FixReproductions,
   GateArtifacts,
   GateBaseline,
   GateBaselineEntry,
@@ -1728,6 +1733,128 @@ function readJudgeEditedAfterReview(raw: unknown, ctx: ReadContext): JudgeEdited
   return { sinceRound: raw['sinceRound'], files, ...(restored.length > 0 ? { restored } : {}) };
 }
 
+const CONFIRM_VERDICTS = {
+  fixed: 'fixed',
+  'still-present': 'still-present',
+  'cannot-tell': 'cannot-tell',
+} satisfies Record<FinalFixConfirmation['verdict'], FinalFixConfirmation['verdict']>;
+
+const CONFIRM_SOURCES = {
+  seat: 'seat',
+  reproducer: 'reproducer',
+  'unread-diff': 'unread-diff',
+} satisfies Record<FinalFixConfirmation['source'], FinalFixConfirmation['source']>;
+
+/** One recorded confirmation, or null for anything the writer does not produce. */
+function readConfirmation(entry: unknown): FinalFixConfirmation | null {
+  if (!isRecord(entry)) return null;
+  const verdict = enumOf(entry['verdict'], CONFIRM_VERDICTS);
+  const counted = enumOf(entry['counted'], CONFIRM_VERDICTS);
+  const source = enumOf(entry['source'], CONFIRM_SOURCES);
+  const rawEvidence = entry['evidence'];
+  const evidence = Array.isArray(rawEvidence) ? (rawEvidence as unknown[]).map(readEvidenceEntry) : null;
+  const countedReason = entry['countedReason'];
+  if (
+    !isString(entry['id']) ||
+    entry['id'] === '' ||
+    verdict === null ||
+    counted === null ||
+    source === null ||
+    !isString(entry['reason']) ||
+    evidence === null ||
+    !evidence.every((e): e is Evidence => e !== null) ||
+    !(countedReason === undefined || isString(countedReason))
+  ) {
+    return null;
+  }
+  const rawSeat = entry['seat'];
+  let seat: FinalFixConfirmation['seat'];
+  if (rawSeat !== undefined) {
+    const provider = isRecord(rawSeat) ? enumOf(rawSeat['provider'], PROVIDERS) : null;
+    if (
+      !isRecord(rawSeat) ||
+      provider === null ||
+      !isString(rawSeat['model']) ||
+      rawSeat['model'] === '' ||
+      !isBool(rawSeat['sharesImplementerVendor'])
+    ) {
+      return null;
+    }
+    seat = { provider, model: rawSeat['model'], sharesImplementerVendor: rawSeat['sharesImplementerVendor'] };
+  }
+  return {
+    id: entry['id'],
+    verdict,
+    counted,
+    source,
+    ...(seat === undefined ? {} : { seat }),
+    reason: entry['reason'],
+    evidence,
+    ...(countedReason === undefined ? {} : { countedReason }),
+  };
+}
+
+/**
+ * The final fix round's confirmations (#489), or nothing.
+ *
+ * The container is dropped whole, for `readTestChanges`' reason: a record with
+ * no readable round or anchor cannot say what it is about. A damaged verdict or
+ * claim is dropped and said. A dropped verdict is bought again on resume, so a
+ * repair can cost a turn but never invent a verdict; a dropped claim also tells
+ * the confirmation step not to rewrite FOLLOW-UPS.md from it.
+ */
+function readFinalFixConfirmations(raw: unknown, ctx: ReadContext): FinalFixConfirmations | undefined {
+  if (raw === undefined) return undefined;
+  const field = 'finalFixConfirmations';
+  const since = isRecord(raw) ? raw['since'] : undefined;
+  if (
+    !isRecord(raw) ||
+    !isPositiveInt(raw['round']) ||
+    !(since === null || (isString(since) && BLOB_ID.test(since))) ||
+    !Array.isArray(raw['claims']) ||
+    !Array.isArray(raw['findings'])
+  ) {
+    ctx.repairs.dropped(field, field);
+    return undefined;
+  }
+  const claims: Finding[] = [];
+  for (const [i, entry] of (raw['claims'] as unknown[]).entries()) {
+    if (hasFindingShape(entry)) claims.push(entry);
+    else ctx.repairs.dropped(field, `${field}.claims[${i}]`);
+  }
+  const findings: FinalFixConfirmation[] = [];
+  for (const [i, entry] of (raw['findings'] as unknown[]).entries()) {
+    const read = readConfirmation(entry);
+    if (read === null) ctx.repairs.dropped(field, `${field}.findings[${i}]`);
+    else findings.push(read);
+  }
+  return { round: raw['round'], since, claims, findings };
+}
+
+/**
+ * The reproducers re-run after the latest ordinary fix round (#489 part 3), or
+ * nothing. A damaged container drops the key; a damaged entry is dropped and
+ * said, since one unreadable observation does not make the others untrue.
+ */
+function readFixReproductions(raw: unknown, ctx: ReadContext): FixReproductions | undefined {
+  if (raw === undefined) return undefined;
+  const field = 'fixReproductions';
+  if (!isRecord(raw) || !isPositiveInt(raw['round']) || !Array.isArray(raw['outcomes'])) {
+    ctx.repairs.dropped(field, field);
+    return undefined;
+  }
+  const outcomes: FixReproductions['outcomes'] = [];
+  for (const [i, entry] of (raw['outcomes'] as unknown[]).entries()) {
+    const outcome = isRecord(entry) ? readReproducerOutcome(entry['outcome']) : null;
+    if (!isRecord(entry) || !isString(entry['id']) || entry['id'] === '' || outcome === null) {
+      ctx.repairs.dropped(field, `${field}.outcomes[${i}]`);
+      continue;
+    }
+    outcomes.push({ id: entry['id'], outcome });
+  }
+  return { round: raw['round'], outcomes };
+}
+
 /**
  * The seat that took the last recorded review round's turn (#393), or critique
  * round's turn (#453), or nothing.
@@ -2485,6 +2612,12 @@ const READERS = {
   // says its edits after the last review could not be checked.
   judgeAtLastReview: (raw, ctx) => readJudgeSnapshot(raw, ctx),
   judgeEditedAfterReview: (raw, ctx) => readJudgeEditedAfterReview(raw, ctx),
+  // Absent stays absent: a run that never took the final fix, one with
+  // `loop.confirmFinalFix` off, or one from before #489. A damaged verdict is
+  // dropped and bought again; a damaged container drops the key.
+  finalFixConfirmations: (raw, ctx) => readFinalFixConfirmations(raw, ctx),
+  // Absent stays absent: no ordinary fix round has re-run a reproducer (#489).
+  fixReproductions: (raw, ctx) => readFixReproductions(raw, ctx),
   // Absent stays absent: a run from before #393, or one that has not recorded a
   // review round. A damaged value is dropped, so its round credits no seat.
   reviewSeat: (raw, ctx) => readRoundSeat(raw, ctx, 'reviewSeat'),

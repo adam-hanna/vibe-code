@@ -582,6 +582,41 @@ export const PLAN_VOTE_SCHEMA = {
   },
 } as const satisfies object;
 
+/**
+ * One confirmation after the final fix (#489): is a defect an earlier review
+ * reported still present in the code as it stands?
+ *
+ * `VOTE_SCHEMA`'s shape - the same three keys and the same evidence item, so
+ * `groundVoteEvidence` reads it - with the burden of evidence on the other
+ * answer: here it is `fixed` that must point at something, because a
+ * confirmation that the defect is gone is the claim nobody else checked.
+ */
+export const CONFIRM_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['verdict', 'reason', 'evidence'],
+  properties: {
+    verdict: {
+      type: 'string',
+      enum: ['fixed', 'still-present', 'cannot-tell'],
+      description:
+        'fixed = the defect the claim describes is no longer in this code, and you can show where. ' +
+        'still-present = it is still there. cannot-tell = anything in between, including any doubt.',
+    },
+    reason: {
+      type: 'string',
+      description: 'Why, in a few sentences. For fixed, the concrete reason the defect is gone.',
+    },
+    evidence: {
+      type: 'array',
+      description:
+        'Where to look. Needed for fixed: a fixed verdict whose citations resolve to nothing ' +
+        'is counted as cannot-tell. May be empty for still-present and cannot-tell.',
+      items: FINDINGS_SCHEMA.properties.findings.items.properties.evidence.items,
+    },
+  },
+} as const satisfies object;
+
 /** Codex answering Claude's blocking questions. */
 export const ANSWERS_SCHEMA = {
   type: 'object',

@@ -264,7 +264,9 @@ test('what counts as to address: a P2 or P3 that is not deferred or vote-moved',
 });
 
 test('tolerated P1s plus P2s are one final fix, and OUTSTANDING.md lists only the P1s', async () => {
+  // About the #425 round, not the confirmation after it (#489).
   const d = await review([p1('carried-one'), p2('p2-a')], {
+    loop: { confirmFinalFix: false },
     fixer: [
       { id: 'carried-one', disposition: 'fixed', reason: 'done' },
       { id: 'p2-a', disposition: 'rebutted', reason: 'already guarded upstream' },
@@ -300,7 +302,8 @@ test('tolerated P1s plus P2s are one final fix, and OUTSTANDING.md lists only th
 });
 
 test('a round for tolerated P1s alone says, records and writes exactly what it did before', async () => {
-  const d = await review([p1('carried-one')]);
+  // Exactly what it did before #425, so without the confirmation of #489 too.
+  const d = await review([p1('carried-one')], { loop: { confirmFinalFix: false } });
 
   assert.deepEqual(d.calls, ['review-0', 'final-fix-1']);
   assert.equal(

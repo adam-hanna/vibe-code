@@ -20,14 +20,15 @@ import {
   groundVoteEvidence,
   refusePlaceholderPlan,
 } from '@src/evidence.js';
-import { FIX_SCHEMA, PLAN_VOTE_SCHEMA, REVISE_SCHEMA, VOTE_SCHEMA } from '@src/schemas.js';
+import { CONFIRM_SCHEMA, FIX_SCHEMA, PLAN_VOTE_SCHEMA, REVISE_SCHEMA, VOTE_SCHEMA } from '@src/schemas.js';
 import { dispositionSummary, settleDispositions, settlePlanDispositions } from '@src/dispositions.js';
-import { countBallot, describeVotes, failedBallot, tally } from '@src/vote.js';
+import { countBallot, countConfirmation, describeVotes, failedBallot, failedConfirmation, tally } from '@src/vote.js';
 import { describeOutcome, observe } from '@src/reproducer.js';
 import { gateMode } from '@src/gates.js';
 import { moveSection, raisePhase, raiseSection } from '@src/raise.js';
 import { decisionsPrefix, planDecisions, writeDecisions } from '@src/decisions.js';
 import * as git from '@src/git.js';
+import type { DiffChunk } from '@src/git.js';
 import { readDecision, readOrigin } from '@src/host.js';
 import type { GateContext, Host } from '@src/host.js';
 import * as log from '@src/log.js';
@@ -37,6 +38,7 @@ import * as P from '@src/prompts.js';
 import {
   claudePermission,
   codexSandbox,
+  confirmSeat,
   effortFor,
   GENERATIVE_ROLES,
   holderLabel,
@@ -133,6 +135,7 @@ import {
   parsePlanDispositions,
   parseTestVerdicts,
   parsePlan,
+  parseConfirm,
   parseVote,
   readEvidence,
   reproducerOutcomesOf,
@@ -191,6 +194,9 @@ import type {
   ClaudeTurnResult,
   Confidence,
   Config,
+  ConfirmVerdict,
+  FinalFixConfirmation,
+  FinalFixConfirmations,
   Finding,
   FindingsReport,
   FileChange,
@@ -1764,6 +1770,10 @@ async function reviewPhase(
     // Stop here rather than reviewing again: the point of the tolerance is to
     // end the argument, and a fresh review would reopen it.
     if (state.finalFixDone === true) {
+      // First, so the settled OUTSTANDING.md below is written once with the
+      // verdicts in it (#489). It buys nothing: whatever it records, the branch
+      // still ends in `break` below.
+      await confirmFinalFix(state, cfg, cwd, plan, roles, turns);
       // The one place the artifact's own claim is true: the fix round is behind
       // us and `runGate` has just returned clean. Everything the final round
       // writes is a separate moment - the flags before its turn, the report
@@ -1781,16 +1791,18 @@ async function reviewPhase(
       // Says what the round worked on when it carried non-blocking findings
       // (#425); a round for tolerated P1s alone keeps its sentence.
       const nb = Array.isArray(state.finalFixNonBlocking) ? state.finalFixNonBlocking : [];
+      // The confirmations' counts (#489), or nothing when none were recorded.
+      const checked = confirmedSuffix(state);
       if (nb.length === 0) {
-        if (caveat === null) log.ok('Carried findings addressed and verification still passes.');
-        else log.warn(`Carried findings addressed, but ${caveat}.`);
+        if (caveat === null) log.ok(`Carried findings addressed and verification still passes${checked}.`);
+        else log.warn(`Carried findings addressed, but ${caveat}${checked}.`);
       } else {
         const p1s = Array.isArray(state.outstanding) ? state.outstanding.filter(hasFindingShape).length : 0;
         const what =
           `The final fix round worked on ${p1s > 0 ? `${p1s} carried P1(s) and ` : ''}` +
           `${nb.length} non-blocking finding(s)`;
-        if (caveat === null) log.ok(`${what}, and verification still passes.`);
-        else log.warn(`${what}, but ${caveat}.`);
+        if (caveat === null) log.ok(`${what}, and verification still passes${checked}.`);
+        else log.warn(`${what}, but ${caveat}${checked}.`);
       }
       // The end of the road nobody reviews, so the one place its changes to
       // the judge can be named (#485). After the gate has passed, because the
@@ -2126,6 +2138,28 @@ async function runFinalFix(
     if (nonBlocking.length > 0) state.finalFixNonBlocking = nonBlocking.map((f) => f.id);
     else delete state.finalFixNonBlocking;
   }
+  // What the confirmation after the gates will need (#489), on the save below:
+  // the guard-downgraded P1s whole, because one the fixer marks `fixed` is kept
+  // nowhere else, and the commit the fix starts from, which is what its diff is
+  // read against. Kept from the attempt that died on the resumed road, so the
+  // anchor stays before whatever that attempt's turn wrote.
+  const claims = nonBlocking.filter((f) => f.downgraded?.from === 'P1');
+  if (
+    cfg.loop.confirmFinalFix &&
+    (tolerated.length > 0 || claims.length > 0) &&
+    state.finalFixConfirmations?.round !== state.reviewRound
+  ) {
+    state.finalFixConfirmations = {
+      round: state.reviewRound,
+      // Only under per-round commits is HEAD the commit the fix starts from:
+      // otherwise the earlier rounds' work is uncommitted too, and the change
+      // since the review cannot be told from the rest. Decided here, as the
+      // round starts, so a resume reads the same scope this round began with.
+      since: cfg.git.commitEachRound ? await headBeforeFinalFix(cwd) : null,
+      claims,
+      findings: [],
+    };
+  }
   // Before the turn, so a process that dies inside it resumes this round as
   // itself rather than as the next ordinary fix (#393). See `fixInFlight`.
   state.fixInFlight = { round: state.reviewRound, final: true };
@@ -2366,7 +2400,7 @@ async function runFixRound(
   // The record before the consumption, so no stop can leave a consumed round
   // without one: a resume finds the findings still pending and `fixInFlight`
   // still set, and redoes this same round and label, record included (#393).
-  recordDispositions(state, read, findings, `fix-${state.reviewRound}`);
+  const dispositions = recordDispositions(state, read, findings, `fix-${state.reviewRound}`);
   delete state.fixInFlight;
   clearPendingFindings(state);
   writeCheckpoint(
@@ -2374,7 +2408,50 @@ async function runFixRound(
     'review-round',
     await maybeCommit(cfg, cwd, `vibe: address review round ${state.reviewRound}`),
   );
+  await recordFixReproductions(state, cfg, cwd, roles, findings, dispositions);
   await holdAt(state, cfg, host, 'review-round');
+}
+
+/**
+ * After an ordinary fix round, run once more the reproducer of each finding the
+ * fixer marked `fixed` whose reproducer reproduced at review (#489 part 3).
+ *
+ * **A record only.** Nothing reads `fixReproductions` to decide anything, and
+ * no prompt renders it in this change: whether an earlier finding was fixed
+ * used to rest on the next reviewer's memory, and this writes the observation
+ * down first. After the commit, so a placed reproducer can never be committed;
+ * a stop in between loses only this record.
+ *
+ * Only `fixed`: a finding the fixer rebutted or deferred was not claimed gone,
+ * and an unreadable answer claims nothing, so neither buys a gate run.
+ */
+async function recordFixReproductions(
+  state: RunState,
+  cfg: Config,
+  cwd: string,
+  roles: RoleTable,
+  findings: readonly Finding[],
+  dispositions: FixDispositions | null,
+): Promise<void> {
+  const fixed =
+    dispositions === null
+      ? []
+      : findings.filter((f) =>
+          dispositions.dispositions.some((d) => d.id === f.id && d.disposition === 'fixed'),
+        );
+  const ran = await rerunReproducers(state, cfg, cwd, roles, fixed, 'fix');
+  if (ran.length === 0) {
+    if (state.fixReproductions !== undefined) {
+      delete state.fixReproductions;
+      saveState(state);
+    }
+    return;
+  }
+  state.fixReproductions = {
+    round: state.reviewRound,
+    outcomes: ran.map((r) => ({ id: r.finding.id, outcome: r.outcome })),
+  };
+  saveState(state);
 }
 
 /**
@@ -2409,18 +2486,44 @@ async function confirmFixed(
   roles: RoleTable,
   carried: readonly Finding[],
 ): Promise<Finding[]> {
-  if (!cfg.verify.reproducers || !cfg.verify.enabled) return [...carried];
+  const ran = await rerunReproducers(state, cfg, cwd, roles, carried, 'final-fix');
+  // Appended to the finding, not through `applyReproducerOutcomes`: that
+  // function's job is the severity, and there is no severity left to move -
+  // the run ends after this and the finding is a record rather than an input.
+  return carried.map((f) => {
+    const after = ran.find((r) => r.finding === f);
+    return after === undefined ? f : { ...f, reproducerOutcomes: [...reproducerOutcomesOf(f), after.outcome] };
+  });
+}
+
+/**
+ * Run each finding's reproducer once more after a fix, for the findings whose
+ * reproducer reproduced at review - `confirmFixed`'s discipline, shared with
+ * the ordinary fix round's record (#489 part 3).
+ *
+ * The baseline is empty for the reason `confirmFixed` gives, so a failure is
+ * `unproven` and only a pass is a verdict. `at` says which fix it ran after;
+ * an ordinary round's event also names the round, and the final fix's event is
+ * what it always was.
+ */
+async function rerunReproducers(
+  state: RunState,
+  cfg: Config,
+  cwd: string,
+  roles: RoleTable,
+  findings: readonly Finding[],
+  at: 'fix' | 'final-fix',
+): Promise<{ finding: Finding; outcome: ReproducerOutcome }[]> {
+  if (!cfg.verify.reproducers || !cfg.verify.enabled) return [];
 
   const gates = resolveGates(cfg.verify, cwd);
-  const settled: Finding[] = [];
-  for (const f of carried) {
+  const ran: { finding: Finding; outcome: ReproducerOutcome }[] = [];
+  const after = at === 'fix' ? `fix round ${state.reviewRound}` : 'the fix';
+  for (const f of findings) {
     const reproducer = f.reproducer;
-    if (reproducer === undefined || reproductionAt(f, 'review')?.verdict !== 'reproduced') {
-      settled.push(f);
-      continue;
-    }
+    if (reproducer === undefined || reproductionAt(f, 'review')?.verdict !== 'reproduced') continue;
 
-    log.step(`Re-running the reproducer for ${f.id} after the fix`, {
+    log.step(`Re-running the reproducer for ${f.id} after ${after}`, {
       id: 'reproducer_started',
       data: { id: f.id, path: reproducer.path, gate: reproducer.gate ?? null },
     });
@@ -2430,15 +2533,15 @@ async function confirmFixed(
       gates,
       contract: cfg.toolchain,
       style: pathStyleFor(state, 'reviewer', roles),
-      // See the header: the tree has changed since the last observed gate pass.
+      // See `confirmFixed`: the tree has changed since the last observed gate pass.
       passedGates: new Set<string>(),
-      at: 'final-fix',
+      at,
     });
     recordAndSay(
       state,
       outcome.verdict === 'did-not-reproduce' ? 'ok' : 'warn',
       'reproducer_observed',
-      `Reproducer for ${f.id} after the fix: ${outcome.verdict} - ${describeOutcome(outcome)}`,
+      `Reproducer for ${f.id} after ${after}: ${outcome.verdict} - ${describeOutcome(outcome)}`,
       {
         id: f.id,
         verdict: outcome.verdict,
@@ -2449,14 +2552,309 @@ async function confirmFixed(
         baseline: outcome.baseline,
         reason: outcome.reason,
         archived: outcome.archived,
+        ...(at === 'fix' ? { round: state.reviewRound } : {}),
       },
     );
-    // Appended to the finding, not through `applyReproducerOutcomes`: that
-    // function's job is the severity, and there is no severity left to move -
-    // the run ends after this and the finding is a record rather than an input.
-    settled.push({ ...f, reproducerOutcomes: [...reproducerOutcomesOf(f), outcome] });
+    ran.push({ finding: f, outcome });
   }
-  return settled;
+  return ran;
+}
+
+/**
+ * The diff parts a claim's evidence cites, or every part when it cites none of
+ * them: a claim about a file the diff never touched is still a claim about this
+ * change, and the seat can read the rest of the tree. The review vote's rule,
+ * shared with the confirmation after the final fix (#489).
+ */
+function chunksCitedBy(f: Finding, chunks: readonly DiffChunk[]): readonly DiffChunk[] {
+  const cited = new Set(readEvidence(f.evidence).flatMap((e) => (typeof e.path === 'string' ? [e.path] : [])));
+  const touching = chunks.filter((c) => c.files.some((file) => cited.has(file)));
+  return touching.length > 0 ? touching : chunks;
+}
+
+/**
+ * HEAD as the final fix round begins, or null when there is none to read (#489):
+ * the commit the confirmation's diff is read from. Never throws - a git that
+ * cannot answer leaves the confirmation reading the whole run, and says so.
+ */
+async function headBeforeFinalFix(cwd: string): Promise<string | null> {
+  try {
+    if (!(await git.isRepo(cwd))) return null;
+    const head = await git.markBase(cwd);
+    return head !== null && git.isFullSha(head) ? head : null;
+  } catch {
+    return null;
+  }
+}
+
+/** What a confirmation's diff covered (#489): the change since the review only when an anchor was kept. */
+function confirmScopeOf(record: FinalFixConfirmations | undefined): P.ConfirmScope {
+  return record?.since === null || record?.since === undefined ? 'whole-run' : 'since-last-review';
+}
+
+/** The recorded confirmation of one finding, when the record is this round's (#489). */
+function confirmationFor(state: RunState, id: string): FinalFixConfirmation | undefined {
+  const record = state.finalFixConfirmations;
+  if (record === undefined || record.round !== state.reviewRound) return undefined;
+  return record.findings.find((c) => c.id === id);
+}
+
+/** How OUTSTANDING.md, FOLLOW-UPS.md and the narration name a counted verdict (#489). */
+const CONFIRM_LABEL: Record<ConfirmVerdict, string> = {
+  fixed: 'confirmed fixed',
+  'still-present': 'still present',
+  'cannot-tell': 'could not be confirmed',
+};
+
+/** `1 confirmed fixed, 1 could not be confirmed` - the non-zero counts, in a fixed order. */
+function confirmCounts(found: readonly FinalFixConfirmation[]): string {
+  return (['fixed', 'still-present', 'cannot-tell'] as const)
+    .map((v) => ({ v, n: found.filter((c) => c.counted === v).length }))
+    .filter(({ n }) => n > 0)
+    .map(({ v, n }) => `${n} ${CONFIRM_LABEL[v]}`)
+    .join(', ');
+}
+
+/**
+ * One finding's verdict as a line of an artifact: what was counted, who said it,
+ * and why - and, when it was counted otherwise than said, both and the reason.
+ * A seat's words go through `inlineLiteral`, as a ballot's do (#472).
+ */
+function confirmLine(c: FinalFixConfirmation): string {
+  if (c.source === 'reproducer') return `${CONFIRM_LABEL[c.counted]}, by its reproducer passing after the fix`;
+  if (c.source === 'unread-diff') return `${CONFIRM_LABEL[c.counted]} - no check ran, because ${inlineLiteral(c.reason)}`;
+  const seat = c.seat;
+  const who =
+    seat === undefined
+      ? 'a fresh read-only turn'
+      : `a fresh read-only ${seat.provider} turn (${seat.model})` +
+        (seat.sharesImplementerVendor ? ", on the implementer's own vendor, as this run uses no other" : '');
+  const otherwise =
+    c.counted === c.verdict
+      ? ''
+      : ` (it answered ${c.verdict}, counted as ${c.counted}` +
+        `${c.countedReason === undefined ? '' : ` - ${inlineLiteral(c.countedReason)}`})`;
+  return `${CONFIRM_LABEL[c.counted]} - ${who}${otherwise}: ${inlineLiteral(c.reason)}`;
+}
+
+/**
+ * The end-of-run sentence's count of the confirmations, or `''` when this round
+ * recorded none - so a run with `loop.confirmFinalFix` off says exactly what it
+ * said before (#489).
+ */
+function confirmedSuffix(state: RunState): string {
+  const record = state.finalFixConfirmations;
+  if (record === undefined || record.round !== state.reviewRound || record.findings.length === 0) return '';
+  return ` - checked after the gates: ${confirmCounts(record.findings)}`;
+}
+
+/**
+ * Whether what FOLLOW-UPS.md is rendered from was repaired on load, so the file
+ * on disk may hold what state no longer does (#425, #489).
+ *
+ * A repaired `unaddressed` dropped or replaced a leftover, and a repaired
+ * confirmation record may have dropped a claim; re-rendering from either would
+ * delete or shorten the one place those were written down. Unknown beats a
+ * false "nothing left", so a caller that finds this keeps the existing file.
+ */
+function followUpsInputsRepaired(state: RunState): boolean {
+  return state.events.some(
+    (e) =>
+      e.type === 'state_repaired' && (e['field'] === 'unaddressed' || e['field'] === 'finalFixConfirmations'),
+  );
+}
+
+/**
+ * Check each carried and guard-downgraded P1 once more, after the gates have
+ * passed on the final fix (#489).
+ *
+ * **It cannot buy anything.** The final fix is the round the loop never reviews
+ * again - one round, never two - and a verdict here is a record: it moves no
+ * severity, adds no finding, starts no round and changes no exit code. The
+ * caller `break`s after it whatever it says. Here, after `runGate`, and not in
+ * `runFinalFix`, because a verdict on a tree that has not passed its gates is
+ * about the wrong tree; and before `finaliseOutstanding`, so the settled
+ * OUTSTANDING.md is written once, with the verdicts in it.
+ *
+ * Which: every tolerated P1, and every finding the round carried that a guard
+ * moved down from P1 - nothing else. One closed by its own reproducer passing
+ * after the fix is recorded `fixed` from that observation, with no turn: an
+ * observed pass beats an opinion and costs nothing more.
+ *
+ * Each other finding gets one fresh, read-only turn on `confirmSeat`'s seat,
+ * shown the claim's four fields and the fix's diff and nothing about who
+ * raised it or what the fixer said. Counted as `runVoteSeats` counts a ballot,
+ * failing closed: a `fixed` whose evidence resolves to nothing, an answer that
+ * cannot be read and a failed turn all count `cannot-tell`. A stop or a ceiling
+ * passes through.
+ *
+ * Each verdict is saved as it arrives, so a resume buys only the missing ones;
+ * the artifact is rewritten from the record on every entry, so a stop between
+ * the two writes cannot leave it stale.
+ */
+async function confirmFinalFix(
+  state: RunState,
+  cfg: Config,
+  cwd: string,
+  plan: Plan,
+  roles: RoleTable,
+  turns: AgentTurns,
+): Promise<void> {
+  if (!cfg.loop.confirmFinalFix) return;
+  const round = state.reviewRound;
+  const stored = state.finalFixConfirmations;
+  const tolerated = Array.isArray(state.outstanding) ? state.outstanding.filter(hasFindingShape) : [];
+  const carried = new Set(Array.isArray(state.finalFixNonBlocking) ? state.finalFixNonBlocking : []);
+  // A record from this round, or none: a run from before #489, or one whose
+  // record could not be read, confirms its tolerated P1s against the whole run.
+  const record: FinalFixConfirmations =
+    stored !== undefined && stored.round === round ? stored : { round, since: null, claims: [], findings: [] };
+  const claims = record.claims.filter((f) => carried.has(f.id) && !tolerated.some((t) => t.id === f.id));
+  const list = [...tolerated, ...claims];
+  if (list.length === 0) return;
+  if (record !== stored) {
+    state.finalFixConfirmations = record;
+    saveState(state);
+  }
+
+  // Null when the round began without per-round commits, or with no anchor to
+  // read: then the change since the review cannot be told from the rest.
+  const since = record.since;
+  const scope = confirmScopeOf(record);
+
+  const chosen = confirmSeat(cfg, roles);
+  const table = seatTable(roles, chosen.setting, CONFIRM_SCHEMA);
+  const provider = chosen.setting.provider;
+  const seat = { provider, model: chosen.setting.model ?? 'default', sharesImplementerVendor: chosen.sharesImplementerVendor };
+  let diff: { chunks: readonly DiffChunk[] } | { error: string } | undefined;
+  let reviewMd: Awaited<ReturnType<typeof reviewStandardsFor>> | undefined;
+
+  for (const [i, f] of list.entries()) {
+    if (record.findings.some((c) => c.id === f.id)) continue;
+    const n = i + 1;
+    const after = reproductionAt(f, 'final-fix');
+    if (after?.verdict === 'did-not-reproduce') {
+      record.findings.push({
+        id: f.id,
+        verdict: 'fixed',
+        counted: 'fixed',
+        source: 'reproducer',
+        reason: describeOutcome(after),
+        evidence: [],
+      });
+      saveState(state);
+      continue;
+    }
+
+    if (diff === undefined) {
+      try {
+        diff = { chunks: (await git.diffChunks(cwd, since ?? state.baseSha, { toWorkingTree: true })).chunks };
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        diff = { error: message.split(/\r?\n/)[0] ?? '' };
+      }
+    }
+    if ('error' in diff) {
+      // Nothing was shown, so nothing was asked: no turn is bought on a diff
+      // that could not be read, and the finding is not confirmed. No seat is
+      // named, so nothing renders this as a check a turn made.
+      record.findings.push({
+        id: f.id,
+        verdict: 'cannot-tell',
+        counted: 'cannot-tell',
+        source: 'unread-diff',
+        reason: `the diff could not be read: ${diff.error}`,
+        evidence: [],
+      });
+      saveState(state);
+      continue;
+    }
+    reviewMd ??= await reviewStandardsFor(state, cwd);
+
+    const label = `confirm-${round}-${n}`;
+    const shown = chunksCitedBy(f, diff.chunks);
+    const prompt = P.confirmPrompt(
+      {
+        title: f.title,
+        detail: f.detail,
+        suggested_fix: f.suggested_fix,
+        ...(f.evidence === undefined ? {} : { evidence: f.evidence }),
+      },
+      shown.flatMap((c) => c.files),
+      shown.map((c) => c.diff).join('\n'),
+      scope,
+      plan.plan_md,
+      plan.out_of_scope,
+      state.environment,
+      roles,
+      reviewMd,
+    );
+    log.step(`${holderLabel('reviewer', table)} is checking whether ${f.id} is fixed`, {
+      id: 'turn_started',
+      data: { role: 'reviewer', kind: 'confirm', round, finding: f.id, provider },
+    });
+    let entry: FinalFixConfirmation;
+    try {
+      const outcome = await runTurn(state, cfg, { role: 'reviewer', prompt, cwd, label }, turns, table);
+      const said = parseConfirm(readStructured(outcome));
+      // The seat's own path convention, because it typed the paths.
+      const grounded = groundVoteEvidence(said.evidence, cwd, state.dir, pathStyleFor(state, 'reviewer', table));
+      const counted = countConfirmation(said.verdict, grounded.unresolved);
+      entry = {
+        id: f.id,
+        verdict: said.verdict,
+        counted: counted.counted,
+        source: 'seat',
+        seat,
+        reason: said.reason,
+        // Only the citations a reader can use. `groundFindings` leaves a
+        // malformed one in place, and the state reader refuses an entry it
+        // cannot read - so storing it would drop this verdict on the next load
+        // and buy it again. The count above was made from all of them.
+        evidence: readEvidence(grounded.evidence),
+        ...(counted.countedReason === undefined ? {} : { countedReason: counted.countedReason }),
+      };
+    } catch (err: unknown) {
+      // A stop, a ceiling, a rate limit waited out past its cap: not a verdict.
+      if (err instanceof Escalation || err instanceof Cancelled) throw err;
+      // Nor a ceiling this failed turn itself crossed, `runVoteSeats`' rule.
+      enforceCeilings(state, cfg, provider === 'claude');
+      entry = failedConfirmation(f.id, seat, err);
+      log.warn(`The confirmation of ${f.id} (${label}) failed, counted as cannot-tell: ${entry.reason}`);
+    }
+    record.findings.push(entry);
+    saveState(state);
+  }
+
+  // From the record, on every entry - including a resume that bought nothing -
+  // so the file always says what state says.
+  artifact(state, `final-fix-confirm-${round}.json`, { round, since: record.since, scope, findings: record.findings });
+  const found = record.findings.filter((c) => list.some((f) => f.id === c.id));
+  const count = (v: ConfirmVerdict): number => found.filter((c) => c.counted === v).length;
+  recordAndSay(
+    state,
+    found.every((c) => c.counted === 'fixed') ? 'ok' : 'warn',
+    'final_fix_confirmed',
+    `Final fix checked: ${confirmCounts(found)}`,
+    {
+      round,
+      fixed: count('fixed'),
+      stillPresent: count('still-present'),
+      cannotTell: count('cannot-tell'),
+      findings: found.map((c) => ({ id: c.id, counted: c.counted, source: c.source })),
+    },
+  );
+
+  if (claims.length > 0) {
+    if (followUpsInputsRepaired(state) && hasArtifact(state, 'FOLLOW-UPS.md')) {
+      log.warn(
+        `FOLLOW-UPS.md was kept as it was, because what it is written from was repaired on load; ` +
+          `the confirmations are in final-fix-confirm-${round}.json.`,
+      );
+    } else {
+      writeFollowUps(state, plan);
+    }
+  }
 }
 
 /**
@@ -2567,7 +2965,11 @@ function renderOutstanding(
       // answering "and is it gone" (#113).
       const after = reproductionAt(f, 'final-fix');
       const proof = after === null ? '' : `\n*Reproducer:* ${describeOutcome(after)}\n`;
-      return `## ${f.title} \`${f.id}\`\n\n${f.detail}\n\n*Suggested fix:* ${f.suggested_fix}\n${proof}`;
+      // What the confirmation after the gates found (#489). Only once they have
+      // passed: the pending form is written before it can have run.
+      const c = stage === 'settled' ? confirmationFor(state, f.id) : undefined;
+      const checked = c === undefined ? '' : `\n*After the final fix:* ${confirmLine(c)}\n`;
+      return `## ${f.title} \`${f.id}\`\n\n${f.detail}\n\n*Suggested fix:* ${f.suggested_fix}\n${proof}${checked}`;
     })
     .join('\n');
 
@@ -2579,8 +2981,32 @@ function renderOutstanding(
   const closed = findings.filter(
     (f) => reproductionAt(f, 'final-fix')?.verdict === 'did-not-reproduce',
   ).length;
+  // The rows no reproducer closed, and what the confirmation after the gates
+  // said of them (#489). With none, every sentence below is what it was.
+  const rest = findings.filter((f) => reproductionAt(f, 'final-fix')?.verdict !== 'did-not-reproduce');
+  const checked =
+    stage === 'settled'
+      ? rest.flatMap((f) => {
+          const c = confirmationFor(state, f.id);
+          return c === undefined || c.source !== 'seat' ? [] : [c];
+        })
+      : [];
+  const unchecked = rest.length - checked.length;
   const confirmation =
-    closed === 0
+    checked.length > 0
+      ? (closed === 0
+          ? ''
+          : `${closed} of them carried a test the reviewer wrote to make it fail, and those tests ` +
+            'pass now, which closes them by evidence. ') +
+        `After the gates passed, a fresh read-only turn shown only the claim and ` +
+        `${confirmScopeOf(state.finalFixConfirmations) === 'whole-run' ? "the run's whole diff" : "the fix's diff"} ` +
+        `checked ${closed === 0 ? (rest.length === 1 ? 'it' : 'them') : 'the rest'}: ${confirmCounts(checked)} - ` +
+        'each is below. That check is a record; it reopened nothing.' +
+        (unchecked === 0
+          ? ''
+          : ` ${unchecked} of them ${unchecked === 1 ? 'was' : 'were'} worked on and nobody has confirmed ` +
+            `${unchecked === 1 ? 'it is' : 'they are'} gone.`)
+      : closed === 0
       ? 'So these were worked on, and nobody has confirmed they are gone.'
       : closed === findings.length
         ? 'Every one of them carried a test the reviewer wrote to make it fail, and every one of ' +
@@ -2752,8 +3178,25 @@ export function writeFollowUps(state: RunState, plan: Plan): string | null {
   const left = Array.isArray(state.unaddressed)
     ? [...new Map(state.unaddressed.filter(isUnaddressed).map((u) => [u.finding.id, u])).values()]
     : [];
+  // A guard-downgraded P1 the fixer marked fixed has no entry above, and gets
+  // one when the confirmation after the gates did not confirm it gone (#489):
+  // a P1-grade claim nobody confirmed is worth a person's eye.
+  const record = state.finalFixConfirmations;
+  const unconfirmed =
+    record === undefined || record.round !== state.reviewRound
+      ? []
+      : record.claims.filter((f): boolean => {
+          const c = confirmationFor(state, f.id);
+          return (
+            c !== undefined &&
+            c.counted !== 'fixed' &&
+            !left.some((l) => l.finding.id === f.id) &&
+            (Array.isArray(state.finalFixNonBlocking) ? state.finalFixNonBlocking : []).includes(f.id) &&
+            !isDeferrable(f)
+          );
+        });
 
-  if (deferred.length === 0 && scope.length === 0 && left.length === 0) {
+  if (deferred.length === 0 && scope.length === 0 && left.length === 0 && unconfirmed.length === 0) {
     removeArtifact(state, 'FOLLOW-UPS.md');
     return null;
   }
@@ -2780,17 +3223,30 @@ export function writeFollowUps(state: RunState, plan: Plan): string | null {
           .join('\n'),
     );
   }
-  if (left.length > 0) {
+  if (left.length > 0 || unconfirmed.length > 0) {
+    const verdictLine = (id: string): string => {
+      const c = confirmationFor(state, id);
+      return c === undefined ? '' : `*After the final fix:* ${confirmLine(c)}\n\n`;
+    };
     sections.push(
       '## Left by the final fix round\n\n' +
-        left
-          .map(
+        [
+          ...left.map(
             ({ finding: f, outcome, reason }) =>
               `### ${f.title} \`${f.id}\`\n\n*Severity:* ${f.severity}\n\n` +
               `*Fixer's disposition:* ${UNADDRESSED_LABEL[outcome]}${reason === '' ? '' : ` - ${reason}`}\n\n` +
+              verdictLine(f.id) +
               `${f.detail}\n\n*Suggested fix:* ${f.suggested_fix}\n`,
-          )
-          .join('\n'),
+          ),
+          ...unconfirmed.map(
+            (f) =>
+              `### ${f.title} \`${f.id}\`\n\n*Severity:* ${f.severity}\n\n` +
+              (f.downgraded === undefined ? '' : `*Raised as:* ${f.downgraded.from} - ${f.downgraded.reason}\n\n`) +
+              `*Fixer's disposition:* fixed\n\n` +
+              verdictLine(f.id) +
+              `${f.detail}\n\n*Suggested fix:* ${f.suggested_fix}\n`,
+          ),
+        ].join('\n'),
     );
   }
 
@@ -2840,10 +3296,9 @@ export function reconcileFollowUps(state: RunState): string | null {
   // left". Only this resume-time pass needs it: `unaddressed` is written at the
   // end of a review, after which the only other writer is a resumed final
   // round, whose fresh record is trustworthy and is rendered as usual.
-  const repaired = state.events.some(
-    (e) => e.type === 'state_repaired' && e['field'] === 'unaddressed',
-  );
-  if (repaired && hasArtifact(state, 'FOLLOW-UPS.md')) return path.join(state.dir, 'FOLLOW-UPS.md');
+  if (followUpsInputsRepaired(state) && hasArtifact(state, 'FOLLOW-UPS.md')) {
+    return path.join(state.dir, 'FOLLOW-UPS.md');
+  }
   return writeFollowUps(state, plan);
 }
 
@@ -6586,15 +7041,7 @@ async function runReview(
             // says.
             exempt: (f) => reproducerOutcomesOf(f).some((o) => o.verdict === 'reproduced'),
             prompt: (f) => {
-              // The diff parts its evidence cites, or every part when it cites
-              // none of them: a claim about a file the diff never touched is
-              // still a claim about this change, and the verifier can read the
-              // rest of the tree.
-              const cited = new Set(
-                readEvidence(f.evidence).flatMap((e) => (typeof e.path === 'string' ? [e.path] : [])),
-              );
-              const touching = chunks.filter((c) => c.files.some((file) => cited.has(file)));
-              const shown = touching.length > 0 ? touching : chunks;
+              const shown = chunksCitedBy(f, chunks);
               return P.votePrompt(
                 {
                   title: f.title,

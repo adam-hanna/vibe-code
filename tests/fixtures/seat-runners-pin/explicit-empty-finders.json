@@ -447,7 +447,8 @@
       "oscillationThreshold": 3,
       "convergenceWindow": 3,
       "stallAfter": 3,
-      "fixNonBlocking": true
+      "fixNonBlocking": true,
+      "confirmFinalFix": true
     },
     "budget": {
       "maxCostUsd": 25,

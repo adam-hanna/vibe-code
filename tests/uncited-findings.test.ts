@@ -174,7 +174,8 @@ test('a P1 citing a real file still blocks, and still buys its fix round', async
 
   await orchestrate(
     state,
-    config(),
+    // About grounding, not the confirmation after the final fix (#489).
+    config({ confirmFinalFix: false }),
     true,
     agents(
       {
@@ -207,7 +208,8 @@ test('a citation in the reviewing agent path convention resolves', async () => {
 
   await orchestrate(
     state,
-    config(),
+    // About grounding, not the confirmation after the final fix (#489).
+    config({ confirmFinalFix: false }),
     true,
     agents(
       {
@@ -232,7 +234,8 @@ test('an artifact citation resolves against the run directory', async () => {
 
   await orchestrate(
     state,
-    config(),
+    // About grounding, not the confirmation after the final fix (#489).
+    config({ confirmFinalFix: false }),
     true,
     agents(
       {

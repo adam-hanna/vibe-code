@@ -1464,6 +1464,85 @@ is what does now; `false` restores the earlier loop exactly, on both sides.
   whole. `unaddressed` is only present in a checkpoint at or after the final fix, whose tree and
   dispositions the fork shares.
 
+## Confirming the final fix after its gates (#489)
+
+The final fix is the round nobody reviews again, so before this OUTSTANDING.md could say no more
+than that its findings were *worked on, and nobody has confirmed they are gone*, unless a reproducer
+happened to settle one. `loop.confirmFinalFix` (default on) adds one check per finding, and the
+check can buy nothing.
+
+- **When: after `runGate` passes, before `finaliseOutstanding`.** `confirmFinalFix` is the first
+  thing in the `finalFixDone` branch of `reviewPhase`, so the settled OUTSTANDING.md is written once
+  with the verdicts in it. It is not in `runFinalFix`, because the gates have not passed there, and a
+  verdict on a tree that fails its gates is about the wrong tree. A final fix that breaks the suite
+  never reaches it.
+- **Which findings.** Every tolerated P1 (`state.outstanding`), and every finding the round carried
+  with `downgraded.from === 'P1'` (from `state.finalFixNonBlocking`). That second set includes a P1
+  a review-time reproducer moved down. Nothing else: no ordinary P2, and no deferred or vote-moved
+  finding, which never reaches the round. The downgraded claims are kept whole on
+  `state.finalFixConfirmations.claims` when the round starts, because one the fixer marked `fixed` is
+  kept nowhere else.
+- **A reproducer pass skips the turn.** A finding whose `final-fix` reproducer outcome is
+  `did-not-reproduce` is recorded `fixed` with source `reproducer`. An observed pass beats an opinion
+  and costs nothing more.
+- **The seat: fresh, read-only, on the other vendor when the run uses it.** `confirmSeat` picks the
+  vendor the implementer is not on, provided some enabled role or a review or critique seat already
+  uses it (`enabledRolesFor`, `seatProviders`). Otherwise it picks the implementer's own vendor, and
+  the record says `sharesImplementerVendor`. The setting is on by default, and preflight only warns
+  about a vendor no enabled role holds, so a single-vendor run with the other CLI missing would
+  otherwise buy a failed turn on every final fix. Either way the seat is `seatTable(...,
+  CONFIRM_SCHEMA)` on `seatSlot`, never `main` and never a resumed thread. It uses the reviewer's
+  `model` and `effort` settings when the reviewer sits on that vendor, and the vendor's defaults otherwise.
+  Labels are `confirm-<round>-<n>`.
+- **What it is shown.** `confirmPrompt` gets the claim's four `VoteClaim` fields, never the id, the
+  severity, who raised it, what the fixer said about it, or the fixer's report. It also gets the
+  diff parts the claim cites (the vote's `chunksCitedBy`), the plan, the out-of-scope list, the
+  reviewer's environment block and REVIEW.md. The diff runs from HEAD as the final fix began
+  (`finalFixConfirmations.since`, the commit before the `final-fix` checkpoint) to the **working
+  tree**, through `diffChunks(..., { toWorkingTree: true })`. Taking it to HEAD would be wrong:
+  `maybeCommit` tolerates a failed commit, so a verify fix after the final fix can pass the gate
+  without being committed, and `since..HEAD` would leave it out. The anchor is kept only when the
+  round starts under `git.commitEachRound`; with it off, or with no recorded anchor, the prompt
+  shows the whole run's diff and says so (`scope: whole-run`), and so does OUTSTANDING.md. The
+  intent-to-add that makes new files visible must succeed for this read, unlike the review's: a
+  refusal (an index lock a gate left) would leave a diff without them, so it counts as a diff that
+  could not be read. A citation the state reader could not read back is not stored with the
+  verdict, so a reload never drops the verdict and buys it again.
+- **Counting fails closed**, as a ballot does. A `fixed` whose evidence resolves to nothing counts
+  `cannot-tell` (`countConfirmation`), and the record keeps both. `still-present` needs no evidence.
+  An answer `parseConfirm` cannot read, and a failed turn, count `cannot-tell` with the failure as
+  the reason. A diff that cannot be read buys no turn and counts `cannot-tell` with source `unread-diff` and no seat, so OUTSTANDING.md says no check ran rather than naming one. `Escalation` and
+  `Cancelled` pass through, and a failed turn's ceiling is enforced before the next one, as in
+  `runVoteSeats`.
+- **It cannot buy anything.** A verdict never moves a severity, adds a finding, starts a round or
+  changes the exit code, and the branch still `break`s after it. This is the final fix's termination
+  property, one round and never two: a `still-present` here is a record for a person, not a reason
+  for another round.
+- **Resume.** Each verdict is pushed to `state.finalFixConfirmations.findings` and saved as it
+  arrives, so a resume re-entering the branch buys only the missing ones. The record's reader is
+  `readFinalFixConfirmations`: a damaged verdict is dropped and bought again, and a damaged
+  container drops the key. `final-fix-confirm-<round>.json` is rewritten from the record on every
+  entry, including a resume that bought nothing, so a stop between the two writes cannot leave it
+  stale. The `final_fix_confirmed` event and the end-of-run count are said again on such a resume,
+  as `recordJudgeEditedAfterReview` is.
+- **Where it goes.** In OUTSTANDING.md, each checked row gets an *After the final fix:* line, and the
+  summary sentence names the counts instead of "nobody has confirmed they are gone". A row with no
+  verdict, and every row of the pending form, reads as before. In FOLLOW-UPS.md, a downgraded P1's
+  *Left by the final fix round* entry carries the line. One the fixer marked `fixed` gets an entry
+  there only when the check did not confirm it gone. `followUpsInputsRepaired` applies
+  `reconcileFollowUps`' rule here too: when `unaddressed` or the confirmation record was repaired on
+  load, the existing file is kept rather than rewritten from what survived, and the verdicts stay in
+  the artifact.
+- **Off is byte-identical.** With the setting off, no record is written in `runFinalFix`, no turn
+  runs, and every rendering takes its old path.
+- **Ordinary fix rounds re-run reproducers too: a record only.** After `runFixRound`'s commit,
+  `recordFixReproductions` re-runs, once each, the reproducer of every finding the fixer marked
+  `fixed` whose review-time reproducer `reproduced`. It uses `confirmFixed`'s discipline (empty
+  `passedGates`), `at: 'fix'` and a `round` on the `reproducer_observed` event, and stores the
+  result on `state.fixReproductions`. Unreadable dispositions re-run nothing. No prompt reads the
+  result yet: rendering it into the fixer's or the next reviewer's prompt is a later change, so every
+  prompt here is byte-identical. It follows `verify.reproducers` and has no setting of its own.
+
 ## The repository's REVIEW.md (#389)
 
 `src/review-md.ts`. A repository's owners add their own review standards in a root
