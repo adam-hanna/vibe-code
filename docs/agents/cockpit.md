@@ -485,6 +485,15 @@ they are waiting on. Four things in it are worth carrying:
     pane then draw no tolerance badge and no gate sentence (`gateSentence`). It
     read them as `0` and `false` once, and an opened run's clean review said
     *tolerance P1≤0 · The gate blocked this round.* (#437).
+    **Except the round a gate passed, where an approval event says so** (#505).
+    `plan_approved.carried` and `review_approved.carriedAndFixed` are durable, so
+    the replay ties each to the round of the last judge turn of its phase charged
+    before it and gives that round's census `pass: true`, `reason: null` and the
+    ids as `tolerated`, which is what the Summary's carried count reads. An
+    approval without the field (the clean and P3-only reviews, and archives older
+    than the field) attaches nothing, so the round still has no gate sentence and a
+    run with no such event still draws `—`. `tolerance` stays null: no event
+    records it.
 
   `exit` travels beside the steps rather than among them, because a `result` is
   not narration — it is the frame that answers a request — and a status this

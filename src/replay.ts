@@ -403,6 +403,81 @@ function say(id: string, message: string, data: Record<string, unknown>): Narrat
 }
 
 /**
+ * Which ids each approval event says its gate carried, or null where it says none
+ * that can be read (#505).
+ *
+ * Untrusted stored input, read on `validate.ts`'s terms: a field that is not an
+ * array is no answer at all, and an entry that is not an id the loop could have
+ * written - `parseFinding` trims every id it keeps - is dropped rather than
+ * repaired into one. An empty array is an answer: the gate passed carrying
+ * nothing, and the card says None.
+ */
+function carriedIds(raw: unknown): string[] | null {
+  if (!Array.isArray(raw)) return null;
+  const ids = raw.filter((x): x is string => typeof x === 'string' && x !== '' && x === x.trim());
+  return [...new Set(ids)];
+}
+
+/**
+ * The gate decisions the run recorded, keyed as the census is (`plan-2`,
+ * `review-1`), each with the ids that gate carried (#505).
+ *
+ * **A census is narration with no event**, so an opened run's census had counts
+ * and no decision, and #503's Summary drew `—` over a run whose `state.events`
+ * says plainly what it carried: `plan_approved.carried` and
+ * `review_approved.carriedAndFixed`.
+ *
+ * **Neither event names its round, so the round is read from where the event
+ * sits.** A gate decides over the findings of the judge round that just ran: a
+ * plan approval follows its critique round's turns (the critic, its finders, its
+ * verifiers' votes), and a review approval follows its review round's - with the
+ * final fix turn in between on the carrying road, which is not a judge turn and
+ * does not move the round. #394's acceptance on a person's demotion is no
+ * exception: it gates the pending findings of the last critique, before any
+ * revision runs. So the round is the one named by the last judge turn of that
+ * phase charged at or before the approval. A failed turn is passed over: it
+ * wrote no report, so its round has no census and gated nothing. An approval
+ * with no readable time, or no judge turn before it, ties to no round and is
+ * left out rather than filed under a guess.
+ *
+ * **Only an event that states its ids counts.** The clean review and the
+ * P3-only review record `review_approved` with no `carriedAndFixed`, and today
+ * that does mean nothing was carried - but the field has not always been there:
+ * before it, review approvals recorded `outstanding` (e3efb29) or nothing at all,
+ * and a plan approval recorded no `carried`. An absent field is therefore not
+ * read as an empty one, and the round keeps `—` rather than a None nobody
+ * recorded. The counts never stand in for a decision either.
+ *
+ * Two approvals of one round (a resume that passes the gate again) are one
+ * decision: their ids are merged, each once.
+ */
+function gateDecisions(state: RunState, turns: readonly ChargedTurn[]): Map<string, string[]> {
+  const decided = new Map<string, string[]>();
+  for (const event of state.events) {
+    const phase = event.type === 'plan_approved' ? 'plan' : event.type === 'review_approved' ? 'review' : null;
+    if (phase === null) continue;
+    const ids = carriedIds(phase === 'plan' ? event['carried'] : event['carriedAndFixed']);
+    if (ids === null) continue;
+    const at = ms(typeof event['at'] === 'string' ? event['at'] : null);
+    if (at === null) continue;
+    const judge = phase === 'plan' ? 'critique' : 'review';
+    let round: number | null = null;
+    for (const turn of turns) {
+      if (turn.at > at) break;
+      if (turn.failed) continue;
+      const seat = seatOf(turn.label);
+      if (seat === null || seat.phase !== judge || seat.round === null) continue;
+      if (seat.kind !== judge && seat.kind !== 'vote') continue;
+      round = seat.round;
+    }
+    if (round === null) continue;
+    const key = `${phase}-${String(round)}`;
+    decided.set(key, [...new Set([...(decided.get(key) ?? []), ...ids])]);
+  }
+  return decided;
+}
+
+/**
  * Say a finished run again, in the order it happened.
  *
  * Pure, and that is what makes it testable at all: the app has no jsdom, so a
@@ -465,6 +540,8 @@ export function replayRun(state: RunState, sources: ReplaySources): Replay {
     runCostUsd: state.costUsd,
     codexTokens: state.codexTokens ?? null,
   };
+
+  const decided = gateDecisions(state, turns);
 
   for (const turn of turns) {
     const seat = seatOf(turn.label);
@@ -571,6 +648,13 @@ export function replayRun(state: RunState, sources: ReplaySources): Replay {
       const census = sources.censuses.find((c) => c.phase === phase && c.round === round);
       if (census !== undefined && !censusSaid.has(key)) {
         censusSaid.add(key);
+        // The gate's decision, where an approval event recorded it (#505). In
+        // the live census's shape - `pass`, `reason` null on a pass, and the
+        // `tolerated` ids - so the window's Summary counts an opened run's
+        // carried findings off the same fields it reads in a live one. A round
+        // no approval is tied to gets none of the three, and the card keeps
+        // `—`: the counts alone never say the gate passed.
+        const tolerated = decided.get(key);
         push(
           turn.at,
           // The sentence counts from one, as the live headings do; the key and
@@ -578,6 +662,7 @@ export function replayRun(state: RunState, sources: ReplaySources): Replay {
           say('findings_reported', `${phase} round ${String(round + 1)}`, {
             phase,
             counts: census.counts,
+            ...(tolerated === undefined ? {} : { pass: true, reason: null, tolerated }),
           }),
         );
       }
