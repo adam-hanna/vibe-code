@@ -6,6 +6,7 @@ import type {
   Assumption,
   CheckKind,
   Confidence,
+  ConfirmVerdict,
   Disposition,
   Evidence,
   EvidenceKind,
@@ -295,6 +296,26 @@ export function parseVote(raw: unknown): { vote: VoteValue; reason: string; evid
   };
 }
 
+const CONFIRM_VERDICTS: readonly ConfirmVerdict[] = ['fixed', 'still-present', 'cannot-tell'];
+
+/**
+ * One confirmation after the final fix, as the turn returned it (#489).
+ *
+ * `parseVote`'s twin, and strict for its reason: an answer that cannot be read
+ * is a failed turn, counted `cannot-tell` - so a malformed answer can never
+ * read as `fixed`. `evidence` comes back as given; `groundVoteEvidence` decides
+ * whether it resolves.
+ */
+export function parseConfirm(raw: unknown): { verdict: ConfirmVerdict; reason: string; evidence: unknown[] } {
+  const o = record(raw, 'confirmation', raw);
+  const evidence = o['evidence'];
+  return {
+    verdict: oneOf(o, 'verdict', CONFIRM_VERDICTS, 'confirmation', raw),
+    reason: str(o, 'reason', 'confirmation', raw),
+    evidence: Array.isArray(evidence) ? (evidence as unknown[]) : [],
+  };
+}
+
 /**
  * The reviewer's per-file verdicts on changes to the judge (#112).
  *
@@ -498,29 +519,34 @@ export function readReproducer(raw: unknown): Reproducer | null {
 export function reproducerOutcomesOf(f: Finding): ReproducerOutcome[] {
   const raw: unknown = f.reproducerOutcomes;
   if (!Array.isArray(raw)) return [];
-  return raw
-    .map((entry): ReproducerOutcome | null => {
-      if (!isRecord(entry)) return null;
-      const verdict = entry['verdict'];
-      const at = entry['at'];
-      if (!(VERDICTS_REPRODUCED as readonly unknown[]).includes(verdict)) return null;
-      if (at !== 'review' && at !== 'final-fix') return null;
-      const gate = entry['gate'];
-      const command = entry['command'];
-      const reason = entry['reason'];
-      const exitCode = entry['exitCode'];
-      return {
-        verdict: verdict as ReproducerVerdict,
-        at,
-        gate: typeof gate === 'string' ? gate : null,
-        command: typeof command === 'string' ? command : null,
-        baseline: entry['baseline'] === 'gate-passed' ? 'gate-passed' : 'not-observed',
-        reason: typeof reason === 'string' ? reason : null,
-        archived: typeof entry['archived'] === 'string' ? (entry['archived'] as string) : null,
-        ...(typeof exitCode === 'number' && Number.isInteger(exitCode) ? { exitCode } : {}),
-      };
-    })
-    .filter((o): o is ReproducerOutcome => o !== null);
+  return raw.map(readReproducerOutcome).filter((o): o is ReproducerOutcome => o !== null);
+}
+
+/**
+ * One stored observation, or null for anything the writer does not produce.
+ * Shared by a finding's list above and `RunState.fixReproductions` (#489), so
+ * the two records cannot come to disagree about what an outcome is.
+ */
+export function readReproducerOutcome(entry: unknown): ReproducerOutcome | null {
+  if (!isRecord(entry)) return null;
+  const verdict = entry['verdict'];
+  const at = entry['at'];
+  if (!(VERDICTS_REPRODUCED as readonly unknown[]).includes(verdict)) return null;
+  if (at !== 'review' && at !== 'fix' && at !== 'final-fix') return null;
+  const gate = entry['gate'];
+  const command = entry['command'];
+  const reason = entry['reason'];
+  const exitCode = entry['exitCode'];
+  return {
+    verdict: verdict as ReproducerVerdict,
+    at,
+    gate: typeof gate === 'string' ? gate : null,
+    command: typeof command === 'string' ? command : null,
+    baseline: entry['baseline'] === 'gate-passed' ? 'gate-passed' : 'not-observed',
+    reason: typeof reason === 'string' ? reason : null,
+    archived: typeof entry['archived'] === 'string' ? (entry['archived'] as string) : null,
+    ...(typeof exitCode === 'number' && Number.isInteger(exitCode) ? { exitCode } : {}),
+  };
 }
 
 /**

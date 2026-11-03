@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ANSWERS_SCHEMA, FINDINGS_SCHEMA, PLAN_SCHEMA, REVIEW_SCHEMA, REVISE_SCHEMA, VOTE_SCHEMA } from '@src/schemas.js';
+import { ANSWERS_SCHEMA, CONFIRM_SCHEMA, FINDINGS_SCHEMA, PLAN_SCHEMA, REVIEW_SCHEMA, REVISE_SCHEMA, VOTE_SCHEMA } from '@src/schemas.js';
 import { readEvidenceEntry } from '@src/validate.js';
 
 /**
@@ -30,6 +30,8 @@ const SCHEMAS: ReadonlyArray<readonly [string, unknown]> = [
   ['ANSWERS_SCHEMA', ANSWERS_SCHEMA],
   ['VOTE_SCHEMA', VOTE_SCHEMA],
   ['REVISE_SCHEMA', REVISE_SCHEMA],
+  // The confirmation after the final fix (#489).
+  ['CONFIRM_SCHEMA', CONFIRM_SCHEMA],
 ];
 
 const isRecord = (v: unknown): v is Record<string, unknown> =>

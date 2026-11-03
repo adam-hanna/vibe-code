@@ -408,7 +408,8 @@ test('OUTSTANDING.md is rewritten when the final fix round left without it', asy
   state.outstanding = [p1('carried-one')];
 
   const calls: string[] = [];
-  await orchestrate(state, config(), true, agents({}, calls));
+  // About the record, not the confirmation after the final fix (#489).
+  await orchestrate(state, config({ confirmFinalFix: false }), true, agents({}, calls));
 
   const file = path.join(state.dir, 'OUTSTANDING.md');
   assert.equal(existsSync(file), true);
@@ -439,7 +440,8 @@ test('the final fix round consumes its findings and leaves the record behind', a
   const calls: string[] = [];
   await orchestrate(
     state,
-    config(),
+    // About the record, not the confirmation after the final fix (#489).
+    config({ confirmFinalFix: false }),
     true,
     agents({ claude: () => 'fixed it', codex: () => report([p1('tolerated-one')]) }, calls),
   );
@@ -466,7 +468,8 @@ test('a half-finished final fix is completed before its record is written', asyn
   const calls: string[] = [];
   await orchestrate(
     state,
-    config(),
+    // About the record, not the confirmation after the final fix (#489).
+    config({ confirmFinalFix: false }),
     true,
     agents(
       {

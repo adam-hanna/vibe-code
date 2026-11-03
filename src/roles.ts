@@ -610,6 +610,41 @@ export function seatTable(
   return { ...roles, [role]: schema === undefined ? spec : { ...spec, schema } };
 }
 
+/**
+ * The seat that confirms a carried finding after the final fix (#489).
+ *
+ * The vendor the implementer is not on, because a seat judging whether its
+ * own vendor's fix worked is the self-preference the vote's seats exist to avoid - but
+ * only when this run already uses that vendor somewhere, in a role or a seat.
+ * The setting is on by default, and preflight only warns about a vendor no
+ * enabled role holds: a single-vendor run, with the other CLI not installed,
+ * would otherwise buy a guaranteed failed turn on every final fix. So that run
+ * confirms on the implementer's own vendor instead, still on a fresh read-only
+ * conversation (`seatSlot`, never `main`), and the record says so.
+ *
+ * The reviewer's `model` and `effort` settings when the reviewer sits on the
+ * chosen vendor; otherwise that vendor's own defaults, named by nothing.
+ */
+export function confirmSeat(
+  cfg: Config,
+  roles: RoleTable = rolesFor(cfg),
+): { setting: RoleSetting; sharesImplementerVendor: boolean } {
+  const own = roles.implementer.provider;
+  const other: AgentProvider = own === 'claude' ? 'codex' : 'claude';
+  const used = enabledRolesFor(other, cfg, roles).length > 0 || seatProviders(cfg).includes(other);
+  const provider = used ? other : own;
+  const reviewer = roles.reviewer;
+  const setting: RoleSetting =
+    reviewer.provider === provider
+      ? {
+          provider,
+          ...(reviewer.model === undefined ? {} : { model: reviewer.model }),
+          ...(reviewer.effort === undefined ? {} : { effort: reviewer.effort }),
+        }
+      : { provider };
+  return { setting, sharesImplementerVendor: provider === own };
+}
+
 /** Which config section a seat list is read from: the review's (#388) or the critique's (#405). */
 export type SeatSection = 'review' | 'critique';
 

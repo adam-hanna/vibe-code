@@ -141,6 +141,13 @@ export const DEFAULTS: Config = {
     // path already has, never re-reviewed, and the fixer still judges each under
     // #228's scope rule. What it leaves goes to FOLLOW-UPS.md.
     fixNonBlocking: true,
+    // On (#489). The final fix round is never reviewed again, so OUTSTANDING.md
+    // could only say its findings were worked on and unconfirmed. One fresh,
+    // read-only turn per carried or guard-downgraded P1 - one, at the default
+    // `p1Tolerance` - checks whether each is still present after the gates
+    // pass, and the verdict is recorded and rendered. It buys nothing: no
+    // round, no severity, no exit code.
+    confirmFinalFix: true,
   },
   budget: {
     // NOT a spend limit on a Claude subscription - the CLI derives this from
@@ -905,6 +912,9 @@ function validate(cfg: Config): void {
   }
   if (typeof cfg.loop.fixNonBlocking !== 'boolean') {
     throw new Error('loop.fixNonBlocking must be true or false');
+  }
+  if (typeof cfg.loop.confirmFinalFix !== 'boolean') {
+    throw new Error('loop.confirmFinalFix must be true or false');
   }
   for (const key of [
     'maxPlanRounds',

@@ -38,6 +38,10 @@ import type { Handlers } from './helpers/loop-harness.js';
  * Every run here starts from a base commit holding `tests/x.test.ts`, then the
  * run's own work committed on top, so `<base>..HEAD` is never empty - which is
  * the case where reading the change list as a commit range would go wrong.
+ *
+ * A case that asserts the turn sequence sets `loop.confirmFinalFix: false`:
+ * the confirmation after the final fix (#489) adds a turn these cases are not
+ * about, and `final-fix-confirm.test.ts` pins it.
  */
 
 const TEST = 'tests/x.test.ts';
@@ -141,7 +145,7 @@ const paths = (files: readonly FileChange[] | undefined): string[] => (files ?? 
 test('the final fix edits a test the review saw unchanged: listed, narrated once, named at the end', async () => {
   const state = judgeRun('vibe-jar-unchanged-');
   let atFix: TestChanges | undefined;
-  const d = await drive(state, config({}, committing()), {
+  const d = await drive(state, config({ confirmFinalFix: false }, committing()), {
     codex: oneP1(),
     claude: (label) => {
       if (label === 'final-fix-1') {
@@ -218,7 +222,7 @@ test('a test listed at the review that no seat judged says so, and never that it
 
 test('one seat judged it and another did not: the earlier verdict is still named as for earlier content', async () => {
   const state = judgeRun('vibe-jar-seats-', (s) => write(s, TEST, 'test("x", () => { expect(2).toBe(2); });\n'));
-  const cfg = config({}, { ...committing(), review: { ...DEFAULTS.review, finders: ['codex'] } });
+  const cfg = config({ confirmFinalFix: false }, { ...committing(), review: { ...DEFAULTS.review, finders: ['codex'] } });
   const d = await drive(state, cfg, {
     codex: (label) => {
       if (label === 'review-0') {
@@ -325,7 +329,7 @@ test('a passing review with one P2 to address and no P1 lists a final-fix test e
 
 test('a final fix that touches only source files records no list, says nothing new, and prints nothing', async () => {
   const state = judgeRun('vibe-jar-source-');
-  const d = await drive(state, config({}, committing()), {
+  const d = await drive(state, config({ confirmFinalFix: false }, committing()), {
     codex: oneP1(),
     claude: (label) => {
       if (label === 'final-fix-1') write(state, 'src/impl.ts', 'export const impl = 2;\n');
@@ -346,7 +350,7 @@ test('a final fix that touches only source files records no list, says nothing n
 test('a verify fix after the final fix that edits vibe.config.json is listed', async () => {
   const state = judgeRun('vibe-jar-verifyfix-');
   // Run 1 is before the review, run 2 after the final fix, run 3 after the verify fix.
-  const cfg = config({}, { ...committing(), ...verifying(state, { failRuns: [2] }) });
+  const cfg = config({ confirmFinalFix: false }, { ...committing(), ...verifying(state, { failRuns: [2] }) });
   const d = await drive(state, cfg, {
     codex: oneP1(),
     claude: (label) => {
@@ -552,7 +556,7 @@ test('a rename git pairs differently at the end does not make an unchanged file 
 
 test('a final fix that dies inside its turn resumes on the snapshot its first attempt took', async () => {
   const state = judgeRun('vibe-jar-resume-');
-  const cfg = config({}, committing());
+  const cfg = config({ confirmFinalFix: false }, committing());
   const seen: Narration[] = [];
   const first: string[] = [];
   await assert.rejects(
@@ -607,7 +611,7 @@ function pastFinalFix(prefix: string, seed: (state: RunState) => void = () => un
 test('a final fix with no snapshot says its edits could not be checked, and lists nothing', async () => {
   const state = pastFinalFix('vibe-jar-nosnap-');
   write(state, TEST, 'test("x", () => {});\n');
-  const d = await drive(state, config(), {
+  const d = await drive(state, config({ confirmFinalFix: false }), {
     codex: () => assert.fail('no review'),
     claude: () => assert.fail('no turn'),
   });
@@ -686,7 +690,7 @@ test('a comparison that fails clears a result an earlier process saved, and the 
 test('an add -N refused after the final fix gives no list at all, never an empty or partial one', async () => {
   const state = judgeRun('vibe-jar-lock-');
   // Run 1 is before the review; run 2, after the final fix, leaves the lock.
-  const d = await drive(state, config({}, locking(state, 2)), {
+  const d = await drive(state, config({ confirmFinalFix: false }, locking(state, 2)), {
     codex: oneP1(),
     claude: (label) => {
       if (label === 'final-fix-1') write(state, 'tests/new.test.ts', 'test("new", () => {});\n');

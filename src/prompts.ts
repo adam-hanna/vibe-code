@@ -1462,6 +1462,90 @@ ${planMd}
 ${block(BLOCK.json, RESPOND_WITH_JSON)}`;
 }
 
+/** What a confirmation after the final fix is shown of its diff (#489). */
+export type ConfirmScope = 'since-last-review' | 'whole-run';
+
+/**
+ * One confirmation after the final fix: is this defect, reported by an earlier
+ * review, still in the code? (#489)
+ *
+ * `votePrompt`'s rules, asked after the fact. The final fix round is never
+ * reviewed again, by design, so this is the one question asked of it, and the
+ * answer is a record: it moves nothing, buys nothing and cannot reopen the loop.
+ *
+ * **What it is never told, by construction.** It takes the four fields of the
+ * claim and nothing else of the finding, so no argument can carry the id, the
+ * severity, who raised it, what the fixer said it did with it, or the fixer's
+ * report. A seat told the fixer called it fixed would be grading the fixer's
+ * word rather than reading the code.
+ *
+ * `scope` says what the diff is. `since-last-review` is the commit the final
+ * fix started from to the working tree, which is the fix and any verification
+ * repair after it, committed or not. `whole-run` is the run's whole change, for
+ * a run that does not commit per round or recorded no starting commit: the
+ * prompt says so, rather than presenting it as the fix alone.
+ */
+export function confirmPrompt(
+  claim: VoteClaim,
+  changedFiles: readonly string[],
+  diff: string,
+  scope: ConfirmScope,
+  planMd: string,
+  outOfScope: readonly OutOfScopeItem[] | undefined,
+  environment?: EnvironmentFacts | null,
+  roles: RoleTable = ROLES,
+  reviewMd?: ReviewStandards | undefined,
+): string {
+  const since = scope === 'since-last-review';
+  return `You are checking whether one reported defect is still present in a code change. An earlier review of this change said the defect below existed. The code has since been changed to address it, and nobody has reviewed that change. Decide whether the defect is still there.
+
+Read the repository as needed - the diff is context, not the whole picture. Check the code the claim points at and the code around it, and run the tests if that is the fastest way to settle the question.
+
+${environmentBlock(environment, 'reviewer', roles)}
+
+## How to answer
+
+Judge **whether the defect the claim describes is still present** in the code as it stands - not how serious it is, whether it was worth fixing, or how well the change reads. Those are not your question.
+
+- **\`fixed\`** - the defect is no longer there. Give a concrete reason, and evidence for that reason a reader can open: the code that shows it, cited the way a finding cites code. A \`fixed\` answer whose evidence resolves to nothing is counted as \`cannot-tell\`.
+- **\`still-present\`** - the defect is still there. You need no evidence beyond the claim's own.
+- **\`cannot-tell\`** - anything in between. If you are in doubt, this is your answer. It is not a failure.
+
+Your answer is recorded for a person to read. It does not start another round of work either way.${standardsSection(reviewMd, true)}
+
+## Evidence
+
+${VOTE_EVIDENCE}
+
+## The claim
+
+### ${claim.title}
+
+${claim.detail}${citation(claim, '\n\n')}
+
+*Suggested fix:* ${claim.suggested_fix}
+
+## Scope the plan declared
+
+${formatOutOfScope(outOfScope)}
+
+## ${since ? 'Files changed since the review' : 'Files changed by the whole run'}
+
+${since ? '' : "The change made after the review could not be separated from the rest of the run, so this is the run's whole change, and the code the claim points at may have been changed by any of it.\n\n"}${changedFiles.length > 0 ? changedFiles.map((f) => `- ${f}`).join('\n') : '(none detected)'}
+
+## ${since ? 'Diff since the review' : 'Diff of the whole run'}
+
+\`\`\`diff
+${diff || '(empty diff)'}
+\`\`\`
+
+## The plan this was implementing
+
+${planMd}
+
+${block(BLOCK.json, RESPOND_WITH_JSON)}`;
+}
+
 /** What a critique verifier is shown of the plan (#405): the plan and the three lists it states. */
 export type VotePlan = Pick<Plan, 'plan_md' | 'assumptions' | 'out_of_scope' | 'acceptance_criteria'>;
 

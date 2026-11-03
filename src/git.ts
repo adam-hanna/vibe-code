@@ -733,8 +733,21 @@ export interface DiffChunk {
 async function resolveDiffMode(
   cwd: string,
   baseSha: string | null,
-  options: { revealUntracked?: boolean } = {},
+  options: { revealUntracked?: boolean; toWorkingTree?: boolean } = {},
 ): Promise<{ prefix: string[]; whole: string }> {
+  if (baseSha && options.toWorkingTree === true) {
+    // **The base against the working tree, whatever HEAD is** (#489). The
+    // confirmation after the final fix reads this: a verification repair after
+    // that fix may have failed to commit (`maybeCommit` tolerates it), and the
+    // gate that just passed ran against the tree, not against HEAD - so
+    // `base..HEAD`, which the branch below prefers whenever it is non-empty,
+    // would show the fix and leave the repair out. Intent-to-add for the
+    // reason given below: new files appear, and no content is staged.
+    await git(cwd, ['add', '-N', '.'], { allowFail: true });
+    const prefix = ['diff', baseSha];
+    const { stdout: whole } = await git(cwd, prefix);
+    return { prefix, whole };
+  }
   if (baseSha) {
     let { stdout: whole } = await git(cwd, ['diff', `${baseSha}..HEAD`]);
     if (whole) return { prefix: ['diff', `${baseSha}..HEAD`], whole };
@@ -838,13 +851,21 @@ async function emptyTree(cwd: string): Promise<string | null> {
 export async function diffChunks(
   cwd: string,
   baseSha: string | null,
-  options: { maxChars?: number } = {},
+  /**
+   * `toWorkingTree` compares `baseSha` with the working tree rather than with
+   * HEAD (#489): the confirmation after the final fix, whose tree may hold an
+   * uncommitted verification repair. Absent for the review, which is unchanged.
+   */
+  options: { maxChars?: number; toWorkingTree?: boolean } = {},
 ): Promise<{ chunks: DiffChunk[]; files: string[]; changes: FileChange[] }> {
   const maxChars = options.maxChars ?? DIFF_MAX_CHARS;
   // `revealUntracked` because this is the REVIEW's read: a round that only added
   // files must not look empty to the reviewer. `diffSince` has its own reader and
   // is what the read frame reaches, so nothing there touches the index.
-  const { prefix, whole } = await resolveDiffMode(cwd, baseSha, { revealUntracked: true });
+  const { prefix, whole } = await resolveDiffMode(cwd, baseSha, {
+    revealUntracked: true,
+    ...(options.toWorkingTree === true ? { toWorkingTree: true } : {}),
+  });
 
   // Before the size branch, not after it: both paths return this list, and the
   // caller needs it for the prompt and for the coverage record even when there

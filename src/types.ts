@@ -261,6 +261,16 @@ export interface LoopConfig {
    * `false` restores the behaviour before #425 exactly.
    */
   fixNonBlocking: boolean;
+  /**
+   * Whether the final fix round's carried and guard-downgraded P1s are checked
+   * once more after the gates pass (#489): one fresh, read-only turn per
+   * finding, shown only the claim and the fix's diff, whose verdict is
+   * recorded and rendered and never buys anything - no round, no severity, no
+   * exit code. A finding whose own reproducer passed after the fix is recorded
+   * from that observation with no turn. `false` leaves every artifact and
+   * sentence as it was before #489.
+   */
+  confirmFinalFix: boolean;
 }
 
 /**
@@ -1233,9 +1243,11 @@ export interface ReproducerOutcome {
    * `review` is before the fix, and is what decides whether the finding blocks.
    * `final-fix` is after the round that is deliberately never re-reviewed, and
    * is the one thing that has ever been able to turn OUTSTANDING.md's *"worked
-   * on and unconfirmed"* into a fact.
+   * on and unconfirmed"* into a fact. `fix` is after an ordinary fix round
+   * (#489 part 3): a record only, on `RunState.fixReproductions`, and never on
+   * a finding the review reads.
    */
-  at: 'review' | 'final-fix';
+  at: 'review' | 'fix' | 'final-fix';
   /** The gate that ran it, or null when none could be resolved. */
   gate: string | null;
   /** What was executed - the configured gate's command, unchanged. Null when nothing ran. */
@@ -1251,6 +1263,46 @@ export interface ReproducerOutcome {
   reason: string | null;
   /** Where the file was kept under the run directory, or null when it was not. */
   archived: string | null;
+}
+
+/** What a confirmation said of a carried finding after the final fix (#489). */
+export type ConfirmVerdict = 'fixed' | 'still-present' | 'cannot-tell';
+
+/**
+ * One carried finding's verdict after the final fix (#489), in a ballot's
+ * shape: what was said, how it was counted, and why when the two differ.
+ */
+export interface FinalFixConfirmation {
+  id: string;
+  /** As said. A reproducer that passed after the fix says `fixed`. */
+  verdict: ConfirmVerdict;
+  /** As counted: a `fixed` whose evidence resolved to nothing is `cannot-tell`. */
+  counted: ConfirmVerdict;
+  /** A seat's turn, or the finding's own reproducer passing after the fix. */
+  source: 'seat' | 'reproducer';
+  /** Who took the turn, as a ballot names it. Absent for a reproducer. */
+  seat?: { provider: AgentProvider; model: string; sharesImplementerVendor: boolean };
+  reason: string;
+  evidence: Evidence[];
+  /** Why it was counted otherwise than said. Present only when `counted !== verdict`. */
+  countedReason?: string;
+}
+
+/** The final fix round's confirmations (#489). See `RunState.finalFixConfirmations`. */
+export interface FinalFixConfirmations {
+  /** The final fix round's number: `final-fix-<round>`, and `state.reviewRound` after it. */
+  round: number;
+  /** HEAD just before the final fix turn, or null when there was none to read. */
+  since: string | null;
+  /** The guard-downgraded P1s the round carried, kept whole: the fixer may have left no other copy. */
+  claims: Finding[];
+  findings: FinalFixConfirmation[];
+}
+
+/** The reproducers re-run after an ordinary fix round (#489 part 3). */
+export interface FixReproductions {
+  round: number;
+  outcomes: { id: string; outcome: ReproducerOutcome }[];
 }
 
 /** One finder's share of a finding's provenance. See `Finding.foundBy`. */
@@ -2339,6 +2391,23 @@ export interface RunState {
    * present without `judgeAtLastReview`.
    */
   judgeEditedAfterReview?: JudgeEditedAfterReview | undefined;
+  /**
+   * The final fix round's confirmations (#489): the claims it carried that a
+   * person would read as P1-grade, the commit the fix started from, and one
+   * verdict per finding, appended and saved as each arrives so a resume buys
+   * only the missing ones. Written on the save that starts the final round,
+   * and only while `loop.confirmFinalFix` is on. Nothing reads it to decide
+   * anything: the gate, the exit code and every round count are where they
+   * were.
+   */
+  finalFixConfirmations?: FinalFixConfirmations | undefined;
+  /**
+   * The reproducers re-run after the latest ordinary fix round (#489 part 3),
+   * for the findings the fixer marked fixed whose reproducer reproduced at
+   * review. A record only: no prompt reads it yet. Absent when that round ran
+   * none.
+   */
+  fixReproductions?: FixReproductions | undefined;
   /**
    * Who took the most recent review round's own turn (#393): `roles.reviewer`'s
    * provider and model as they were when that round's artifact was written.
