@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dispositionSummary, settlePlanDispositions } from '@src/dispositions.js';
-import { revisePlanPrompt } from '@src/prompts.js';
+import { fixPrompt, implementPrompt, revisePlanPrompt } from '@src/prompts.js';
 import { PLAN_SCHEMA, REVISE_SCHEMA } from '@src/schemas.js';
 import { validateStoredState } from '@src/stored.js';
 import { parsePlanDispositions, ShapeError } from '@src/validate.js';
@@ -44,7 +44,59 @@ test('a findings revision prompt is develop\'s with exactly the rebuttal sentenc
     '`plan_md` is what the implementer reads, and `dispositions` is not shown to it.';
   const golden = fixture('revise-findings.txt');
   assert.ok(golden.includes(before), 'the golden carries the sentence this change replaces');
-  assert.equal(revisePlanPrompt({ ...BASE, findings: BLOCKING, round: 1 }), golden.replace(before, after));
+  // #482 moved three more regions, each spliced rather than the fixture
+  // regenerated, so the assertion still proves nothing else in the prompt did.
+  let expected = golden.replace(before, after);
+  for (const [from, to] of PLAN_REVISION_482) {
+    assert.ok(expected.includes(from), `the golden carries ${JSON.stringify(from.slice(0, 40))}`);
+    expected = expected.replace(from, to);
+  }
+  assert.equal(revisePlanPrompt({ ...BASE, findings: BLOCKING, round: 1 }), expected);
+});
+
+/**
+ * What #482 changed in the findings revision, as `[develop's text, now]`.
+ *
+ * Case 2 of AGENTS.md: the pin held two defects. The block's heading and
+ * opening line called the plan critique a reviewer, and `fix breadth`'s last
+ * bullet asked for a three-way disposition in a prose report the planner never
+ * writes, beside `plan dispositions` asking for four in `dispositions`.
+ */
+const FIX_REPORT_BULLET =
+  '\n- In your report, state each finding\'s disposition (fixed, rebutted, or deferred)\n' +
+  '  and its reason, what you changed, **what else you\n' +
+  '  checked for the same class of problem**, and what you found. "Checked X and Y,\n' +
+  '  they were already correct" is useful; silence is not.';
+const PLAN_REVISION_482: readonly (readonly [string, string])[] = [
+  ['## Review findings\n', '## Findings against the plan\n'],
+  [
+    'An independent reviewer raised the following. ',
+    'The plan critique raised the following, except where a finding says a person raised it. ',
+  ],
+  ["The reviewer's proposed remedy is advisory;", "A finding's proposed remedy is advisory;"],
+  [FIX_REPORT_BULLET, ''],
+];
+
+test('a findings revision gives the planner one disposition instruction, and names the critique as the source (#482)', () => {
+  const prompt = revisePlanPrompt({ ...BASE, findings: BLOCKING, round: 1 });
+  assert.ok(prompt.includes('`not-addressed`'), 'the four-way `plan dispositions` instruction is there');
+  assert.ok(!prompt.includes('(fixed, rebutted, or deferred)'), 'the three-way prose disposition sentence is not');
+  assert.ok(!prompt.includes('In your report'), 'the planner writes no report to state it in');
+  assert.ok(!/independent reviewer/i.test(prompt), 'the critique is not called a reviewer');
+  assert.ok(prompt.includes('The plan critique raised the following'));
+  // The rest of `fix breadth` still reaches the planner.
+  assert.ok(prompt.includes('## Fix breadth\n\nFix the cause, not the line.'));
+  assert.ok(prompt.includes('Resolve valid defects with the simplest coherent repair.'));
+});
+
+test('every other `fix breadth` caller still asks for the three-way prose disposition (#482)', () => {
+  // The bullet is right where a report is written: the implement, fix and
+  // verify-fix turns. Their pinned bytes are held by `fix-dispositions.test.ts`
+  // against `fix-round1.txt` and by `implementer-report-prompt.test.ts`; this
+  // says the split kept the bullet on them, not only that their bytes match.
+  const fix = fixPrompt(BLOCKING, 1);
+  assert.ok(fix.includes(FIX_REPORT_BULLET));
+  assert.ok(implementPrompt(PLAN_MD).includes(FIX_REPORT_BULLET));
 });
 
 // ---- the schema ------------------------------------------------------------

@@ -273,8 +273,19 @@ repair or an evidence-backed rebuttal resolves it.`;
 /**
  * The other half: a fixer that changes only the reported line reproduces the
  * same loop from the implementation side.
+ *
+ * Kept in two pieces (#482) so the plan revision can be given the checks
+ * without the last bullet. That bullet asks for a three-way disposition in a
+ * prose report, which is right for the implement, fix and verify-fix turns:
+ * each writes a report, and a review fix turn's `FIX_SCHEMA` carries it as
+ * `report`. A plan revision writes no report. It answers in `REVISE_SCHEMA`'s
+ * `dispositions`, four-way, as `PLAN_DISPOSITIONS` says in the same prompt, so
+ * the planner was being given two instructions that disagreed. `FIX_BREADTH` is
+ * the concatenation, byte for byte what every other caller always sent, and the
+ * `fix breadth` block it renders through is unchanged: an override still
+ * replaces the whole block on every turn, the planner's included.
  */
-const FIX_BREADTH = `## Fix breadth
+const FIX_BREADTH_CHECKS = `## Fix breadth
 
 Fix the cause, not the line.
 
@@ -297,7 +308,9 @@ revision or repair, apply them to the findings.
 - Resolve valid defects with the simplest coherent repair. If added complexity
   caused the defect, consider removing or simplifying it. Reject an incorrect
   finding or unnecessary scope expansion with evidence; a valid defect still
-  needs resolving even when you reject the reviewer's proposed remedy.
+  needs resolving even when you reject the reviewer's proposed remedy.`;
+
+const FIX_BREADTH = `${FIX_BREADTH_CHECKS}
 - In your report, state each finding's disposition (fixed, rebutted, or deferred)
   and its reason, what you changed, **what else you
   checked for the same class of problem**, and what you found. "Checked X and Y,
@@ -956,9 +969,9 @@ export function revisePlanPrompt({
   }
 
   if (findings && findings.length > 0) {
-    parts.push(`## Review findings
+    parts.push(`## Findings against the plan
 
-An independent reviewer raised the following. Evaluate each P1 against the original task and repository evidence, then resolve the defect or explicitly rebut an incorrect finding. The reviewer's proposed remedy is advisory; use the simplest coherent approach that resolves a valid defect.
+The plan critique raised the following, except where a finding says a person raised it. Evaluate each P1 against the original task and repository evidence, then resolve the defect or explicitly rebut an incorrect finding. A finding's proposed remedy is advisory; use the simplest coherent approach that resolves a valid defect.
 
 ${findings.map((f) => formatFinding(f) + voteNote(f)).join('\n\n')}${deferralNote(findings, 'planner')}
 
@@ -966,7 +979,7 @@ For each P1: fix the plan, or, if you believe the finding is wrong, rebut it. Do
 
 ${block(BLOCK.planDispositions, PLAN_DISPOSITIONS)}
 
-${block(BLOCK.fix, FIX_BREADTH)}`);
+${block(BLOCK.fix, FIX_BREADTH_CHECKS)}`);
   }
 
   // After the findings it is about and before the answers (#394). The counts
@@ -2171,6 +2184,9 @@ export function promptBlocks(): readonly PromptBlock[] {
   return [
     of(BLOCK.json, ['planner', 'critic', 'answerer', 'reviewer'], RESPOND_WITH_JSON),
     of(BLOCK.review, ['critic', 'reviewer'], REVIEW_BREADTH),
+    // The planner's findings revision gets it without the last bullet, the one
+    // asking for a prose report (#482); the text shown is the whole block, which
+    // is what an override replaces.
     of(BLOCK.fix, ['planner', 'implementer'], FIX_BREADTH),
     of(BLOCK.simple, ['planner', 'critic', 'answerer', 'implementer', 'reviewer'], SIMPLE_SOLUTION),
     // Through `formatFinding`, so it reaches exactly the two turns that are
