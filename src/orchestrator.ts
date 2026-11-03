@@ -2622,6 +2622,7 @@ function confirmCounts(found: readonly FinalFixConfirmation[]): string {
  */
 function confirmLine(c: FinalFixConfirmation): string {
   if (c.source === 'reproducer') return `${CONFIRM_LABEL[c.counted]}, by its reproducer passing after the fix`;
+  if (c.source === 'unread-diff') return `${CONFIRM_LABEL[c.counted]} - no check ran, because ${inlineLiteral(c.reason)}`;
   const seat = c.seat;
   const who =
     seat === undefined
@@ -2755,14 +2756,14 @@ async function confirmFinalFix(
     }
     if ('error' in diff) {
       // Nothing was shown, so nothing was asked: no turn is bought on a diff
-      // that could not be read, and the finding is not confirmed.
+      // that could not be read, and the finding is not confirmed. No seat is
+      // named, so nothing renders this as a check a turn made.
       record.findings.push({
         id: f.id,
         verdict: 'cannot-tell',
         counted: 'cannot-tell',
-        source: 'seat',
-        seat,
-        reason: `the diff since the last review could not be read: ${diff.error}`,
+        source: 'unread-diff',
+        reason: `the diff could not be read: ${diff.error}`,
         evidence: [],
       });
       saveState(state);

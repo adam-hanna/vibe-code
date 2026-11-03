@@ -1278,8 +1278,12 @@ export interface FinalFixConfirmation {
   verdict: ConfirmVerdict;
   /** As counted: a `fixed` whose evidence resolved to nothing is `cannot-tell`. */
   counted: ConfirmVerdict;
-  /** A seat's turn, or the finding's own reproducer passing after the fix. */
-  source: 'seat' | 'reproducer';
+  /**
+   * A seat's turn, the finding's own reproducer passing after the fix, or
+   * `unread-diff`: the diff could not be read, so no turn ran and nothing was
+   * checked - recorded so the finding reads as not confirmed, never as checked.
+   */
+  source: 'seat' | 'reproducer' | 'unread-diff';
   /** Who took the turn, as a ballot names it. Absent for a reproducer. */
   seat?: { provider: AgentProvider; model: string; sharesImplementerVendor: boolean };
   reason: string;

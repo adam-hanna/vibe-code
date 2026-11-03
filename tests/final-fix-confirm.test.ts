@@ -584,7 +584,15 @@ test('an intent-to-add the index refuses is a diff that could not be read: no tu
     assert.deepEqual(d.calls, ['review-0', 'final-fix-1'], `base: ${withBase}`);
     const v = verdictOf(state, 'tolerated-one');
     assert.equal(v.counted, 'cannot-tell');
-    assert.match(v.reason, /the diff since the last review could not be read/);
+    assert.match(v.reason, /^the diff could not be read: /);
+    // Not a check: no turn ran, so no seat is named and nothing reads as one.
+    assert.equal(v.source, 'unread-diff');
+    assert.equal(v.seat, undefined);
+    const text = outstandingText(state);
+    assert.match(text, /\*After the final fix:\* could not be confirmed - no check ran, because the diff could not be read: /);
+    assert.doesNotMatch(text, /fresh read-only/);
+    // With no turn having checked anything, the summary keeps its sentence.
+    assert.match(text, /So these were worked on, and nobody has confirmed they are gone\./);
     assert.equal(state.phase, 'complete');
   }
 });

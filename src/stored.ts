@@ -1742,6 +1742,7 @@ const CONFIRM_VERDICTS = {
 const CONFIRM_SOURCES = {
   seat: 'seat',
   reproducer: 'reproducer',
+  'unread-diff': 'unread-diff',
 } satisfies Record<FinalFixConfirmation['source'], FinalFixConfirmation['source']>;
 
 /** One recorded confirmation, or null for anything the writer does not produce. */

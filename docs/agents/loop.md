@@ -1511,7 +1511,7 @@ check can buy nothing.
 - **Counting fails closed**, as a ballot does. A `fixed` whose evidence resolves to nothing counts
   `cannot-tell` (`countConfirmation`), and the record keeps both. `still-present` needs no evidence.
   An answer `parseConfirm` cannot read, and a failed turn, count `cannot-tell` with the failure as
-  the reason. A diff that cannot be read buys no turn and counts `cannot-tell`. `Escalation` and
+  the reason. A diff that cannot be read buys no turn and counts `cannot-tell` with source `unread-diff` and no seat, so OUTSTANDING.md says no check ran rather than naming one. `Escalation` and
   `Cancelled` pass through, and a failed turn's ceiling is enforced before the next one, as in
   `runVoteSeats`.
 - **It cannot buy anything.** A verdict never moves a severity, adds a finding, starts a round or
