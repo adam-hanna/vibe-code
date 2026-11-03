@@ -177,10 +177,7 @@ export function NewWorkstream({
           onClose();
         }}
       >
-        <div>
-          <p className="mt-0 mb-1.5 text-body-sm text-accent-muted">A new beginning</p>
-          <h2 className="m-0 text-title font-semibold tracking-tight text-display">What should we work on?</h2>
-        </div>
+        <h2 className="m-0 text-title font-semibold tracking-tight text-display">What should we work on?</h2>
 
         {/* Optional (#262). Empty names the run from the brief, as before; a
             title somebody typed is kept, through the start, and nothing is
