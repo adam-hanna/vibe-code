@@ -2566,6 +2566,29 @@ export interface RunState {
    * conversation must not disturb the other's record.
    */
   reviewContextThread?: string;
+  /**
+   * A Claude reviewer's own session id - `SLOTS['review-claude']`'s storage, and
+   * the whole of #490: a reviewer seated on Claude must not judge the code from
+   * inside the session that planned and wrote it.
+   *
+   * Client-minted, like `sessionId`, but optional and never null: absent is
+   * what a conversation nobody has opened looks like, which is every default
+   * run (the reviewer is on Codex) and every state written before this field
+   * existed. Minted on the reviewer's first turn. Read and written through
+   * `src/slots.ts`, never here.
+   */
+  reviewClaudeSessionId?: string;
+  /**
+   * Whether a turn has ever succeeded on `reviewClaudeSessionId`. Never
+   * inferred from the id, which is minted before anything runs.
+   */
+  reviewClaudeSessionStarted?: boolean;
+  /**
+   * Whether `reviewClaudeSessionId` has been handed to the CLI and is spent -
+   * `sessionRegistered`'s question (#74), asked of this conversation. Absent
+   * means never registered.
+   */
+  reviewClaudeSessionRegistered?: boolean;
   /** Carried into the first turn of a rotated session. */
   handoff: string | null;
   /**

@@ -63,13 +63,13 @@ import {
   markSlotStarted,
   noteSlotForkAttempt,
   noteSlotRegistered,
-  perTurnSlot,
   recordSlotOccupancy,
   recoverDeadSlot,
   slotContinuity,
   slotForkParent,
   slotHasDeadTurn,
   slotHasMemory,
+  slotHoldsRunContext,
   slotId,
   slotResumeId,
 } from '@src/slots.js';
@@ -4033,6 +4033,7 @@ export type {
 export {
   SLOTS,
   slotHasMemory,
+  slotHoldsRunContext,
   slotId,
   slotResumeId,
   slotRotatable,
@@ -4217,8 +4218,10 @@ function freshConversationPrefix(
  * planner turn carries it once, from here; and no turn carries it twice.
  *
  * Planner-gated, which bounds *injection* and not *exposure*. Under the default
- * table the implementer shares Claude's single `main` conversation and inherits
- * the planner's history, this section included, until a rotation clears it.
+ * table the implementer shares Claude's `main` conversation and inherits the
+ * planner's history, this section included, until a rotation clears it. A
+ * Claude reviewer does not: it talks through `review-claude`, its own (#490),
+ * so it never inherits this section through `main`.
  * That is already true of the whole plan prompt, is documented in README.md,
  * and predates this change; separate Claude sessions per generative role is the
  * only thing that would alter it, and that is a slot-ownership redesign rather
@@ -4446,13 +4449,14 @@ async function claudeDispatch(
   // model the next measurement will be taken under. Where the planner and the
   // implementer name different models this is the boundary that fires once.
   //
-  // Never for a turn on a slot that holds no conversation of the run (#388
-  // Part B). A finder on `fresh-claude` is not about to use `main`, and asked
-  // under its own model - one `main` was never measured under - `shouldRotate`
-  // answers "unmeasured, so rotate", which would compact the implementer's
-  // session in the middle of a review it takes no part in.
-  const perTurn = perTurnSlot(slot);
-  if (!perTurn && shouldRotate(state, cfg, roles, model)) {
+  // Only for a turn on `main` itself. A finder on `fresh-claude` (#388 Part B)
+  // is not about to use `main`, and asked under its own model - one `main`
+  // was never measured under - `shouldRotate` answers "unmeasured, so rotate",
+  // which would compact the implementer's session in the middle of a review it
+  // takes no part in. A Claude reviewer on `review-claude` (#490) is the same
+  // case: a conversation of the run, but not the one rotation compacts.
+  const runContext = slotHoldsRunContext(slot);
+  if (runContext && shouldRotate(state, cfg, roles, model)) {
     await rotateSession(state, cfg, turn, roles, model);
   }
 
@@ -4482,6 +4486,14 @@ async function claudeDispatch(
         // the seam `turn-seam.test.ts` measures in microtasks, and an `async`
         // wrapper here puts one more await between a provider result and its
         // accounting.
+        // The id FIRST (#490). `noteSpawn` below records and saves this id's
+        // registration, and a slot whose id is minted lazily - `review-claude`
+        // on its first turn, or on a fork's - mints it through `reset`, which
+        // deletes the registration. Minted after `noteSpawn`, the turn would be
+        // spawned under an id the saved state never named, with no record of the
+        // handover (#74). A no-op for `main`, whose id always exists, and for
+        // `fresh-claude`, which stores nothing.
+        const sessionId = ensureSlotId(state, slot);
         const dead = slotHasDeadTurn(state, slot);
         // Continuity, not `resume`: a forked conversation arrives holding the
         // parent's context, and so does a resumed dead one, so greeting either
@@ -4510,7 +4522,7 @@ async function claudeDispatch(
         const resume = dead || (forkFrom === null && slotHasMemory(state, cfg, slot));
         return turn({
           prompt,
-          sessionId: ensureSlotId(state, slot),
+          sessionId,
           resume,
           ...(forkFrom === null ? {} : { forkFrom }),
           permissionMode: claudePermission(access),
@@ -4592,15 +4604,16 @@ async function claudeDispatch(
   // model's window and means nothing under another one. Through the shared seam
   // so the rotation turn in context.ts cannot drift out of step with this one.
   //
-  // Not for a per-turn slot: `contextModel` / `contextRatio` are the record of
-  // how full `main` is, which rotation and every `ctx%` read, and a fresh
-  // finder's occupancy written there would replace the implementer's (#388).
-  if (!perTurn) recordTurnContext(state, model, result.usage);
+  // Only for `main`: `contextModel` / `contextRatio` are the record of how full
+  // `main` is, which rotation and every `ctx%` read, and a fresh finder's
+  // occupancy written there would replace the implementer's (#388) - as would a
+  // Claude reviewer's, from its own conversation (#490).
+  if (runContext) recordTurnContext(state, model, result.usage);
 
-  // A per-turn slot's figure is its own measurement or nothing - never the
+  // Any other slot's figure is its own measurement or nothing - never the
   // stored one, which is `main`'s and would be reported as this turn's whenever
   // the two share a model.
-  const measured = perTurn ? (result.usage?.ratio ?? null) : measuredRatio(state, model);
+  const measured = runContext ? measuredRatio(state, model) : (result.usage?.ratio ?? null);
   const ctx = result.usage ? `, ctx ${(result.usage.ratio * 100).toFixed(0)}%` : '';
   applyCharge(state, cfg, {
     costUsd: result.costUsd,

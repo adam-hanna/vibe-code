@@ -409,7 +409,10 @@ test('the default table moves the reviewer and nothing else', () => {
   }
 });
 
-test('a reviewer seated on Claude talks through main, like any Claude role', () => {
+// Case 2 (#490): this pinned the reviewer on `main`, the planner's and
+// implementer's session - the sharing #490 removes. It now talks through its
+// own Claude conversation; the critic half of the claim still holds.
+test('a reviewer seated on Claude talks through its own conversation, not main', () => {
   const onClaude = tableFor({
     planner: 'claude',
     implementer: 'claude',
@@ -417,7 +420,8 @@ test('a reviewer seated on Claude talks through main, like any Claude role', () 
     answerer: 'codex',
     reviewer: 'claude',
   });
-  assert.equal(slotForRole('reviewer', onClaude), 'main');
+  assert.equal(slotForRole('reviewer', onClaude), 'review-claude');
+  assert.equal(slotForRole('implementer', onClaude), 'main');
   assert.equal(slotForRole('critic', onClaude), 'judge');
 });
 

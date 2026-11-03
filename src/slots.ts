@@ -5,6 +5,9 @@ import type { Config, ForkedConversation, ForkPendingEntry, RunState } from '@sr
 /**
  * A managed conversation, with an explicit lifecycle.
  *
+ * (Claude now holds two carried conversations, `main` and a Claude reviewer's
+ * own `review-claude` (#490), and both follow the client-origin half below.)
+ *
  * There were two conversations before this module, and they used opposite
  * conventions for the same two facts. The Claude session minted its id up front
  * and tracked success in a separate `sessionStarted` marker, so the id existing
@@ -55,7 +58,14 @@ import type { Config, ForkedConversation, ForkPendingEntry, RunState } from '@sr
  * half of one convention and half of the other.
  */
 
-export type SlotName = 'main' | 'judge' | 'review' | 'write' | 'fresh-claude' | 'fresh-codex';
+export type SlotName =
+  | 'main'
+  | 'judge'
+  | 'review'
+  | 'review-claude'
+  | 'write'
+  | 'fresh-claude'
+  | 'fresh-codex';
 
 /**
  * Who mints the id.
@@ -317,6 +327,59 @@ export const SLOTS: Record<SlotName, SlotSpec> = {
     },
   },
   /**
+   * A Claude reviewer's own conversation (#490), so the code review is not
+   * formed inside the session that planned and wrote the code.
+   *
+   * Before this, every Claude role sat on `main`, so a reviewer seated on
+   * Claude judged from the planner's investigation and the implementer's own
+   * reasoning and self-justification - the author's framing, not its own
+   * history. `review` is the Codex reviewer's answer to the same shape of
+   * problem (#45); this is the Claude one. It keeps what #435 decided the
+   * reviewer keeps - its own earlier findings and the fixer's reports, round to
+   * round - and drops only the author's session.
+   *
+   * `main`'s lifecycle and `review`'s role. Client-origin, because `claude` is
+   * spawned under an id: minted on the first review turn, with its own
+   * `started` and `registered` markers and its own `reset`. Never rotated:
+   * `rotatingSlot` is the implementer's, and nothing measures or compacts this
+   * conversation, as nothing compacts `review`.
+   */
+  'review-claude': {
+    provider: 'claude',
+    origin: 'client',
+    id: (state) => asId(state.reviewClaudeSessionId),
+    // No legacy fallback, as with `review`: nothing has ever written this
+    // marker, so absent means never run.
+    started: (state) => state.reviewClaudeSessionStarted === true,
+    // `main`'s rule: the id is vibe's, minted before the turn was spawned, so
+    // whatever the CLI echoes back is not adopted.
+    markStarted: (state) => {
+      state.reviewClaudeSessionStarted = true;
+    },
+    registered: (state) => state.reviewClaudeSessionRegistered === true,
+    markRegistered: (state) => {
+      state.reviewClaudeSessionRegistered = true;
+    },
+    // Constant, for `main`'s reason: there is no Claude equivalent of
+    // `codex.persistSession`, and this conversation does not invent one.
+    persists: () => true,
+    // `main.reset`'s shape, and the single statement of what a fresh
+    // conversation here looks like. It is how the first id is minted
+    // (`ensureSlotId`) and how a dead turn is given up (`recoverDeadSlot`) - it
+    // is never a rotation, because nothing rotates this slot.
+    reset: (state) => {
+      state.reviewClaudeSessionId = randomUUID();
+      state.reviewClaudeSessionStarted = false;
+      delete state.reviewClaudeSessionRegistered;
+    },
+    // Claude reports a ratio against a window it names itself, and the run
+    // stores it once, as `contextRatio`/`contextModel` - which describe `main`.
+    // A second Claude store keyed to this conversation would be a second answer
+    // to that question, and with no rotation here nothing would act on it. The
+    // turn's own figure is still on its `claude_turn` event.
+    occupancy: null,
+  },
+  /**
    * A Codex seat that writes: one fresh `codex exec` per turn, always.
    *
    * `codex exec resume` takes no `-s` flag, so a resumed turn runs read-only
@@ -371,9 +434,10 @@ export const SLOTS: Record<SlotName, SlotSpec> = {
   },
   /**
    * A fresh, read-only Claude seat (#388), and the reason this slot exists:
-   * Claude had exactly one conversation, `main`, which is the implementer's own
-   * session, and a seat judging code from inside it is the self-preference
-   * failure more finders are meant to avoid.
+   * Claude's carried conversations are `main`, the implementer's own session,
+   * and `review-claude`, the reviewer's (#490). A seat judging code from inside
+   * the first is the self-preference failure more finders are meant to avoid,
+   * and a seat is memoryless by design, so it takes neither.
    *
    * Client-origin, because `claude` is spawned under an id - but it stores none
    * and has no `reset`, so `ensureSlotId` mints a new id for every turn and
@@ -415,6 +479,22 @@ export function perTurnSlot(slot: SlotName): boolean {
   return PER_TURN_SLOTS.has(slot);
 }
 
+/**
+ * Whether this conversation is the one the run-level `contextRatio` and
+ * `contextModel` describe: `main`, the one rotation measures and compacts.
+ *
+ * Not `!perTurnSlot`, which it was until #490 gave a Claude reviewer a carried
+ * conversation of its own. A turn on `review-claude` holds a conversation of
+ * the run, so it is not per-turn - but it is not `main` either. Asked of it,
+ * `shouldRotate` would compact the implementer's session in the middle of a
+ * review that takes no part in it, and `recordTurnContext` would overwrite how
+ * full `main` is with the reviewer's figure. The same is true of a finder on
+ * `fresh-claude`, which is why the one question covers both.
+ */
+export function slotHoldsRunContext(slot: SlotName): boolean {
+  return slot === 'main';
+}
+
 export function slotId(state: RunState, slot: SlotName): string | null {
   return SLOTS[slot].id(state);
 }
@@ -443,10 +523,23 @@ export function slotRegistered(state: RunState, slot: SlotName): boolean {
  * Registration, never `!started` alone: an id that has not been handed over has
  * no evidence of having been spent, and discarding one would throw away a
  * conversation nobody has used. Client-origin only, for the same reason.
+ *
+ * And an id to resume, which was vacuous while `main` was the only Claude
+ * conversation - its id is a refused field, never absent. `review-claude`'s is
+ * optional (#490), so a stored id that was malformed is dropped on load while
+ * the registration beside it survives. That marker names an id which is gone:
+ * there is nothing to resume, and calling it a dead turn would tell the prompt
+ * it continues a conversation that dispatch is about to mint fresh. Read as
+ * not-dead, the next mint goes through `reset`, which deletes the stale marker.
  */
 export function slotHasDeadTurn(state: RunState, slot: SlotName): boolean {
   const spec = SLOTS[slot];
-  return spec.origin === 'client' && spec.registered(state) && !spec.started(state);
+  return (
+    spec.origin === 'client' &&
+    spec.registered(state) &&
+    !spec.started(state) &&
+    spec.id(state) !== null
+  );
 }
 
 /**
@@ -716,6 +809,14 @@ export function forkedSlotFields(parent: RunState, cfg: Config): ForkedSlotField
     if (perTurnSlot(slot)) continue;
     const spec = SLOTS[slot];
     const parentId = spec.id(parent);
+    // A client-minted conversation the parent never opened is not a loss: no id
+    // was ever minted for it, so there was nothing there to lose, and no fork
+    // record listed one before `review-claude` existed (#490). `main` always
+    // holds an id, so this is the Claude reviewer's conversation on a parent
+    // whose reviewer is on Codex or has not run - which keeps every default
+    // run's fork record exactly as it was. Once opened, it is listed and forked
+    // like any other.
+    if (spec.origin === 'client' && parentId === null) continue;
     if (!spec.persists(cfg)) {
       conversations.push({ slot, parentId: null, why: 'not-persisted' });
       continue;
@@ -755,6 +856,16 @@ export function forkedSlotFields(parent: RunState, cfg: Config): ForkedSlotField
     'reviewSessionStarted',
     'reviewContextTokens',
     'reviewContextThread',
+    // A Claude reviewer's conversation (#490), reset exactly as the Codex
+    // reviewer's thread is: no id inherited from the parent - two runs would
+    // otherwise write into one session - and no registration, which beside a
+    // fresh id reads as a session that died mid-turn (#74). The child's id is
+    // minted by its first review turn, through `reset`, before that turn saves
+    // its registration; the reviewer's own history, and never `main`'s,
+    // reaches it through `forkPending` above.
+    'reviewClaudeSessionId',
+    'reviewClaudeSessionStarted',
+    'reviewClaudeSessionRegistered',
   ];
 
   // ONLY when a fork is actually owed for `main`. The parent's context ratio
@@ -789,7 +900,10 @@ export function forkedSlotFields(parent: RunState, cfg: Config): ForkedSlotField
  *
  * The `review` slot's fields are absent for the same reason, and all four of
  * them: a fresh run and a run recorded before that conversation existed present
- * the identical fact, which is that nothing has ever run there.
+ * the identical fact, which is that nothing has ever run there. So are the
+ * `review-claude` slot's three (#490), for the same reason - and its id is not
+ * minted here as `main`'s is, so a default run, whose reviewer is on Codex,
+ * never carries one.
  */
 export function initialSlotFields(): Pick<
   RunState,

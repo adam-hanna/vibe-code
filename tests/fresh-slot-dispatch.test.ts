@@ -8,6 +8,8 @@ import * as log from '@src/log.js';
 import type { Narration } from '@src/log.js';
 import { orchestrate, runTurn } from '@src/orchestrator.js';
 import { ROLES, seatTable } from '@src/roles.js';
+import type { RoleTable } from '@src/roles.js';
+import { recordContextMeasurement } from '@src/run.js';
 import { ensureSlotId, slotForkParent } from '@src/slots.js';
 import {
   agents,
@@ -168,16 +170,46 @@ test("a Claude finder on another model after an implement turn leaves main's ses
   assert.equal(finder.prompt, driven.codex.get('review-0')?.prompt);
 });
 
-test('the control: the same config does rotate a Claude reviewer that sits on main', async () => {
+// Case 2 (#490): this drove a Claude reviewer that `tableFor` seated on `main`,
+// which is the sharing #490 removes - a Claude reviewer is now on
+// `review-claude`, and `claude-reviewer-session.test.ts` asserts it does NOT
+// rotate `main`. The claim kept is the control's purpose: the guard above is
+// what stops the rotation, because a turn that does sit on `main` - here a
+// hand-built table, which `runTurn` takes without consulting `roleRefusals` -
+// is rotated by the same config.
+test('the control: the same config does rotate a Claude turn that sits on main', async () => {
   // Proves the case above exercises the path: with no guard there, this is
   // exactly what the finder would have done.
   const state = run('vibe-fresh-control-');
-  const cfg = rotating({ roles: { ...DEFAULTS.roles, reviewer: { provider: 'claude', model: 'finder-model' } } });
-  const driven = await drive(state, cfg, {
-    usage: (label) => (label === 'implement' ? usage(0.3) : null),
-  });
-  assert.ok(driven.seen.some((n) => n.id === 'session_compacting'), 'main was rotated before review-0');
+  const cfg = rotating();
+  // What an implement turn leaves behind: `main` started, and measured under
+  // the implementer's model at a ratio that would never rotate it.
+  recordContextMeasurement(state, DEFAULTS.claude.model, 0.3, 200_000);
+  state.sessionStarted = true;
+  const onMain: RoleTable = {
+    ...ROLES,
+    reviewer: { ...ROLES.reviewer, provider: 'claude', model: 'finder-model', slot: 'main' },
+  };
+  const seen: Narration[] = [];
+  const calls: string[] = [];
+  const originalLog = console.log;
+  log.setSink((n) => void seen.push(n));
+  console.log = () => undefined;
+  try {
+    await runTurn(
+      state,
+      cfg,
+      { role: 'reviewer', prompt: 'review it', cwd: state.targetDir, label: 'review-0' },
+      agents({ claude: (label) => (label === 'review-0' ? report([]) : 'briefing') }, calls),
+      onMain,
+    );
+  } finally {
+    log.setSink(null);
+    console.log = originalLog;
+  }
+  assert.ok(seen.some((n) => n.id === 'session_compacting'), `main was not rotated: ${calls.join(', ')}`);
   assert.ok(state.sessionRotations >= 1);
+  assert.equal(calls.at(-1), 'review-0', 'the rotation ran before the turn, at its boundary');
 });
 
 test("a Codex finder leaves the review thread's id and occupancy alone, and reads only", async () => {

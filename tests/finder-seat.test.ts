@@ -31,7 +31,7 @@ test('a finder sits on a fresh slot on either provider, never a conversation of 
   assert.equal(slotForRole('reviewer', seatTable(ROLES, { provider: 'codex' })), 'fresh-codex');
   for (const provider of ['claude', 'codex'] as const) {
     const slot = slotForRole('reviewer', seatTable(ROLES, { provider }));
-    assert.ok(!['main', 'review', 'judge', 'write'].includes(slot), `${provider} finder on ${slot}`);
+    assert.ok(!['main', 'review', 'review-claude', 'judge', 'write'].includes(slot), `${provider} finder on ${slot}`);
   }
 });
 

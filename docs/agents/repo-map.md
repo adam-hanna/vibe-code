@@ -44,7 +44,8 @@ src/cutoff.ts        a Codex answer cut off at its output limit: whole findings 
 src/appserver.ts     Codex app-server JSON-RPC client (rate limits only)
 src/ratelimits.ts    rate-limit windows and the brake
 src/charge.ts        the one seam every token and dollar is charged through
-src/slots.ts         session-slot lifecycle (main = Claude, judge + review = Codex, write = one-shot Codex,
+src/slots.ts         session-slot lifecycle (main = Claude planner/implementer, review-claude = a Claude
+                     reviewer's own, judge + review = Codex, write = one-shot Codex,
                      fresh-claude + fresh-codex = one-shot read-only review seats, where finders sit)
 src/context.ts       context measurement, compaction, session rotation
 src/preflight.ts     toolchain contract enforcement, `vibe doctor`

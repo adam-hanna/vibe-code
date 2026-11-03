@@ -289,6 +289,7 @@ const SLOT_NAMES = {
   main: 'main',
   judge: 'judge',
   review: 'review',
+  'review-claude': 'review-claude',
   write: 'write',
   'fresh-claude': 'fresh-claude',
   'fresh-codex': 'fresh-codex',
@@ -2439,6 +2440,16 @@ const READERS = {
   reviewContextTokens: (raw, ctx) =>
     optionalNumber('reviewContextTokens', raw, ctx, isPositiveInt),
   reviewContextThread: (raw, ctx) => optionalString('reviewContextThread', raw, ctx),
+  // A Claude reviewer's conversation's three (#490). Optional every one, for
+  // the review slot's reason: absent is a conversation nobody has opened, which
+  // is every default run and every state written before these existed, so
+  // nothing is migrated and nothing is repaired. A malformed value is dropped
+  // on its own. A registration whose id was dropped is left in place, because
+  // it is inert: `slotHasDeadTurn` asks for an id to resume, and the next mint
+  // goes through `reset`, which deletes the marker.
+  reviewClaudeSessionId: (raw, ctx) => optionalString('reviewClaudeSessionId', raw, ctx),
+  reviewClaudeSessionStarted: (raw, ctx) => optionalBool('reviewClaudeSessionStarted', raw, ctx),
+  reviewClaudeSessionRegistered: (raw, ctx) => optionalBool('reviewClaudeSessionRegistered', raw, ctx),
   handoffStale: (raw, ctx) => optionalBool('handoffStale', raw, ctx),
   contextModel: (raw, ctx) => optionalString('contextModel', raw, ctx),
   contextWindow: (raw, ctx) => optionalNumber('contextWindow', raw, ctx, isPositive),

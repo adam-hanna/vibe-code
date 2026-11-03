@@ -21,7 +21,7 @@ const OFF = config({}, { codex: { ...config().codex, persistSession: false } });
 test('a seat is never on main, judge or review, and sits with its own provider', () => {
   for (const provider of ['claude', 'codex'] as const) {
     const slot = seatSlot(provider);
-    assert.ok(!['main', 'judge', 'review', 'write'].includes(slot), `${provider} seat on ${slot}`);
+    assert.ok(!['main', 'judge', 'review', 'review-claude', 'write'].includes(slot), `${provider} seat on ${slot}`);
     assert.equal(SLOTS[slot].provider, provider);
   }
 });
