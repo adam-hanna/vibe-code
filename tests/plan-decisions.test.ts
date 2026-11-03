@@ -12,16 +12,18 @@ import {
 } from '@src/decisions.js';
 import { commitFork, planFork } from '@src/fork.js';
 import * as log from '@src/log.js';
-import { orchestrate, runTurn } from '@src/orchestrator.js';
+import { Escalation, orchestrate, runTurn } from '@src/orchestrator.js';
 import { answerPrompt, implementPrompt, renderPlanDoc } from '@src/prompts.js';
 import { listCheckpoints, loadRun, saveState } from '@src/run.js';
 import { validateStoredState } from '@src/stored.js';
 import {
   agents,
+  answerNeedsInput,
   answersReport,
   codexRaw,
   committing,
   config,
+  escalationFile,
   freshRun,
   p1,
   planFixture,
@@ -409,6 +411,51 @@ test('the record is created before the first answerer turn, so a turn that dies 
   });
   assert.ok(driven.calls.includes('answers-2'), `the question was asked again (saw ${driven.calls.join(', ')})`);
   assert.deepEqual(resumed.modelAnswers?.map((a) => [a.round, a.answer]), [[2, 'Eager.']]);
+});
+
+test('a model answer the person overrode on resume is not listed as decided without them', async () => {
+  // A `question-round` stop hands back every question of the round, answered or
+  // not, and on resume the person wins where both answered (#169).
+  const state = freshRun({ prefix: 'vibe-decisions-override-', task: 'person wins', planOnly: false, git: true, commit: true });
+  const Q3 = questionFixture({ question: 'Should eviction run on write or on a timer?' });
+  const stop = { ...DEFAULTS.gates, 'question-round': 'stop' as const };
+  let err: unknown = null;
+  try {
+    await drive(state, config({}, { gates: stop }), false, {
+      claude: (label) => (label === 'plan' ? plan({ open_questions: [Q1, Q3] }) : plan()),
+      codex: (label) =>
+        label.startsWith('answers-')
+          ? answersReport([
+              { question: Q1.question, answer: 'MODEL-Q1' },
+              { question: Q3.question, answer: 'MODEL-Q3' },
+            ])
+          : report([]),
+    });
+  } catch (e) {
+    err = e;
+  }
+  assert.ok(err instanceof Escalation, String(err));
+  // Recorded as it arrived: both were the model's answers when the turn returned.
+  assert.deepEqual(state.modelAnswers?.map((a) => a.answer), ['MODEL-Q1', 'MODEL-Q3']);
+  escalationFile(state, err);
+  answerNeedsInput(state, (question) => (question.startsWith(Q1.question) ? 'PERSON-Q1' : ''));
+
+  await drive(state, config({}, committing()), true, {
+    claude: (label) => {
+      if (label.startsWith('revise-')) return plan();
+      work(state, `${label}.txt`);
+      return `${label} done`;
+    },
+  });
+  for (const name of ['PLAN.md', DECISIONS_FILE]) {
+    const text = read(state, name);
+    assert.equal(text.includes('MODEL-Q1'), false, `${name} does not list the answer the person replaced`);
+    assert.ok(text.includes('MODEL-Q3'), `${name} keeps the one the person left to the model`);
+  }
+  const d = planDecisions(state, plan());
+  assert.ok(decisionsPrefix(d).includes('MODEL-Q3') && !decisionsPrefix(d).includes('MODEL-Q1'));
+  // The record itself is untouched: what a model said is still what it said.
+  assert.deepEqual(state.modelAnswers?.map((a) => a.answer), ['MODEL-Q1', 'MODEL-Q3']);
 });
 
 // ---- a fork -----------------------------------------------------------------

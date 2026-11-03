@@ -61,6 +61,13 @@ export interface PlanDecisions {
  * `reconcileAssumed` uses - an exact match against what they answered, or a
  * disposal it already recorded - and without its side effects. A decision the
  * person made is not one made without them.
+ *
+ * The model answers leave out any the person answered too, by the first rule.
+ * A `question-round` stop hands back every question of the round, including
+ * the ones the answerer already answered, and on resume the person's answer
+ * wins (`mergeHumanAnswers`) - so the revised plan follows theirs, and listing
+ * the model's would tell an implementer the superseded one. A missing record
+ * stays missing.
  */
 export function planDecisions(state: RunState, plan: Plan): PlanDecisions {
   const answered = state.humanAnswered ?? [];
@@ -70,9 +77,10 @@ export function planDecisions(state: RunState, plan: Plan): PlanDecisions {
       !answered.some((a) => isSameQuestion(a, q.question)) &&
       !resolved.some((r) => isSameQuestion(r.question, q.question)),
   );
+  const recorded = state.modelAnswers ?? (state.questionRound === 0 ? [] : undefined);
   return {
     assumptions: plan.assumptions,
-    modelAnswers: state.modelAnswers ?? (state.questionRound === 0 ? [] : undefined),
+    modelAnswers: recorded?.filter((m) => !answered.some((a) => isSameQuestion(a, m.question))),
     defaults,
     carried: state.carried ?? [],
   };

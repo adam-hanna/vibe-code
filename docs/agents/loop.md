@@ -221,7 +221,10 @@ guesses to accept or reject, not the whole plan to edit.
 - **`src/decisions.ts` renders it twice from one set of items.** PLAN.md gains `## Assumptions`
   and `## Decided without you` (the model answers, the defaults, the carried P1s), through an
   optional third parameter to `renderPlanDoc`. `DECISIONS.md` gets the same four lists, one
-  section each. A default a person settled is left out, by `reconcileAssumed`'s two rules. Text
+  section each. A default a person settled is left out, by `reconcileAssumed`'s two rules, and so
+  is a model answer the person also answered: a `question-round` stop hands back every question,
+  and on resume the person's answer wins, so listing the model's would tell an implementer the
+  superseded one. `state.modelAnswers` itself keeps what the model said. Text
   goes through `inert`, and vibe never reads `DECISIONS.md` back.
 - **Who passes the decisions to `renderPlanDoc`:** the PLAN.md write at approval, the fork's
   PLAN.md (from the child's state), and `planOfRecord` for the implementer. **The answerer does

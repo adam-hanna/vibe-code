@@ -2785,6 +2785,12 @@ export interface RunState {
    * before the run's first answerer turn and appended on every one after, so a
    * state from before #487 resumed past round 1 never gains it - a list holding
    * only the rounds since the upgrade would read as complete when it is not.
+   *
+   * "Gave" means not declined under the run's config and not `defer_to_human`.
+   * The second clause holds even with `questions.escalateOnDefer` off, where a
+   * `defer_to_human` answer is not refused and still reaches the revision: the
+   * answerer said a person should decide it, so it is not recorded as a model
+   * having decided it, and under that setting this list does not hold it.
    */
   modelAnswers?: ModelAnswer[];
   /**
