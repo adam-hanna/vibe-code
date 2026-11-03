@@ -394,6 +394,10 @@ to `maxVerifyRounds` turns under pressure it had not earned. `takeGateBaseline` 
   failed at the start, what **the last verification** saw of it. It says that and not
   "still fails", because a stop at `verify-round` or `review-round` comes after a fix and
   before the gates run again.
+- **Matched on the name and the command.** A resume layers the project file over the run's
+  settings, so a gate can keep its name and change what it runs. The start tree's verdict was
+  on the old command, so neither the fixer's sentence nor the end-of-run line is given for a
+  gate whose command is no longer the one the baseline ran.
 - **Absent means unknown, never "passed at the start".** No record is written with
   verification off, with every gate's baseline off, on a plan-only run, or on a run from
   before this. A fork drops both keys, because they describe the parent's start tree.

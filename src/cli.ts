@@ -3027,7 +3027,9 @@ function reportGates(state: RunState): void {
  *
  * Silent with no baseline (unknown, never a pass at the start), for a gate that
  * passed or did not run at the start, and for one the last verification did not
- * reach. Nothing here moves the exit code.
+ * reach. Nothing here moves the exit code. Matched on the command as well as the
+ * name, for the reason `inheritedNote` is: a resume can change what a gate of the
+ * same name runs, and the start tree's verdict was on the old command.
  *
  * Exported for the reason `reportDeferred` is, and called on the escalation path
  * as well as from `reportGates`: a gate still failing at the end is a run that
@@ -3040,7 +3042,7 @@ export function reportInheritedGates(state: RunState): void {
   const at = baseline.sha === null ? 'the start commit' : `the start commit ${baseline.sha.slice(0, 7)}`;
   for (const entry of baseline.gates) {
     if (entry.status !== 'failed') continue;
-    const outcome = outcomes.find((o) => o.name === entry.name);
+    const outcome = outcomes.find((o) => o.name === entry.name && o.command === entry.command);
     if (outcome?.status === 'failed') {
       const where = entry.log === null ? '' : ` (${path.join(state.dir, entry.log)})`;
       log.warn(

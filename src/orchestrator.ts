@@ -3530,9 +3530,14 @@ async function takeGateBaseline(state: RunState, cfg: Config, cwd: string): Prom
  * gate that failed before the run touched anything. The finding's severity, id
  * and round cost are not touched: whether an inherited failure should buy rounds
  * is a later decision.
+ *
+ * Matched on the command as well as the name. A resume layers the project file
+ * over the run's settings, so a gate can keep its name and change what it runs;
+ * the start tree's verdict on the old command says nothing about the new one, and
+ * claiming it would attribute a failure nobody measured.
  */
-function inheritedNote(state: RunState, gateName: string): string {
-  const entry = state.gateBaseline?.gates.find((g) => g.name === gateName);
+function inheritedNote(state: RunState, gateName: string, command: string | null): string {
+  const entry = state.gateBaseline?.gates.find((g) => g.name === gateName && g.command === command);
   if (entry === undefined || entry.status !== 'failed') return '';
   const sha = state.gateBaseline?.sha ?? null;
   const at = sha === null ? 'the start commit' : `the start commit ${sha.slice(0, 7)}`;
@@ -3803,7 +3808,7 @@ async function runGate(state: RunState, cfg: Config, cwd: string): Promise<Findi
       evidence: [{ kind: 'artifact', path: `verify-failure-${state.reviewRound}.txt` }],
       // Plus one sentence when this gate also failed at the start commit (#484),
       // and nothing otherwise - the prompt moves only for an inherited failure.
-      detail: describeFailure(shown, failedLogs) + inheritedNote(state, result.name),
+      detail: describeFailure(shown, failedLogs) + inheritedNote(state, result.name, result.command),
       // Beside `describeFailure` in `verify.ts` rather than written here (#135).
       // The two sentences have to agree about which kind of failure this is -
       // a detail that says "not deterministic" over a fix that says "make it

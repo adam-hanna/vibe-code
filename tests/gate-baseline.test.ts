@@ -609,3 +609,60 @@ test('the end of the run says nothing with no baseline, or for a gate that passe
   };
   assert.deepEqual(reported(state), []);
 });
+
+// ---- a gate whose command changed -------------------------------------------
+
+test('a gate whose command a resume replaced is not called inherited, by the fixer or at the end', async () => {
+  // The supported road: the baseline is taken on one command, the run is killed
+  // in the implement turn, and the resume layers a project file that keeps the
+  // gate's name and changes what it runs. The start tree's verdict was on the
+  // old command, so it says nothing about the new one.
+  const state = startRun('replaced');
+  const old = markerGate(state, 'verification', MARKER);
+  const replacement = markerGate(state, 'replacement', 'ALSO-BROKEN');
+  writeFileSync(path.join(state.targetDir, MARKER), 'x', 'utf8');
+  writeFileSync(path.join(state.targetDir, 'ALSO-BROKEN'), 'x', 'utf8');
+  commitTree(state);
+  let killed = false;
+  const dying: Handlers = {
+    ...handlers(state),
+    claude: (label, options) => {
+      if (label === 'implement' && !killed) {
+        killed = true;
+        throw new Error('the process died here');
+      }
+      return handlers(state).claude?.(label, options);
+    },
+  };
+  const first = await drive(state, cfgFor({ command: old }), dying);
+  assert.ok(first.err !== null);
+  const loaded = loadRun(state.targetDir, state.id);
+  assert.equal(loaded.gateBaseline?.gates[0]?.status, 'failed');
+  assert.equal(loaded.gateBaseline?.gates[0]?.command, old);
+
+  const second = await drive(loaded, cfgFor({ command: replacement }, { maxVerifyRounds: 2 }), handlers(loaded), true);
+  assert.ok(second.err instanceof Escalation, String(second.err));
+  const prompt = second.prompts.get('verify-fix-1');
+  assert.ok(prompt !== undefined, 'the replacement failed and was sent to the fixer');
+  assert.equal(prompt.includes('also failed at the start commit'), false, 'not attributed to the start tree');
+  const finding = (second.err.findings ?? []).find((f) => f.id === 'verification-failing');
+  assert.equal(finding?.severity, 'P0');
+  assert.equal(finding?.detail.includes('also failed at the start commit'), false);
+  assert.equal(loaded.gateOutcomes?.[0]?.command, replacement);
+  assert.deepEqual(reported(loaded), [], 'the end of the run claims nothing either');
+});
+
+test('the end of the run claims no fix for a replaced command that passes', () => {
+  const state = startRun('replaced-pass');
+  state.gateBaseline = {
+    sha: null,
+    clean: true,
+    gates: [
+      { name: 'check', command: 'npm run old-check', status: 'failed', exitCode: 1, required: true, runs: 1, log: null },
+    ],
+  };
+  state.gateOutcomes = [{ name: 'check', status: 'passed', command: 'npm run replacement-check', runs: 1, required: true }];
+  assert.deepEqual(reported(state), []);
+  state.gateOutcomes = [{ name: 'check', status: 'passed', command: 'npm run old-check', runs: 1, required: true }];
+  assert.equal(reported(state).length, 1, 'the same command still gets its line');
+});
