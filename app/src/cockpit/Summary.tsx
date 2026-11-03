@@ -3,7 +3,7 @@ import { ArrowRight, Bug, Check, Clock, Code, Folder, RefreshCw } from 'lucide-r
 import type { LucideIcon } from 'lucide-react';
 import { Badge } from '@/ui/badge';
 import { tokens as fmtTokens, work as fmtWork } from './format';
-import type { Run, Work } from './model';
+import type { Census, Run, Work } from './model';
 
 /**
  * What the run did, once it has stopped doing it (`4g`, #223).
@@ -32,9 +32,8 @@ export function Summary({ run }: { run: Run }) {
     .filter((t) => t.work !== null)
     .pop()?.work ?? null;
 
-  const carried = run.censuses
-    .filter((c) => c.phase === 'plan')
-    .flatMap((c) => c.tolerated);
+  const carried = carriedFindings(run.censuses);
+  const carriedValue = carried === null ? '—' : carried.length === 0 ? 'None' : String(carried.length);
 
   const spendValue = run.spend.tokens === null ? '—' : fmtTokens(run.spend.tokens);
   const spendDetail =
@@ -98,9 +97,11 @@ export function Summary({ run }: { run: Run }) {
         <Metric
           icon={Bug}
           label="Carried findings"
-          value={carried.length === 0 ? 'None' : String(carried.length)}
+          value={carriedValue}
           detail={
-            carried.length === 0 ? (
+            carried === null ? (
+              'no gate decision was recorded'
+            ) : carried.length === 0 ? (
               'nothing carried forward'
             ) : (
               <span className="flex flex-wrap gap-1">
@@ -152,6 +153,35 @@ function Metric({
       <div className="min-w-0 text-body-sm text-secondary [overflow-wrap:anywhere]">{detail}</div>
     </div>
   );
+}
+
+/**
+ * The P1s the run's gates carried rather than fixed, or null when no census
+ * stated a gate decision (#481).
+ *
+ * **Both gates.** The plan gate carries its tolerated P1s into implementation;
+ * the review gate carries its own into the final fix round, the set
+ * `OUTSTANDING.md` lists. This read the plan's censuses alone - a leftover of
+ * the card's first draft, where the field was `declined` and sourced from the
+ * plan - so a run that carried one review P1 and nothing from the plan read as
+ * having carried nothing. Of the 25 archived runs here that carried a finding,
+ * 14 carried one out of review and 4 carried only that.
+ *
+ * **Once per id.** `gate()` fills `tolerated` only on a pass, and the archive
+ * holds at most one approving census per gate per run, with no id shared across
+ * the two. A resume that passes a gate again over the same report would repeat
+ * its ids, though, and that is one finding carried, not two.
+ *
+ * **Null rather than none.** A replayed census carries its counts and no gate
+ * decision (`replayRun` reads the round's report, which never held one), so its
+ * `tolerated` folds to `[]`. Read as an answer, that drew `20261021-211408`,
+ * which carried two, as *None*. Only a census that says `pass` states what its
+ * gate carried, and a run with none of those has not said.
+ */
+export function carriedFindings(censuses: readonly Census[]): readonly string[] | null {
+  const decided = censuses.filter((c) => c.pass !== null);
+  if (decided.length === 0) return null;
+  return [...new Set(decided.flatMap((c) => c.tolerated))];
 }
 
 function workHeadline(work: Work | null): string {
