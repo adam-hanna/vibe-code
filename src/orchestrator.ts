@@ -144,7 +144,9 @@ import {
   attachVerdicts,
   combineVerdicts,
   disagreements,
+  editedAfterReview,
   judgeChanges,
+  judgeTracked,
   judgePatterns,
   recordedPatterns,
   testChangeCounts,
@@ -1770,6 +1772,10 @@ async function reviewPhase(
         if (caveat === null) log.ok(`${what}, and verification still passes.`);
         else log.warn(`${what}, but ${caveat}.`);
       }
+      // The end of the road nobody reviews, so the one place its changes to
+      // the judge can be named (#485). After the gate has passed, because the
+      // verify fixes before it are part of that road too.
+      await recordJudgeEditedAfterReview(state, cfg, cwd);
       break;
     }
 
@@ -1922,6 +1928,100 @@ async function reviewPhase(
 }
 
 /**
+ * The judge listing the final fix road is bracketed by (#485): every changed
+ * file, the ones that touch the judge, and each one's content id.
+ *
+ * `keep` is null for the snapshot, which classifies through git's rename
+ * pairing as the review does, and the snapshot's paths at the end of the road,
+ * which classifies without it: see `judgeTracked`.
+ *
+ * Null when any of it could not be read - never a partial answer, because the
+ * caller's only other conclusion is "nothing was edited" and a read that
+ * failed is not evidence of that. Never throws: this records, and a git that
+ * will not answer must not take a run down with it.
+ */
+async function readJudgeTree(
+  state: RunState,
+  cfg: Config,
+  cwd: string,
+  keep: ReadonlySet<string> | null = null,
+): Promise<{ all: FileChange[]; judged: FileChange[]; blobs: Map<string, string | null> } | null> {
+  try {
+    const { changes: all, renamedFrom } = await git.treeChanges(cwd, state.baseSha);
+    const judged =
+      keep === null
+        ? judgeTracked(all, renamedFrom, judgePatterns(cfg.verify))
+        : judgeTracked(all, new Map(), judgePatterns(cfg.verify), keep);
+    const present = judged.filter((c) => c.status !== 'deleted').map((c) => c.path);
+    const ids = await git.hashObjects(cwd, present);
+    if (ids === null) return null;
+    const blobs = new Map<string, string | null>();
+    for (const c of judged) blobs.set(c.path, null);
+    present.forEach((p, i) => blobs.set(p, ids[i] ?? null));
+    return { all, judged, blobs };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Name what the final fix road changed in the judge after the last review
+ * (#485), from the snapshot `runFinalFix` took before its turn.
+ *
+ * Narration with no event, under `recordAndSay`'s rule, as `test_changes_judged`
+ * is: the fact is durable in `state.judgeEditedAfterReview`. Nothing reads it to
+ * decide anything - the gate, APPROVE and the exit code are where they were.
+ *
+ * Fails closed. With no snapshot - a run from before this existed, one dropped
+ * on load, one that could not be taken - or a listing that cannot be read now,
+ * there is no list and it says the edits could not be checked, never that there
+ * were none. Both fields go in every such branch, so a result an earlier
+ * process saved cannot outlive a comparison that has just failed.
+ *
+ * Safe to run twice: a resume after it passes the gate again and recomputes the
+ * same record from the same snapshot.
+ */
+async function recordJudgeEditedAfterReview(state: RunState, cfg: Config, cwd: string): Promise<void> {
+  const snap = state.judgeAtLastReview;
+  const read =
+    snap === undefined ? null : await readJudgeTree(state, cfg, cwd, new Set(snap.files.map((f) => f.path)));
+  if (snap === undefined || read === null) {
+    delete state.judgeAtLastReview;
+    delete state.judgeEditedAfterReview;
+    saveState(state);
+    log.warn("Edits to the run's own tests or config after the last review could not be checked for this run.", {
+      id: 'judge_edited_after_review_unchecked',
+      data: {},
+    });
+    return;
+  }
+  const { files, restored } = editedAfterReview(snap.files, read.judged, read.blobs, read.all);
+  if (files.length === 0 && restored.length === 0) {
+    if (state.judgeEditedAfterReview !== undefined) {
+      delete state.judgeEditedAfterReview;
+      saveState(state);
+    }
+    return;
+  }
+  state.judgeEditedAfterReview = {
+    sinceRound: snap.round,
+    files,
+    ...(restored.length > 0 ? { restored } : {}),
+  };
+  saveState(state);
+  const paths = files.map((f) => f.path);
+  const named = [...paths, ...restored.map((p) => `${p} (back to its base content)`)];
+  log.warn(
+    `${paths.length + restored.length} change(s) to the run's own judge after review round ${snap.round}, ` +
+      `not judged by any seat: ${named.join(', ')}`,
+    {
+      id: 'judge_edited_after_review',
+      data: { sinceRound: snap.round, count: paths.length + restored.length, files: paths, restored },
+    },
+  );
+}
+
+/**
  * A fix round is a code round, and it says so before its turn starts (#280).
  *
  * The first implement turn opens the code group with `phase_started`; the fix
@@ -1963,7 +2063,9 @@ function announceFixRound(state: RunState): void {
  *
  * `resumed` is that second road: the round, `finalFixDone` and
  * `state.outstanding` were already persisted by the attempt that died, so they
- * are reused rather than bought again.
+ * are reused rather than bought again. So is `judgeAtLastReview` (#485): the
+ * judge files as they stood before this round's first turn, which a snapshot
+ * retaken now would describe after whatever that dead turn wrote.
  */
 async function runFinalFix(
   state: RunState,
@@ -1978,6 +2080,24 @@ async function runFinalFix(
   resumed: boolean,
 ): Promise<void> {
   if (!resumed) {
+    // Before the round number moves, so `round` is the 1-based review round
+    // whose verdict led here, as `testChanges.round` numbers it (#485). On the
+    // save below, with the flags, so a death inside the turn keeps it.
+    const round = state.reviewRound + 1;
+    const read = await readJudgeTree(state, cfg, cwd);
+    delete state.judgeEditedAfterReview;
+    if (read !== null) {
+      state.judgeAtLastReview = {
+        round,
+        files: read.judged.map((c) => ({ path: c.path, blob: read.blobs.get(c.path) ?? null })),
+      };
+    } else {
+      delete state.judgeAtLastReview;
+      log.warn(
+        `The run's own tests and config could not be read at review round ${round}, so edits ` +
+          'to them after it will not be checked.',
+      );
+    }
     state.reviewRound += 1;
     state.finalFixDone = true;
     state.outstanding = [...tolerated];

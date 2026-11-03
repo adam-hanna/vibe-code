@@ -556,6 +556,57 @@ a Codex implementer (a fresh `codex exec` on `SLOTS.write`) never saw it. Two th
   model-dependent. `suggestedFix`'s flaky-gate text already forbids loosening or deleting the
   assertion, which agrees with it.
 
+**Edits to the judge after the last review are listed too, by content** (#485). `judgeChanges`
+had one call site, inside `runReview`, and the final fix is never reviewed again, nor are the
+verify fixes after it. So a test rewritten there was never named, and a file judged at the last
+review kept a verdict given for its earlier content. Those are exactly the turns under pressure
+to make a failing gate pass. The final fix road is the only road with such edits: a clean pass
+`break`s, and a blocking review is followed by another review. It has two entrances, a review
+that tolerated P1s and a pass with a P2 to address (#425), and both go through `runFinalFix`.
+That function takes `state.judgeAtLastReview` before its turn, on the save that sets
+`finalFixDone`: each judge path with its `git hash-object` id, or null for a deleted one, and the
+1-based review round whose verdict led there. A resumed final fix reuses it. Once the gate passes
+at the end of the road, the `finalFixDone` block lists again and compares. A judge path the
+snapshot lacked or whose id moved goes in `state.judgeEditedAfterReview.files`, with status and
+counts from that listing. A snapshot path git no longer lists at all is back to its base content
+and goes in `restored`. It has no `FileChangeStatus`, and none is invented. It is said as
+`judge_edited_after_review`, narration with no event, and at the end of the run beside
+`reportTestChanges`. That line says of every file that no seat judged its final content, and,
+per file, whether its earlier content had a verdict. "Had a verdict" means any seat's
+(`hadVerdict`), because a combined `unjudged` can sit beside a seat that gave one. `testChanges`
+is untouched and keeps meaning what the last review's diff did. Nothing blocks, and no seat is
+asked anything.
+
+- **Content, against the working tree, and not `resolveDiffMode`.** That read answers
+  `<base>..HEAD` whenever the range is non-empty. With commits on, an earlier commit landed and
+  the final fix's commit rejected (`commitAll` tolerates it, and a pre-commit hook is enough), it
+  would miss everything the final fix wrote. `git.treeChanges` diffs the base commit against the
+  tree after `add -N .`, so it lists what the review lists whenever every commit landed or
+  commits are off, and stays right when one did not. The review's own diff is unchanged.
+- **Strict, and failing closed.** The review's read falls back so a reviewer still gets
+  something. This read's only other answer is "nothing changed", and an `add -N` refused by an
+  index lock leaves new files out of a diff that then succeeds. So any failed step makes the
+  listing unreadable. Then, or with no snapshot (a run from before this, one dropped on load,
+  one that could not be taken), both fields are removed and the run says the edits could not
+  be checked (`judge_edited_after_review_unchecked`). It never says "none", and never shows a
+  record an earlier process left.
+- **Three ways a path-and-hash comparison could hide an edit, closed.** Both listings run
+  with `--no-renames`: pairing is decided afresh by each read, so a test copied before the
+  review and its original deleted after it would otherwise read as one rename onto the
+  unchanged copy. Membership still follows renames at the snapshot, as in the review: a `-M`
+  read of the same diff counts the destination of a rename from a matching path (a test moved
+  to `src/`). At the end, only direct matches and the snapshot's own paths count, never git's
+  fresh pairing, which can pair an untouched file with the old test once an unrelated identical
+  file is deleted. A path that was part of the judge at the review stays compared, and a test moved out after the
+  review still shows as its old path's deletion. A judge path that is not a regular file, a symlink above all, makes the
+  listing unreadable: `hash-object` follows the link, so a link retargeted to identical bytes
+  would hash the same. A stored snapshot with any damaged entry is dropped whole rather than
+  repaired down: a test that went back to its base content is absent from the end listing
+  too, so losing it from the snapshot would lose it entirely.
+- **Only a road that finishes is checked.** A verify cap after the final fix, a stop or an error
+  records nothing. That is out of scope here, not an oversight. Runs that never take the final
+  fix gain no key, no narration and no line.
+
 **Nothing under `.vibe/runs/` is read through a link, and there is one predicate for all
 three levels.** `linkageOf` in `src/run.ts` is `lstat(...).isSymbolicLink()`, which is true of
 a POSIX symlink, a Node `'junction'` and an `mklink /J` junction alike — one measurement, no

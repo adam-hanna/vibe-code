@@ -1802,6 +1802,47 @@ export interface TestChanges {
 }
 
 /**
+ * One judge file's content at the review that led to the final fix (#485):
+ * git's object id for the file in the working tree, or null for a file that
+ * is deleted there.
+ */
+export interface JudgeBlob {
+  path: string;
+  blob: string | null;
+}
+
+/**
+ * The judge files as they stood when the final fix road began (#485), taken
+ * before its turn so that what the final fix and the verify fixes after it do
+ * can be told apart from what the last review already saw.
+ *
+ * Written even with no files: an empty snapshot says "nothing was listed",
+ * which is a different fact from having no snapshot at all.
+ */
+export interface JudgeSnapshot {
+  /** 1-based: the review round whose verdict led to the final fix, as `TestChanges.round`. */
+  round: number;
+  files: JudgeBlob[];
+}
+
+/**
+ * Changes to the run's own judge made after the last review (#485): by the
+ * final fix, or by the verify fixes after it. No seat judged any of them.
+ *
+ * Kept apart from `testChanges`, which goes on meaning what the last review
+ * round's diff did. `files` carries status and counts from the listing taken
+ * at the end of the road; `restored` names snapshot paths that are back to
+ * their base content, which git no longer lists and so have no status to give.
+ */
+export interface JudgeEditedAfterReview {
+  /** 1-based: the review round whose verdict led to the final fix. */
+  sinceRound: number;
+  files: FileChange[];
+  /** Omitted when empty, never `[]`. */
+  restored?: string[];
+}
+
+/**
  * One turn's observed-but-uncharged spend. See `RunState.inFlight`.
  *
  * Keyed by `label` plus `provider` wherever it is looked up, which is unique
@@ -2218,6 +2259,23 @@ export interface RunState {
    * touched no judge file, or no part has completed - never an empty record.
    */
   testChanges?: TestChanges | undefined;
+  /**
+   * The judge files when the final fix road began (#485), compared with the
+   * tree once that road has finished.
+   *
+   * Written once, on the same save as `finalFixDone`, and reused by a resumed
+   * final fix rather than taken again. Absent on every run that never took the
+   * final fix, on a run from before it existed, and when the files could not
+   * be read - and a final fix with no snapshot says its edits could not be
+   * checked, never that there were none.
+   */
+  judgeAtLastReview?: JudgeSnapshot | undefined;
+  /**
+   * What the final fix road changed in the judge after the last review
+   * (#485). Written only by a comparison that found something, and never
+   * present without `judgeAtLastReview`.
+   */
+  judgeEditedAfterReview?: JudgeEditedAfterReview | undefined;
   /**
    * Who took the most recent review round's own turn (#393): `roles.reviewer`'s
    * provider and model as they were when that round's artifact was written.

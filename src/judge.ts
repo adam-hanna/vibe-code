@@ -1,5 +1,12 @@
 import type { AgentProvider } from '@src/runtime.js';
-import type { FileChange, JudgeFile, JudgeSeatVerdict, JudgeVerdict, VerifyConfig } from '@src/types.js';
+import type {
+  FileChange,
+  JudgeBlob,
+  JudgeFile,
+  JudgeSeatVerdict,
+  JudgeVerdict,
+  VerifyConfig,
+} from '@src/types.js';
 
 /**
  * A change that touches the run's own judge (#112).
@@ -14,6 +21,11 @@ import type { FileChange, JudgeFile, JudgeSeatVerdict, JudgeVerdict, VerifyConfi
  *
  * Nothing here blocks anything. It makes such a change impossible to pass in
  * silence, which is option 1 of the issue and the whole of what was decided.
+ *
+ * The review is not the only place the judge can be edited (#485). The final
+ * fix is never reviewed again, and neither are the verify fixes after it, so
+ * `editedAfterReview` compares the judge files before and after that road, by
+ * content. It asks nothing of anyone either: what it lists is a fact from git.
  */
 
 /**
@@ -253,4 +265,78 @@ export function disagreements(files: readonly JudgeFile[]): number {
     const said = (f.verdicts ?? []).flatMap((v) => (v.verdict === 'unjudged' ? [] : [v.verdict.justified]));
     return said.includes(true) && said.includes(false);
   }).length;
+}
+
+/**
+ * What the final fix road did to the judge after the last review (#485).
+ *
+ * `judged` is the judge listing at the end of the road, `blobs` the content id
+ * of each of its paths (null for a deleted one), and `all` the whole end
+ * listing before the judge filter. A judged path is edited when the snapshot
+ * did not have it - it was untouched at the review - or when its content id
+ * moved. Deleted at both ends is null against null, and unchanged.
+ *
+ * A snapshot path git no longer lists at all is back to its base content: it
+ * changed after the review, and has no status to report, so it is `restored`.
+ * Read against `all` rather than `judged` so that a pattern changed between the
+ * two reads cannot pass for a restore, and a path that is now the old side of a
+ * rename is covered by that rename's own entry.
+ */
+export function editedAfterReview(
+  snapshot: readonly JudgeBlob[],
+  judged: readonly FileChange[],
+  blobs: ReadonlyMap<string, string | null>,
+  all: readonly FileChange[],
+): { files: FileChange[]; restored: string[] } {
+  const before = new Map(snapshot.map((f) => [f.path, f.blob]));
+  const files = judged.filter((c) => {
+    if (!before.has(c.path)) return true;
+    return (blobs.get(c.path) ?? null) !== before.get(c.path);
+  });
+  const listed = new Set(all.flatMap((c) => (c.oldPath === null ? [c.path] : [c.path, c.oldPath])));
+  const restored = snapshot.map((f) => f.path).filter((p) => !listed.has(p));
+  return { files, restored };
+}
+
+/**
+ * Which of a rename-free listing's paths belong to the judge (#485).
+ *
+ * The listing compares path by path, so it carries no renames. A path is in
+ * when it matches, when `renamedFrom` pairs it as the destination of a rename
+ * from a path that matches (`judgeChanges`' either-side rule), or when `keep`
+ * names it.
+ *
+ * The two reads use different halves. The snapshot passes git's pairing and no
+ * `keep`, so it classifies as the review did. The end of the road passes the
+ * snapshot's paths as `keep` and NO pairing: git decides pairing afresh, and a
+ * final fix that deletes an unrelated identical file can make it pair a
+ * different, untouched destination with the old test - which would then read as
+ * new to the judge, and so as edited, with nothing about it changed. A path that
+ * was judge at the review stays compared through `keep`, and a test moved out
+ * after the review still shows as its old path's deletion.
+ */
+export function judgeTracked(
+  changes: readonly FileChange[],
+  renamedFrom: ReadonlyMap<string, string>,
+  patterns: readonly string[],
+  keep: ReadonlySet<string> = new Set(),
+): FileChange[] {
+  return changes.filter((c) => {
+    if (keep.has(c.path) || isJudge(c.path, patterns)) return true;
+    const from = renamedFrom.get(c.path);
+    return from !== undefined && isJudge(from, patterns);
+  });
+}
+
+/**
+ * Whether ANY seat gave this file a verdict at its review (#485).
+ *
+ * Not the same question as the record's combined `verdict`. `combineVerdicts`
+ * fails closed, so a file the reviewer called justified and a finder left
+ * unjudged combines to `unjudged` while the reviewer's verdict is still there in
+ * `verdicts`. Saying of that file that nobody judged it would be untrue.
+ */
+export function hadVerdict(file: JudgeFile): boolean {
+  if (file.verdict !== 'unjudged') return true;
+  return (file.verdicts ?? []).some((v) => v.verdict !== 'unjudged');
 }

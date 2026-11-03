@@ -33,9 +33,13 @@ import type {
   ResolvedQuestion,
   ReviewCoverage,
   ReviewSeat,
+  FileChange,
   FileChangeStatus,
+  JudgeBlob,
+  JudgeEditedAfterReview,
   JudgeFile,
   JudgeSeatVerdict,
+  JudgeSnapshot,
   TestChanges,
   UnaddressedFinding,
   RoundClaim,
@@ -1517,39 +1521,114 @@ function readTestChanges(raw: unknown, ctx: ReadContext): TestChanges | undefine
   ) {
     return drop();
   }
-  const count = (v: unknown): v is number | null => v === null || isCounter(v);
   const files: JudgeFile[] = [];
   for (const [i, entry] of (raw['files'] as unknown[]).entries()) {
     if (!isRecord(entry)) return drop();
-    const status = enumOf(entry['status'], FILE_CHANGE_STATUSES);
-    const file = entry['path'];
-    const oldPath = entry['oldPath'];
-    const added = entry['added'];
-    const removed = entry['removed'];
-    const verdict = entry['verdict'];
-    if (
-      status === null ||
-      !isString(file) ||
-      !(oldPath === null || isString(oldPath)) ||
-      !count(added) ||
-      !count(removed)
-    ) {
-      return drop();
-    }
-    const read = readJudgeVerdict(verdict);
+    const change = readFileChange(entry);
+    if (change === null) return drop();
+    const read = readJudgeVerdict(entry['verdict']);
     if (read === null) return drop();
     const seats = readSeatVerdicts(entry['verdicts'], ctx, `testChanges.files[${i}].verdicts`);
     files.push({
-      path: file,
-      oldPath,
-      status,
-      added,
-      removed,
+      ...change,
       verdict: read,
       ...(seats === undefined ? {} : { verdicts: seats }),
     });
   }
   return { round: raw['round'], patterns: [...(raw['patterns'] as string[])], files };
+}
+
+/**
+ * One file's facts as git reported them, or null for anything the writer does
+ * not produce. Shared by the three records that hold them (#112, #485). A count
+ * that is neither a non-negative integer nor null is damage: null is how the
+ * writer says "not counted", so there is nothing to coerce.
+ */
+function readFileChange(entry: unknown): FileChange | null {
+  if (!isRecord(entry)) return null;
+  const count = (v: unknown): v is number | null => v === null || isCounter(v);
+  const status = enumOf(entry['status'], FILE_CHANGE_STATUSES);
+  const file = entry['path'];
+  const oldPath = entry['oldPath'];
+  const added = entry['added'];
+  const removed = entry['removed'];
+  if (
+    status === null ||
+    !isString(file) ||
+    !(oldPath === null || isString(oldPath)) ||
+    !count(added) ||
+    !count(removed)
+  ) {
+    return null;
+  }
+  return { path: file, oldPath, status, added, removed };
+}
+
+/**
+ * The judge files when the final fix road began (#485), or nothing.
+ *
+ * A damaged record drops the key, and the run then says its edits after the
+ * last review could not be checked - which is decision 6's answer, never "none".
+ *
+ * **So does a damaged entry**, named by its path in the repair. Dropping just
+ * the entry looks like it could only over-report - the path reads as absent, so
+ * an edit to it is still listed - but a path that went back to its base content
+ * is absent from the end listing too, and with neither side naming it the
+ * restore would pass in silence. A snapshot missing anything is not one the
+ * comparison can stand on.
+ */
+function readJudgeSnapshot(raw: unknown, ctx: ReadContext): JudgeSnapshot | undefined {
+  if (raw === undefined) return undefined;
+  if (!isRecord(raw) || !isPositiveInt(raw['round']) || !Array.isArray(raw['files'])) {
+    ctx.repairs.dropped('judgeAtLastReview', 'judgeAtLastReview');
+    return undefined;
+  }
+  const files: JudgeBlob[] = [];
+  let damaged = false;
+  for (const [i, entry] of (raw['files'] as unknown[]).entries()) {
+    const blob = isRecord(entry) ? entry['blob'] : undefined;
+    if (!isRecord(entry) || !isString(entry['path']) || !(blob === null || (isString(blob) && BLOB_ID.test(blob)))) {
+      ctx.repairs.dropped('judgeAtLastReview', `judgeAtLastReview.files[${i}]`);
+      damaged = true;
+      continue;
+    }
+    files.push({ path: entry['path'], blob });
+  }
+  return damaged ? undefined : { round: raw['round'], files };
+}
+
+/**
+ * What the final fix road changed in the judge after the last review (#485),
+ * or nothing. The record rule is the snapshot's; a damaged file entry or a
+ * `restored` entry that is not a path is dropped and said, and a `restored`
+ * left empty is omitted, as the writer omits it.
+ */
+function readJudgeEditedAfterReview(raw: unknown, ctx: ReadContext): JudgeEditedAfterReview | undefined {
+  if (raw === undefined) return undefined;
+  const field = 'judgeEditedAfterReview';
+  if (!isRecord(raw) || !isPositiveInt(raw['sinceRound']) || !Array.isArray(raw['files'])) {
+    ctx.repairs.dropped(field, field);
+    return undefined;
+  }
+  const files: FileChange[] = [];
+  for (const [i, entry] of (raw['files'] as unknown[]).entries()) {
+    const change = readFileChange(entry);
+    if (change === null) ctx.repairs.dropped(field, `${field}.files[${i}]`);
+    else files.push(change);
+  }
+  const restored: string[] = [];
+  const rawRestored = raw['restored'];
+  if (rawRestored !== undefined) {
+    if (!Array.isArray(rawRestored)) {
+      ctx.repairs.dropped(field, `${field}.restored`);
+    } else {
+      for (const [i, entry] of (rawRestored as unknown[]).entries()) {
+        if (isString(entry)) restored.push(entry);
+        else ctx.repairs.dropped(field, `${field}.restored[${i}]`);
+      }
+    }
+  }
+  return { sinceRound: raw['sinceRound'], files, ...(restored.length > 0 ? { restored } : {}) };
 }
 
 /**
@@ -2274,6 +2353,11 @@ const READERS = {
   // Absent stays absent: a round that touched no judge file records nothing,
   // and a damaged record is dropped rather than guessed into one (#112).
   testChanges: (raw, ctx) => readTestChanges(raw, ctx),
+  // Absent stays absent: a run that never took the final fix, or one from
+  // before #485. A damaged record is dropped, and a final fix with no snapshot
+  // says its edits after the last review could not be checked.
+  judgeAtLastReview: (raw, ctx) => readJudgeSnapshot(raw, ctx),
+  judgeEditedAfterReview: (raw, ctx) => readJudgeEditedAfterReview(raw, ctx),
   // Absent stays absent: a run from before #393, or one that has not recorded a
   // review round. A damaged value is dropped, so its round credits no seat.
   reviewSeat: (raw, ctx) => readRoundSeat(raw, ctx, 'reviewSeat'),
