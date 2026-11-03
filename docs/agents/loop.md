@@ -999,7 +999,10 @@ read it. Now it is data, and it is recorded per round.
   `fixPrompt`'s `dispositions` argument appends one `## Dispositions` block naming every id.
   `verify-fix-<n>` passes nothing: its one "finding" is a gate failure, not a reviewer's claim,
   so its prompt and prose report are unchanged. So are `FIX_BREADTH` (shared with the implement
-  turn, and overridable) and the implement turn.
+  turn, and overridable) and the implement turn. The review fix turns' `fix breadth` report bullet
+  used to name three dispositions beside the block's four; since #506 it asks for the one given in
+  `dispositions`, so the report still states each answer for the next reviewer, in the block's
+  vocabulary. The bullet stays because `report` is the only thing that reviewer reads.
 - **The report is still the report.** `fix-report-<n>.md` is written from `report` verbatim, and
   the next reviewer reads it through `state.lastReport` exactly as before.
 - **Missing is a fact; unreadable is not.** Output that parses, but leaves out a finding's id,
@@ -1086,6 +1089,10 @@ rebutted. #393's record is now kept for the plan side too.
   fix and verify-fix prompts are byte-identical. An override of `fix breadth` still replaces the
   whole block everywhere. The findings are introduced as the plan critique's, not "an independent
   reviewer's", with a person's finding marked as it already was by `raisedNote`.
+- **The rest of the reviewer wording (#506).** `raisedNote` is given the phase, so a person's
+  finding in a plan revision says it was raised "not by the plan critique" and has not been through
+  a critique round; the fix prompt's note is unchanged. `fix breadth`'s remedy sentence, read by
+  every caller, says "a finding's proposed remedy" rather than "the reviewer's".
 - **The plan keeps its shape.** The turn's output is read once. `parsePlan` reads the plan half
   unchanged, and `parsePlanDispositions` reads the list. `plan-<n>.json`, `state.plan` and
   everything downstream never see `dispositions`. An unreadable plan fails the turn as before. A

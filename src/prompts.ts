@@ -281,9 +281,10 @@ repair or an evidence-backed rebuttal resolves it.`;
  * `report`. A plan revision writes no report. It answers in `REVISE_SCHEMA`'s
  * `dispositions`, four-way, as `PLAN_DISPOSITIONS` says in the same prompt, so
  * the planner was being given two instructions that disagreed. `FIX_BREADTH` is
- * the concatenation, byte for byte what every other caller always sent, and the
- * `fix breadth` block it renders through is unchanged: an override still
- * replaces the whole block on every turn, the planner's included.
+ * the concatenation, what the implement and verify-fix turns send; a review fix
+ * turn words the bullet for its `## Dispositions` block (#506). The `fix breadth`
+ * block they render through is unchanged: an override still replaces the whole
+ * block on every turn, the planner's and the fixer's included.
  */
 const FIX_BREADTH_CHECKS = `## Fix breadth
 
@@ -308,13 +309,34 @@ revision or repair, apply them to the findings.
 - Resolve valid defects with the simplest coherent repair. If added complexity
   caused the defect, consider removing or simplifying it. Reject an incorrect
   finding or unnecessary scope expansion with evidence; a valid defect still
-  needs resolving even when you reject the reviewer's proposed remedy.`;
+  needs resolving even when you reject a finding's proposed remedy.`;
 
-const FIX_BREADTH = `${FIX_BREADTH_CHECKS}
-- In your report, state each finding's disposition (fixed, rebutted, or deferred)
+/**
+ * The report bullet, with what it calls a disposition left to the caller.
+ *
+ * The implement and verify-fix turns name the three values in prose, because the
+ * prose report is the only place their answer goes. A review fix turn is also
+ * given `## Dispositions` (#393), which asks for one of four values per id in
+ * `FIX_SCHEMA.dispositions`, and the two disagreed (#506). The bullet is not
+ * dropped there as it is for the planner (#482): the fixer does write a report,
+ * `FIX_SCHEMA.report`, and it is the only thing the next reviewer reads, so a
+ * rebuttal's reason still belongs in it. What it defers to the block is the
+ * vocabulary: `dispositions` is the record, and the report states the same
+ * answer rather than a second, three-way one.
+ */
+function fixReportBullet(disposition: string): string {
+  return `- In your report, state each finding's disposition ${disposition}
   and its reason, what you changed, **what else you
   checked for the same class of problem**, and what you found. "Checked X and Y,
   they were already correct" is useful; silence is not.`;
+}
+
+const FIX_BREADTH = `${FIX_BREADTH_CHECKS}
+${fixReportBullet('(fixed, rebutted, or deferred)')}`;
+
+/** `FIX_BREADTH` for a review fix turn, whose `## Dispositions` holds the values (#506). */
+const FIX_BREADTH_WITH_DISPOSITIONS = `${FIX_BREADTH_CHECKS}
+${fixReportBullet('(the one you give it in `dispositions`, below)')}`;
 
 /**
  * The plan's declared boundary, rendered.
@@ -973,7 +995,7 @@ export function revisePlanPrompt({
 
 The plan critique raised the following, except where a finding says a person raised it. Evaluate each P1 against the original task and repository evidence, then resolve the defect or explicitly rebut an incorrect finding. A finding's proposed remedy is advisory; use the simplest coherent approach that resolves a valid defect.
 
-${findings.map((f) => formatFinding(f) + voteNote(f)).join('\n\n')}${deferralNote(findings, 'planner')}
+${findings.map((f) => formatFinding(f, 'plan') + voteNote(f)).join('\n\n')}${deferralNote(findings, 'planner')}
 
 For each P1: fix the plan, or, if you believe the finding is wrong, rebut it. Do not silently ignore one.
 
@@ -1653,9 +1675,9 @@ export function fixPrompt(
 
 Evaluate **every P1**, then resolve valid defects or rebut incorrect findings with evidence. Address a P2 only when it belongs to the task or is necessary to a coherent repair and the fix is contained and low-risk. Defer separable improvements, even when they would be a small edit. Skip P3s unless they are incidental to required work.
 
-${findings.map(formatFinding).join('\n\n')}${deferralNote(findings, 'fixer')}${nearNote(findings)}
+${findings.map((f) => formatFinding(f, 'review')).join('\n\n')}${deferralNote(findings, 'fixer')}${nearNote(findings)}
 
-${block(BLOCK.fix, FIX_BREADTH)}
+${block(BLOCK.fix, dispositions ? FIX_BREADTH_WITH_DISPOSITIONS : FIX_BREADTH)}
 
 ${block(BLOCK.simple, SIMPLE_SOLUTION)}
 
@@ -1675,6 +1697,8 @@ ${implementerCriteria(acceptanceCriteria)}${reportRequest(acceptanceCriteria, 'f
  *
  * Appended after the report request rather than woven into `FIX_BREADTH`, which
  * is shared with the implement turn and overridable, so neither of those moves.
+ * The one place `fix breadth` answers it is its report bullet, which on these
+ * turns names this block's values rather than three of its own (#506).
  */
 function dispositionsRequest(findings: readonly Finding[]): string {
   const ids = findings.map((f) => `\`${f.id}\``).join(', ');
@@ -1869,11 +1893,22 @@ ${choices}
 `;
 }
 
-function raisedNote(f: Finding): string {
-  return authorOf(f) === 'human'
-    ? '\n\n*Raised by the person running this, not by the reviewer. It cost no turn and no ' +
-        'tokens, and it has not been through a review round - judge it on what it says.*'
-    : '';
+/**
+ * Which loop a finding is being shown in, so its notes name the right agent: a
+ * plan finding comes from the plan critique, which is the critic plus any
+ * critique finders (#405), never a reviewer (#506).
+ */
+type FindingPhase = 'plan' | 'review';
+
+function raisedNote(f: Finding, phase: FindingPhase): string {
+  if (authorOf(f) !== 'human') return '';
+  // The review side's bytes are what they always were. The plan side says what
+  // the plan revision's opening line says (#482).
+  const [by, round] = phase === 'plan' ? ['the plan critique', 'critique'] : ['the reviewer', 'review'];
+  return (
+    `\n\n*Raised by the person running this, not by ${by}. It cost no turn and no ` +
+    `tokens, and it has not been through a ${round} round - judge it on what it says.*`
+  );
 }
 
 /**
@@ -1938,14 +1973,14 @@ function voteNote(f: Finding): string {
     : '';
 }
 
-function formatFinding(f: Finding): string {
+function formatFinding(f: Finding, phase: FindingPhase): string {
   // Omitted rather than printed empty. A human raising a finding is reporting a
   // defect, not designing the repair, and `*Suggested fix:* ` with nothing after
   // it reads as a fix somebody forgot to write down. Every agent finding has one
   // - the schema requires it - so no existing prompt changes.
   const fix = f.suggested_fix.trim() === '' ? '' : `\n\n*Suggested fix:* ${f.suggested_fix}`;
   return `### [${f.severity}] ${f.title}  \`${f.id}\`
-${f.detail}${fix}${citation(f, '\n')}${raisedNote(f)}${movedNote(f)}${provenNote(f)}${f.defer === true ? `\n\n${block(BLOCK.deferred, DEFERRED_MARK)}` : ''}`;
+${f.detail}${fix}${citation(f, '\n')}${raisedNote(f, phase)}${movedNote(f)}${provenNote(f)}${f.defer === true ? `\n\n${block(BLOCK.deferred, DEFERRED_MARK)}` : ''}`;
 }
 
 /**
@@ -2185,8 +2220,9 @@ export function promptBlocks(): readonly PromptBlock[] {
     of(BLOCK.json, ['planner', 'critic', 'answerer', 'reviewer'], RESPOND_WITH_JSON),
     of(BLOCK.review, ['critic', 'reviewer'], REVIEW_BREADTH),
     // The planner's findings revision gets it without the last bullet, the one
-    // asking for a prose report (#482); the text shown is the whole block, which
-    // is what an override replaces.
+    // asking for a prose report (#482), and a review fix turn with that bullet
+    // pointing at `## Dispositions` (#506); the text shown is the whole block as
+    // the implement turn gets it, which is what an override replaces.
     of(BLOCK.fix, ['planner', 'implementer'], FIX_BREADTH),
     of(BLOCK.simple, ['planner', 'critic', 'answerer', 'implementer', 'reviewer'], SIMPLE_SOLUTION),
     // Through `formatFinding`, so it reaches exactly the two turns that are

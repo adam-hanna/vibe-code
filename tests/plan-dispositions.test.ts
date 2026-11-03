@@ -47,7 +47,7 @@ test('a findings revision prompt is develop\'s with exactly the rebuttal sentenc
   // #482 moved three more regions, each spliced rather than the fixture
   // regenerated, so the assertion still proves nothing else in the prompt did.
   let expected = golden.replace(before, after);
-  for (const [from, to] of PLAN_REVISION_482) {
+  for (const [from, to] of [...PLAN_REVISION_482, ...PLAN_REVISION_506]) {
     assert.ok(expected.includes(from), `the golden carries ${JSON.stringify(from.slice(0, 40))}`);
     expected = expected.replace(from, to);
   }
@@ -77,6 +77,19 @@ const PLAN_REVISION_482: readonly (readonly [string, string])[] = [
   [FIX_REPORT_BULLET, ''],
 ];
 
+/**
+ * What #506 changed in the same prompt: one sentence of `fix breadth`, shared
+ * with every caller, which still called a finding's suggested fix the
+ * reviewer's. Case 2 of AGENTS.md: the planner's findings come from the plan
+ * critique, so the pin held the wording #482 fixed in the opening line.
+ */
+const PLAN_REVISION_506: readonly (readonly [string, string])[] = [
+  [
+    "even when you reject the reviewer's proposed remedy.",
+    "even when you reject a finding's proposed remedy.",
+  ],
+];
+
 test('a findings revision gives the planner one disposition instruction, and names the critique as the source (#482)', () => {
   const prompt = revisePlanPrompt({ ...BASE, findings: BLOCKING, round: 1 });
   assert.ok(prompt.includes('`not-addressed`'), 'the four-way `plan dispositions` instruction is there');
@@ -89,11 +102,14 @@ test('a findings revision gives the planner one disposition instruction, and nam
   assert.ok(prompt.includes('Resolve valid defects with the simplest coherent repair.'));
 });
 
-test('every other `fix breadth` caller still asks for the three-way prose disposition (#482)', () => {
-  // The bullet is right where a report is written: the implement, fix and
-  // verify-fix turns. Their pinned bytes are held by `fix-dispositions.test.ts`
-  // against `fix-round1.txt` and by `implementer-report-prompt.test.ts`; this
-  // says the split kept the bullet on them, not only that their bytes match.
+test('the implement and verify-fix turns still ask for the three-way prose disposition (#482)', () => {
+  // The bullet is right where a report is written and nothing else records the
+  // answer: the implement and verify-fix turns. Their pinned bytes are held by
+  // `fix-dispositions.test.ts` against `fix-round1.txt` and by
+  // `implementer-report-prompt.test.ts`; this says the split kept the bullet on
+  // them, not only that their bytes match. A review fix turn keeps the bullet
+  // with its values deferred to `## Dispositions` (#506), which
+  // `fix-dispositions.test.ts` holds.
   const fix = fixPrompt(BLOCKING, 1);
   assert.ok(fix.includes(FIX_REPORT_BULLET));
   assert.ok(implementPrompt(PLAN_MD).includes(FIX_REPORT_BULLET));
