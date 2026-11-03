@@ -760,6 +760,32 @@ export function decide(
 }
 
 /**
+ * A proposal whose effect can no longer happen, answered with why (#521).
+ *
+ * `lapsedWhy` in `tools.ts` says when: a gate answer whose gate has closed. The
+ * model is told nothing was sent, in the same shape `decide` tells it of a no,
+ * and the composer is free again - an owed proposal is what was holding it.
+ *
+ * **Placed after the call's own turn, not at the end.** By the time a gate is
+ * overtaken the conversation has usually moved on (#489's had a wake and a
+ * reply after the card), and Anthropic rejects a `tool_result` that is not in
+ * the message straight after its `tool_use`. So it joins the results that turn
+ * already has; the end is used only when no message holds the call.
+ */
+export function lapse(conversation: Conversation, id: string, content: string): Conversation {
+  if (answerOf(conversation, id) !== null) return conversation;
+  const call = conversation.replies.flatMap((reply) => reply.calls).find((c) => c.id === id);
+  if (call === undefined || call.settlement?.kind !== 'proposes') return conversation;
+  const result: Message = { role: 'tool', id, name: call.name, content };
+  const messages = conversation.messages;
+  const turn = messages.findIndex((m) => m.role === 'assistant' && (m.calls ?? []).some((c) => c.id === id));
+  if (turn < 0) return { ...conversation, messages: [...messages, result] };
+  let at = turn + 1;
+  while (messages[at]?.role === 'tool') at += 1;
+  return { ...conversation, messages: [...messages.slice(0, at), result, ...messages.slice(at)] };
+}
+
+/**
  * A proposal that ran without a card, because the person's settings said it
  * could (#223).
  *

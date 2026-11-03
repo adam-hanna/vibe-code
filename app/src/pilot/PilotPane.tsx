@@ -21,7 +21,7 @@ import { readEmitted, unique, visible } from './emit';
 import { useFollow } from '../follow';
 import { JumpToEnd } from '../JumpToEnd';
 import { autoRun, NO_ACCESS } from './access';
-import { archiveContent, declare, settleCall } from './tools';
+import { archiveContent, declare, lapsedWhy, settleCall } from './tools';
 import type { Binding } from './bound';
 import { chatKey, readChat, replyKey, sameExchange, worthSaving, writable } from './saved';
 import { getChat, putChat, useChatRevision, useChats } from './chatstore';
@@ -48,6 +48,7 @@ import {
   contextNow,
   describeContext,
   decide,
+  lapse,
   emptyConversation,
   follow,
   heldSession,
@@ -265,6 +266,8 @@ type Action =
   | { type: 'decide'; id: string; accepted: boolean; note: string }
   /** A proposal the person's settings ran without a card (#223). */
   | { type: 'auto'; id: string; why: string }
+  /** A proposal whose gate closed before anybody decided on it (#521). */
+  | { type: 'lapse'; id: string; why: string }
   | { type: 'unknown' }
   /** The pilot summarising itself, to carry into a fresh context (#223). */
   | { type: 'compact'; turn: number; provider: Backend; openedAt: number }
@@ -297,6 +300,8 @@ function apply(state: Conversation, action: Action): Conversation {
       return decide(state, action.id, action.accepted, action.note);
     case 'auto':
       return autoRan(state, action.id, action.why);
+    case 'lapse':
+      return lapse(state, action.id, action.why);
     case 'unknown':
       return unrecognised(state);
     case 'compact':
@@ -1626,6 +1631,31 @@ ${frame.text}`, turn, origin.current))) {
     [model, provider, run, launched, dir, access, standing, pilotPrompts, binding],
   );
 
+  /**
+   * Answer every proposal whose gate has closed (#521).
+   *
+   * Without this a card for a gate released from the footer, the matrix or a
+   * phone stayed owed for good, and an owed proposal blocks the composer: #489's
+   * run finished with its pilot still saying *answer the proposal above first*.
+   *
+   * **A lapse is not a turn.** Nobody asked for one, and the pilot was not
+   * waiting on it - so when the result lands at the end, where the tool loop
+   * would read it as owed a follow-up, `sentAt` is moved past it first.
+   */
+  useEffect(() => {
+    const lapsed = unanswered(conversation).flatMap((call) => {
+      const why = call.settlement?.kind === 'proposes' ? lapsedWhy(call.settlement.effect, binding) : null;
+      return why === null ? [] : [{ id: call.id, why }];
+    });
+    if (lapsed.length === 0) return;
+    // Only when nothing else is owed a follow-up: a read answered in the same
+    // turn as the card still is, and it gets its turn once the card is gone.
+    if (sentAt.current < 0 || sentAt.current === conversation.messages.length) {
+      sentAt.current = conversation.messages.length + lapsed.length;
+    }
+    for (const { id, why } of lapsed) dispatch({ type: 'lapse', id, why });
+  }, [conversation, binding]);
+
   const owed = unanswered(conversation);
   // Every owed call is unsendable, but only a proposal is unsendable *at a
   // person*. The rest are the frame or two between a turn ending and the settle
@@ -1936,6 +1966,13 @@ ${frame.text}`, turn, origin.current))) {
       const call = conversation.replies.flatMap((r) => r.calls).find((c) => c.id === id);
       const settlement = call?.settlement;
       if (settlement?.kind !== 'proposes') return;
+      // Pressed in the frame before the lapse effect ran: firing it would tell
+      // the model a request went to a gate that is gone (#521).
+      const why = lapsedWhy(settlement.effect, binding);
+      if (why !== null) {
+        dispatch({ type: 'lapse', id, why });
+        return;
+      }
       // The effect first, the record second. A dispatch that landed and a send
       // that then threw would leave the model told the request went when it did
       // not — and `onEffect` reports its own failure into the output pane.
@@ -1946,7 +1983,7 @@ ${frame.text}`, turn, origin.current))) {
       chain.current = 0;
       setStalled(false);
     },
-    [conversation.replies, onEffect],
+    [conversation.replies, onEffect, binding],
   );
 
   /**

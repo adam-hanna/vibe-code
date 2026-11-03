@@ -264,6 +264,8 @@ describe('answer_gate proposes a decision the core will judge', () => {
       // Unnarrowed on the wire - `readDecision` owns that vocabulary - with the
       // origin alongside so the release leaves an attributed row.
       decision: { kind: 'continue', origin: ORIGIN },
+      // And which gate it was, because the id alone restarts in every host (#521).
+      at: { boundary: 'plan-approved', planRound: 1, reviewRound: 0, verifyRound: 0 },
     });
   });
 
@@ -275,6 +277,7 @@ describe('answer_gate proposes a decision the core will judge', () => {
       kind: 'answer',
       askId: 9,
       decision: { kind: 'stop', reason: null, origin: ORIGIN },
+      at: { boundary: 'plan-approved', planRound: 1, reviewRound: 0, verifyRound: 0 },
     });
   });
 
