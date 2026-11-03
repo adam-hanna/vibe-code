@@ -90,12 +90,16 @@ test('a clean pass is legible as a sequence of ids, with no sentence read', asyn
       // list: the file IS the durable record, so recording that it was written
       // would store the same fact twice.
       //
-      // It appears five times in a clean pass, which is the whole of what a
-      // clean pass writes: the plan, the critique, PLAN.md at approval, the
+      // It appears once per file a clean pass writes, which is the whole of
+      // what it writes: the plan, which of the plan's paths the start commit
+      // holds (#491), the critique, PLAN.md at approval, the gate baseline, the
       // implementation report, and the review. The files the *implementer*
       // writes are not among them and must not be - those go into the repository
       // and are the run's output, where these are the run's record of itself.
       'artifact_written', // plan-0.json
+      // Beside it, which of its paths the start commit holds (#491): a record
+      // no prompt reads, and the file is its own durable record as above.
+      'artifact_written', // plan-paths-0.json
       'phase_started', //   critique
       'turn_started', //    the critic
       'codex_turn',
@@ -181,6 +185,7 @@ test('the sequence grew by facts the run already recorded, and by nothing else',
     seen.filter((n) => n.id === 'artifact_written').map((n) => n.data?.['name']),
     [
       'plan-0.json',
+      'plan-paths-0.json',
       'plan-critique-0.json',
       'PLAN.md',
       'gate-baseline.json',

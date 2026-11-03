@@ -164,6 +164,7 @@ import {
 } from '@src/context.js';
 import type { ClaudeTurnFn } from '@src/context.js';
 import { progressOptions } from '@src/progress.js';
+import { recordPlanPaths } from '@src/plan-paths.js';
 import {
   closeCodexRateLimits,
   decideCodexLimit,
@@ -4828,6 +4829,9 @@ async function runPlan(
   state.plan = plan;
   saveState(state);
   artifact(state, `plan-${state.planRound}.json`, plan);
+  // Which paths the plan names are absent at the start commit (#491). A record
+  // only: no prompt reads it yet, and it never fails or alters the run.
+  await recordPlanPaths(state, cwd, plan);
   // Reconciled here, not only at the round boundaries: this and `revisePlan`
   // are the only places `state.plan` is persisted, and an artifact that
   // disagrees with the stored plan is exactly what a run dying before the next
@@ -5039,6 +5043,8 @@ async function revisePlan(
   // `answers-<question-round>.json`, which is the half a reader is actually
   // asking about when a plan changed between two critiques.
   artifact(state, `plan-${state.planRound}.json`, plan);
+  // Beside it, and replaced with it for the same reason (#491).
+  await recordPlanPaths(state, cwd, plan);
   // With the new plan persisted, the follow-ups artifact is reconciled against
   // it immediately - including deleting it when this revision dropped the last
   // out-of-scope item and nothing has been deferred.

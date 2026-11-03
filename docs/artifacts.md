@@ -10,6 +10,7 @@ Most files are conditional: a missing one means the run had nothing to put in it
 |---|---|
 | `PLAN.md` | The approved plan. |
 | `plan-<n>.json` | Each plan round: the plan, its declared assumptions, open questions, out-of-scope list and acceptance criteria. |
+| `plan-paths-<n>.json` | Which repository paths `plan-<n>.json` names, each marked present or absent at the commit the run started from (`state.start`), with git's object type for a present one. A path with a `..` segment is listed as not checked rather than absent. It is a record only: no prompt reads it, so the critic is not told about absent paths (a plan can name files it will create). Missing on a run with no start commit (not on a branch, or from before the start commit was recorded), and when git could not read that commit: a path is never marked absent because a read failed. |
 | `plan-critique-<n>.json` | The critic's findings on each plan round. |
 | `plan-dispositions-<n>.json` | What the plan revision of round `<n>` said it did with each critique finding it was given: `fixed`, `rebutted`, `deferred` or `not-addressed`, with its reason, the seats that raised the finding, and the finding's vote outcome when it was voted on. It answers `plan-critique-<n-1>.json`. Missing when the planner's answer could not be read, and for a revision that answered only questions. |
 | `answers-<n>.json` | The answerer's answers to the planner's questions, one file per question round. |
