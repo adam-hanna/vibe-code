@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { applyOverrides, DEFAULTS } from '@src/config.js';
+import { resolveGates } from '@src/verify.js';
 import type { Config } from '@src/types.js';
 
 /**
@@ -282,4 +283,44 @@ test('a 1.1.0 config with no gates key still resolves and still validates', () =
   // DEFAULTS layered underneath supplies the key, and null is what says "the
   // legacy gate" - so a resume of a run recorded before #47 is unaffected.
   assert.equal(merged.verify.gates, null);
+});
+
+test('verify.baseline is checked on the legacy path and behind a gate list (#484)', () => {
+  // `"no"` is truthy, so an unchecked string would take the baseline the user
+  // asked to turn off.
+  assert.throws(withVerify({ baseline: 'no' }), { message: /verify\.baseline must be true or false/ });
+  assert.throws(
+    withVerify({ baseline: 'no', gates: [{ name: 'test', command: 'npm test' }] }),
+    { message: /verify\.baseline must be true or false/ },
+  );
+  assert.throws(
+    withVerify({ gates: [{ name: 'test', command: 'npm test', baseline: 1 }] }),
+    { message: /verify\.gates\[0\]\.baseline must be true or false/ },
+  );
+  assert.equal(withVerify({ baseline: false })().verify.baseline, false);
+  assert.equal(DEFAULTS.verify.baseline, true, 'on by default: a record that is off records nothing');
+});
+
+test('a gate takes verify.baseline unless it sets its own, and the legacy gate follows the section', () => {
+  const listed = applyOverrides(DEFAULTS, {
+    verify: {
+      baseline: false,
+      gates: [
+        { name: 'typecheck', command: 'npm run typecheck', baseline: true },
+        { name: 'test', command: 'npm test' },
+      ],
+    },
+  } as Partial<Config>);
+  assert.deepEqual(
+    resolveGates(listed.verify, '.').map((g) => [g.name, g.baseline]),
+    [
+      ['typecheck', true],
+      ['test', false],
+    ],
+  );
+
+  const legacy = applyOverrides(DEFAULTS, { verify: { command: 'npm test', baseline: false } } as Partial<Config>);
+  assert.deepEqual(resolveGates(legacy.verify, '.').map((g) => g.baseline), [false]);
+  const onByDefault = applyOverrides(DEFAULTS, { verify: { command: 'npm test' } } as Partial<Config>);
+  assert.deepEqual(resolveGates(onByDefault.verify, '.').map((g) => g.baseline), [true]);
 });

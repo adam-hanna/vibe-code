@@ -127,7 +127,7 @@ test('a verification failure and a review round each leave their own checkpoint'
   let reviews = 0;
   await orchestrate(
     state,
-    config({}, { ...committing(), ...verifying(state, { failures: 1 }) }),
+    config({}, { ...committing(), ...verifying(state, { failures: 1, baseline: false }) }),
     false,
     agents(
       cleanPass(state, {

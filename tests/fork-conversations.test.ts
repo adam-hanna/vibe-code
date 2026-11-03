@@ -55,7 +55,7 @@ async function parentRun(task = 'fork conversations'): Promise<RunState> {
   let critiques = 0;
   await orchestrate(
     state,
-    config({}, { ...committing(), ...verifying(state) }),
+    config({}, { ...committing(), ...verifying(state, { baseline: false }) }),
     false,
     agents(
       {

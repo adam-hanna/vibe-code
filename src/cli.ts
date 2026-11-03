@@ -2460,6 +2460,9 @@ export async function execute(
       log.warn(err.message, { id: 'run_escalated', data: { code: err.code, file } });
       log.info(`Details: ${file}`);
       log.info(`Resume:  vibe resume ${state.id}`);
+      // The usual way a gate is still failing at the end is this path, at
+      // `maxVerifyRounds`, which never reaches `reportGates` (#484).
+      reportInheritedGates(state);
       summary(state, started, recovery);
       return err.code;
     }
@@ -2973,6 +2976,7 @@ export function chargePreflight(state: RunState, cfg: Config, report: PreflightR
  * gate at all.
  */
 function reportGates(state: RunState): void {
+  reportInheritedGates(state);
   const unavailable = unavailableGates(state);
   if (unavailable.length === 0) {
     // A run can be unverified with no gate to name: a stored record that could
@@ -3009,6 +3013,44 @@ function reportGates(state: RunState): void {
     );
   }
   log.warn(parts.join(' '));
+}
+
+/**
+ * A gate that failed at the start commit, set beside what the last verification
+ * saw of it (#484).
+ *
+ * Worded as "the last verification", never as the tree the run ends on:
+ * `state.gateOutcomes` is the most recent pass over the gates, and a run that
+ * stops at `verify-round` or `review-round` stops after a fix and before the
+ * gates run again. "Still fails" there would describe a tree nobody verified.
+ * On a run that completes, the last verification is of the final tree.
+ *
+ * Silent with no baseline (unknown, never a pass at the start), for a gate that
+ * passed or did not run at the start, and for one the last verification did not
+ * reach. Nothing here moves the exit code.
+ *
+ * Exported for the reason `reportDeferred` is, and called on the escalation path
+ * as well as from `reportGates`: a gate still failing at the end is a run that
+ * stopped at `maxVerifyRounds`.
+ */
+export function reportInheritedGates(state: RunState): void {
+  const baseline = state.gateBaseline;
+  const outcomes = state.gateOutcomes;
+  if (baseline === undefined || outcomes === undefined) return;
+  const at = baseline.sha === null ? 'the start commit' : `the start commit ${baseline.sha.slice(0, 7)}`;
+  for (const entry of baseline.gates) {
+    if (entry.status !== 'failed') continue;
+    const outcome = outcomes.find((o) => o.name === entry.name);
+    if (outcome?.status === 'failed') {
+      const where = entry.log === null ? '' : ` (${path.join(state.dir, entry.log)})`;
+      log.warn(
+        `Gate \`${entry.name}\` failed at ${at}, before this run changed anything, and failed ` +
+          `again at the last verification${where}.`,
+      );
+    } else if (outcome?.status === 'passed') {
+      log.info(`Gate \`${entry.name}\` failed at ${at}, and passed at the last verification.`);
+    }
+  }
 }
 
 /**

@@ -17,6 +17,8 @@ import type {
   DeferredQuestion,
   Finding,
   GateArtifacts,
+  GateBaseline,
+  GateBaselineEntry,
   ForkedConversation,
   ForkOrigin,
   ForkPendingEntry,
@@ -1600,6 +1602,72 @@ function readStart(raw: unknown, ctx: ReadContext): RunStart | undefined {
   return undefined;
 }
 
+const BASELINE_STATUSES = {
+  passed: 'passed',
+  failed: 'failed',
+  unavailable: 'unavailable',
+  unlaunchable: 'unlaunchable',
+  skipped: 'skipped',
+} satisfies Record<GateBaselineEntry['status'], GateBaselineEntry['status']>;
+
+/** The alphabet `verify.gates[].name` is validated against in `src/config.ts`. */
+const BASELINE_GATE_NAME = /^[a-z0-9][a-z0-9-]*$/;
+
+function readGateBaselineEntry(raw: unknown): GateBaselineEntry | null {
+  if (!isRecord(raw)) return null;
+  const name = raw['name'];
+  const command = raw['command'];
+  const status = enumOf(raw['status'], BASELINE_STATUSES);
+  const exitCode = raw['exitCode'];
+  const required = raw['required'];
+  const runs = raw['runs'] ?? null;
+  const log = raw['log'];
+  if (
+    !isString(name) ||
+    !BASELINE_GATE_NAME.test(name) ||
+    !(command === null || isString(command)) ||
+    status === null ||
+    !(exitCode === null || (typeof exitCode === 'number' && Number.isInteger(exitCode))) ||
+    !isBool(required) ||
+    !(runs === null || runs === 1) ||
+    // Exactly the name the writer gives it, never any other path: the log is
+    // rendered into the fixer's prompt as a path under the run directory, so a
+    // stored `../x` would point the fixer at a file the run never wrote - the
+    // reason `lastReport` is checked rather than trusted.
+    !(log === null || log === `gate-baseline-${name}.log`)
+  ) {
+    return null;
+  }
+  return { name, command, status, exitCode, required, runs, log };
+}
+
+/**
+ * The gates run once against the start tree (#484), or nothing at all.
+ *
+ * The record in `readTestChanges`'s style: a malformed container drops the
+ * key, which reads as an unknown baseline - never as "passed at the start". A
+ * single unreadable entry is dropped on its own and logged, which costs that
+ * gate's line and nothing else: unlike `gateOutcomes` nothing computes an exit
+ * code from this, and a missing entry is a gate the reader knows nothing about.
+ */
+function readGateBaseline(raw: unknown, ctx: ReadContext): GateBaseline | undefined {
+  if (raw === undefined) return undefined;
+  if (
+    !isRecord(raw) ||
+    !(raw['sha'] === null || (isString(raw['sha']) && BLOB_ID.test(raw['sha']))) ||
+    !(raw['clean'] === null || isBool(raw['clean'])) ||
+    !Array.isArray(raw['gates'])
+  ) {
+    ctx.repairs.dropped('gateBaseline', 'gateBaseline');
+    return undefined;
+  }
+  return {
+    sha: raw['sha'],
+    clean: raw['clean'],
+    gates: repairedArray('gateBaseline.gates', raw['gates'], ctx, (entry) => readGateBaselineEntry(entry)),
+  };
+}
+
 /** A blob id: SHA-1, or SHA-256 in a repository that uses it. */
 const BLOB_ID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const REVIEW_MD_OUTCOMES: readonly string[] = ['present', 'absent', 'refused', 'unreadable'];
@@ -2189,6 +2257,16 @@ const READERS = {
   // record that could not be read is repaired to - and `run.ts` reads that as
   // "no evidence", never as "nothing went wrong" (#47).
   gateOutcomes: (raw, ctx) => readGateOutcomes(raw, ctx),
+  // Absent stays absent: no baseline is owed (#484). Only `true` counts; any
+  // other value is dropped, which takes no baseline - the safe direction.
+  baselineDue: (raw, ctx) => {
+    if (raw === undefined) return undefined;
+    if (raw === true) return true;
+    ctx.repairs.dropped('baselineDue', 'baselineDue');
+    return undefined;
+  },
+  // Absent stays absent, and absent is unknown, never a pass at the start (#484).
+  gateBaseline: (raw, ctx) => readGateBaseline(raw, ctx),
   // Absent stays absent for the same reason, one field along: absence means no
   // review part has completed, and a damaged record is dropped to absence
   // rather than guessed into one (#49).

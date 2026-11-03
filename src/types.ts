@@ -551,6 +551,11 @@ export interface VerifyGate {
    */
   required?: boolean;
   /**
+   * Whether this gate runs once against the start tree (#484). Defaults to
+   * `verify.baseline`, in the precedence `runs` and `timeoutMs` use.
+   */
+  baseline?: boolean;
+  /**
    * What the command produced, preserved when this gate FAILS (#62).
    *
    * Project-relative paths, each a directory or a file - not globs. `fs.glob`
@@ -624,6 +629,17 @@ export interface VerifyConfig {
    * matter, even though the implementer writes files there every round.
    */
   reproducers: boolean;
+  /**
+   * Whether each gate is run once against the start tree, before the implement
+   * turn, to record which failures the run inherited (#484).
+   *
+   * On by default, because a record that is off records nothing: 20 of 349
+   * archived runs recorded a gate failure and nobody can say how many of them
+   * the run caused. The cost is one run of each gate per run, bounded by that
+   * gate's `timeoutMs`. A gate may turn it off for itself with
+   * `verify.gates[].baseline`, which is how a long end-to-end suite opts out.
+   */
+  baseline: boolean;
   /**
    * The path patterns that make a changed file part of the run's own judge
    * (#112), replacing - never extending - the built-in convention list in
@@ -1611,6 +1627,42 @@ export interface GateOutcome {
 }
 
 /**
+ * What one gate did when it was run once against the start tree (#484).
+ *
+ * `skipped` is a gate whose own `baseline` is off while another gate's is on;
+ * `unavailable` has no command; `unlaunchable` is a command that never started,
+ * recorded rather than escalated, because the real gate escalates with its own
+ * message when it runs.
+ */
+export interface GateBaselineEntry {
+  name: string;
+  command: string | null;
+  status: 'passed' | 'failed' | 'unavailable' | 'unlaunchable' | 'skipped';
+  /** Null where there is none: skipped, unavailable, or a process that never exited. */
+  exitCode: number | null;
+  required: boolean;
+  /**
+   * 1 for a gate whose command was executed, null for one that was not. Always
+   * one sample, so a pass here says nothing about whether the gate is flaky.
+   */
+  runs: 1 | null;
+  /** The run-directory file name of its whole output, `gate-baseline-<name>.log`, or null. */
+  log: string | null;
+}
+
+/**
+ * Every gate, run once against the tree the run started from (#484).
+ *
+ * `sha` is `markBase`'s answer, null in a repository with no commits; `clean` is
+ * whether that tree had no uncommitted changes, null when git could not be asked.
+ */
+export interface GateBaseline {
+  sha: string | null;
+  clean: boolean | null;
+  gates: GateBaselineEntry[];
+}
+
+/**
  * What happened to ONE configured artifact path.
  *
  * Every status other than `copied` carries its `reason`, because a run record
@@ -2130,6 +2182,24 @@ export interface RunState {
    * absence).
    */
   gateOutcomes?: GateOutcome[] | undefined;
+  /**
+   * A baseline is still owed (#484): set in the `plan-approved` save when
+   * verification is on and some gate has its baseline on, and deleted once the
+   * baseline is recorded. A flag rather than "the phase was planning", because a
+   * run stopped at plan approval resumes at `implementing` and would never take
+   * one. Absent on every run from before it existed, which never takes one.
+   * `true` is the only value any writer produces. A fork drops it.
+   */
+  baselineDue?: true;
+  /**
+   * Each gate run once against the start tree, before the implement turn (#484).
+   *
+   * **Absent means unknown, never "passed at the start"**: verification off, the
+   * baseline off, a plan-only run, a run from before this existed, or a damaged
+   * record dropped on load. Never back-filled. A fork drops it, because it
+   * describes the parent's start tree.
+   */
+  gateBaseline?: GateBaseline;
   /**
    * What the most recent review round was shown.
    *

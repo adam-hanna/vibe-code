@@ -54,6 +54,7 @@ function gate(over: Partial<ResolvedGate> = {}): ResolvedGate {
     runs: 3,
     timeoutMs: 30_000,
     required: true,
+    baseline: true,
     artifacts: [],
     ...over,
   };

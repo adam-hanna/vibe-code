@@ -477,6 +477,7 @@
       "gates": null,
       "artifactMaxBytes": null,
       "reproducers": true,
+      "baseline": true,
       "testPaths": [
         "**/*.test.*",
         "**/*.spec.*",

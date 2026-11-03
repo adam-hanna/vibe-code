@@ -70,6 +70,8 @@ The loop used to finish when the reviewer found nothing, which is a statement ab
 
 A gate runs `verify.runs` times (default 3), because the first run that reached implementation shipped a concurrency fix that failed about half the time, and a single green run had called it working.
 
+Before implementing, vibe runs each gate once on the tree it started from and records the result in `gate-baseline.json`. A gate that was already failing is still a P0 when it fails after implementation, but the fixer and the end of the run are told the failure was inherited. `verify.baseline: false` turns this off.
+
 ### Flaky versus failing
 
 When a gate fails, vibe runs the remaining attempts, and classifies the result:

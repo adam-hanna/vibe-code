@@ -238,6 +238,12 @@ export const DEFAULTS: Config = {
     // that is wrong and cites a real line, is invisible to both existing guards
     // by their own admission (#113).
     reproducers: true,
+    // On, because a record that is off records nothing (#484). Across 349
+    // archived run records 20 show a gate failure (`artifacts.ts`, the #130
+    // census) and none of them can say whether the run caused it. The cost is
+    // one run of each gate per run, bounded by its `timeoutMs`; a long gate turns
+    // it off for itself with `verify.gates[].baseline`.
+    baseline: true,
     // Copied, so a caller mutating its config cannot edit the constant. The list
     // is a naming convention, not a measurement - see `DEFAULT_TEST_PATHS` (#112).
     testPaths: [...DEFAULT_TEST_PATHS],
@@ -1117,7 +1123,7 @@ const PROVIDERS: readonly AgentProvider[] = ['claude', 'codex'];
 
 /** A gate name has to survive being a finding id, so it is kept to one alphabet. */
 const GATE_NAME_RE = /^[a-z0-9][a-z0-9-]*$/;
-const GATE_KEYS = ['name', 'command', 'runs', 'timeoutMs', 'required', 'artifacts'] as const;
+const GATE_KEYS = ['name', 'command', 'runs', 'timeoutMs', 'required', 'artifacts', 'baseline'] as const;
 
 /** The run directory's own name. Copying it into itself is the one self-reference to refuse. */
 const VIBE_DIR = '.vibe';
@@ -1661,6 +1667,11 @@ function validateVerify(verify: VerifyConfig): void {
   if (reproducers !== undefined && typeof reproducers !== 'boolean') {
     throw new Error('verify.reproducers must be true or false');
   }
+  // The same, for the same reason: `baseline: "no"` is truthy (#484).
+  const baseline: unknown = verify.baseline;
+  if (baseline !== undefined && typeof baseline !== 'boolean') {
+    throw new Error('verify.baseline must be true or false');
+  }
 
   // Above the `gates === null` return for the same reason again: a property of
   // the whole section. `[]` is legal and means no test patterns at all -
@@ -1754,6 +1765,10 @@ function validateVerify(verify: VerifyConfig): void {
     const required = entry['required'];
     if (required !== undefined && typeof required !== 'boolean') {
       throw new Error(`${where}.required must be true or false`);
+    }
+    const gateBaseline = entry['baseline'];
+    if (gateBaseline !== undefined && typeof gateBaseline !== 'boolean') {
+      throw new Error(`${where}.baseline must be true or false`);
     }
 
     // The shape settles these, so they are refused HERE rather than mid-run:
