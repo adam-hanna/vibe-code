@@ -37,6 +37,16 @@ OUT_OF_SCOPE })`. `fix-dispositions.test.ts` holds the current `fixPrompt` to it
 review fix turns' rendering to it **plus exactly the `## Dispositions` block**. That block is the
 contract that moved (case 2 of AGENTS.md); nothing else in the fix prompt did.
 
+## #482: `revise-findings.txt` spliced, not regenerated
+
+The findings revision moved again, in four regions, and the fixture was left as #453 froze it.
+`plan-dispositions.test.ts` applies #453's replacement and then #482's, each of which must find its
+anchor: the heading `## Review findings` becomes `## Findings against the plan`, the opening line
+names the plan critique rather than "an independent reviewer", "The reviewer's proposed remedy"
+becomes "A finding's proposed remedy", and `fix breadth`'s last bullet, the three-way prose
+disposition the planner has no report to put in, is gone. The pin had included both defects (case
+2 of AGENTS.md). `fix-round1.txt` and every other caller of `fix breadth` did not move.
+
 ## Historical fixture contracts
 
 The sections below record the baselines and deliberate deltas before this regeneration.

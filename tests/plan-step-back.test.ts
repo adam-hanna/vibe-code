@@ -111,7 +111,10 @@ test('the first stall sends the step-back to exactly the next findings revision'
   );
   assert.ok(prompt.includes(DEFAULT_TEXT));
   // Placed after the findings it is about and before the boundary.
-  assert.ok(prompt.indexOf('## Review findings') < prompt.indexOf(STEP_BACK));
+  // The heading was renamed by #482. Asserted present, because `indexOf` of a
+  // heading that is gone is -1, and -1 is before everything.
+  assert.ok(prompt.includes('## Findings against the plan'));
+  assert.ok(prompt.indexOf('## Findings against the plan') < prompt.indexOf(STEP_BACK));
   assert.ok(prompt.indexOf(STEP_BACK) < prompt.indexOf('## The boundary your current plan drew'));
 
   const first = stalls(state)[0];

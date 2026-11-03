@@ -1078,6 +1078,14 @@ rebutted. #393's record is now kept for the plan side too.
   in the plan" for the `plan dispositions` block (overridable under `prompts`): answer each id,
   and still explain a rebuttal in the plan, because `plan_md` is what the implementer reads.
   `revise-answers.txt` and `revise-findings.txt` pin both renderings against develop's.
+- **One disposition instruction, and the critique named as the critique (#482).** The same
+  branch used to end on the whole `fix breadth` block, whose last bullet asks for each finding's
+  disposition, three-way, in a prose report. The planner writes no report, and `plan dispositions`
+  asks for four values in `dispositions`, so the two disagreed. It now gets `FIX_BREADTH_CHECKS`,
+  the block without that bullet; `FIX_BREADTH` is the checks plus the bullet, so the implement,
+  fix and verify-fix prompts are byte-identical. An override of `fix breadth` still replaces the
+  whole block everywhere. The findings are introduced as the plan critique's, not "an independent
+  reviewer's", with a person's finding marked as it already was by `raisedNote`.
 - **The plan keeps its shape.** The turn's output is read once. `parsePlan` reads the plan half
   unchanged, and `parsePlanDispositions` reads the list. `plan-<n>.json`, `state.plan` and
   everything downstream never see `dispositions`. An unreadable plan fails the turn as before. A
