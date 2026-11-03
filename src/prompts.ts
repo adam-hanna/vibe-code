@@ -1147,10 +1147,13 @@ export function implementPrompt(
           .map(findingBullet)
           .join('\n')}\n`;
 
+  // Both lists come from the plan critique that approved the plan
+  // (`approvePlan`), never from a code review, so both name it (#509) the way
+  // the non-blocking section above already did (#425).
   const known =
     carried.length === 0
       ? ''
-      : `\n## Known open issues with this plan\n\nThe reviewer raised these and they were **not** resolved before implementation, because they are the kind of question that is settled by running the code rather than by more discussion. Treat them as work items: resolve each one as you implement, and say in your report what you did about it.\n\n${carried
+      : `\n## Known open issues with this plan\n\nThe plan critique raised these and they were **not** resolved before implementation, because they are the kind of question that is settled by running the code rather than by more discussion. Treat them as work items: resolve each one as you implement, and say in your report what you did about it.\n\n${carried
           .map(findingBullet)
           .join('\n')}\n`;
 
@@ -1168,7 +1171,7 @@ export function implementPrompt(
   const notDoing =
     declined.length === 0
       ? ''
-      : `\n## Declined by the reviewer - not work for this change\n\nThe reviewer marked these **deferred**: real, and agreed to belong in separate effort rather than in this change. They are recorded in FOLLOW-UPS.md. Unlike anything listed above, these are work to **not** do. The plan may name one under its out-of-scope boundary or may not mention it at all; either way, do not treat it as in-scope work and do not fold it in as you implement. If you think one has to be fixed inside this change, say so in your report rather than fixing it silently.\n\n${declined
+      : `\n## Declined by the plan critique - not work for this change\n\nThe plan critique marked these **deferred**: real, and agreed to belong in separate effort rather than in this change. They are recorded in FOLLOW-UPS.md. Unlike anything listed above, these are work to **not** do. The plan may name one under its out-of-scope boundary or may not mention it at all; either way, do not treat it as in-scope work and do not fold it in as you implement. If you think one has to be fixed inside this change, say so in your report rather than fixing it silently.\n\n${declined
           .map(findingBullet)
           .join('\n')}\n`;
 
@@ -1871,6 +1874,21 @@ const DEFERRED_MARK =
   '**Deferred by the reviewer** - real, and agreed to belong in separate work rather than in this change.';
 
 /**
+ * The same mark on a plan finding, which the plan critique deferred (#509).
+ *
+ * The planner used to be told a critique finding was "deferred by the
+ * reviewer", the wording #482 and #506 took out of the rest of the plan side.
+ * "The plan critique" is #506's word for it, because the critic and any
+ * critique finders (#405) raise these. One block still covers both phases:
+ * `a deferred finding` is a single entry in `prompts`, so a project's override
+ * replaces this and `DEFERRED_MARK` alike, as it did before there were two
+ * defaults, and an override written before this split keeps applying on both
+ * sides. Only the default differs by phase.
+ */
+const DEFERRED_MARK_PLAN =
+  '**Deferred by the plan critique** - real, and agreed to belong in separate work rather than in this change.';
+
+/**
  * Where the finding says to look, rendered for whoever has to act on it.
  *
  * Empty when there is nothing cited, and that is load-bearing: a finding
@@ -2043,7 +2061,7 @@ function formatFinding(f: Finding, phase: FindingPhase): string {
   // - the schema requires it - so no existing prompt changes.
   const fix = f.suggested_fix.trim() === '' ? '' : `\n\n*Suggested fix:* ${f.suggested_fix}`;
   return `### [${f.severity}] ${f.title}  \`${f.id}\`
-${f.detail}${fix}${citation(f, '\n')}${raisedNote(f, phase)}${movedNote(f)}${provenNote(f)}${f.defer === true ? `\n\n${block(BLOCK.deferred, DEFERRED_MARK)}` : ''}`;
+${f.detail}${fix}${citation(f, '\n')}${raisedNote(f, phase)}${movedNote(f)}${provenNote(f)}${f.defer === true ? `\n\n${block(BLOCK.deferred, phase === 'plan' ? DEFERRED_MARK_PLAN : DEFERRED_MARK)}` : ''}`;
 }
 
 /**
@@ -2083,7 +2101,9 @@ function deferralNote(findings: readonly Finding[], audience: 'planner' | 'fixer
   if (!findings.some((f) => f.defer === true)) return '';
 
   if (audience === 'planner') {
-    return `\n\nOne or more findings above are marked **deferred**. That is the reviewer agreeing the work belongs elsewhere, not a request that you do it. Preserving the boundary is the correct response, not resolving the item: do not fold the work into the plan. Since you are revising anyway, record it in \`out_of_scope\` if the boundary does not already cover it - that is where a reader of the plan will look for it. If you believe deferred work genuinely has to happen inside this change, say so explicitly in the plan and explain why; disputing a deferral is legitimate, absorbing one silently is not.`;
+    // The planner's findings are the plan critique's, so the deferral is too
+    // (#509); the fixer half below is a code review's and is unchanged.
+    return `\n\nOne or more findings above are marked **deferred**. That is the plan critique agreeing the work belongs elsewhere, not a request that you do it. Preserving the boundary is the correct response, not resolving the item: do not fold the work into the plan. Since you are revising anyway, record it in \`out_of_scope\` if the boundary does not already cover it - that is where a reader of the plan will look for it. If you believe deferred work genuinely has to happen inside this change, say so explicitly in the plan and explain why; disputing a deferral is legitimate, absorbing one silently is not.`;
   }
   return `\n\nOne or more findings above are marked **deferred**. A deferred finding is not work to do here: the reviewer has already agreed it belongs in separate effort, and it is recorded in FOLLOW-UPS.md. The instruction to address contained, low-risk P2s does not apply to it - leave it alone. If you think it has to be fixed now, say so in your report rather than fixing it silently.`;
 }
@@ -2293,7 +2313,9 @@ export function promptBlocks(): readonly PromptBlock[] {
     // GIVEN a findings list - the planner revising against a critique and the
     // implementer fixing against a review. The reviewer produces findings and
     // is never shown a deferral mark, which is what the test caught when this
-    // line claimed otherwise.
+    // line claimed otherwise. The text shown is the review side's, as the
+    // implementer's fix turn gets it; a plan revision renders the same block
+    // naming the plan critique instead (#509), and an override replaces both.
     of(BLOCK.deferred, ['planner', 'implementer'], DEFERRED_MARK),
     // Only the findings revision after a stall carries it (#394).
     of(BLOCK.stall, ['planner'], STALL_STEP_BACK),

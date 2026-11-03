@@ -1161,6 +1161,15 @@ rebutted. #393's record is now kept for the plan side too.
   finding in a plan revision says it was raised "not by the plan critique" and has not been through
   a critique round; the fix prompt's note is unchanged. `fix breadth`'s remedy sentence, read by
   every caller, says "a finding's proposed remedy" rather than "the reviewer's".
+- **Who deferred a finding (#509).** `formatFinding` renders the `a deferred finding` block's
+  default by phase: "Deferred by the plan critique" in a plan revision, "Deferred by the reviewer"
+  in a review fix turn, which is byte-identical. The planner's deferral paragraph names the plan
+  critique too. It stays one block rather than two, so an override written before the split still
+  replaces the line on both sides; `promptBlocks()` reports the review side's text as its
+  default, as it does for `fix breadth`. The implement prompt's carried and declined sections come
+  from the critique that approved the plan (`approvePlan`), so they name the plan critique as
+  well. FOLLOW-UPS.md's "Deferred by review" heading is unchanged: it lists both phases' deferrals
+  in one list, with no phase stored on a finding, and "review" names the process, not an agent.
 - **The plan keeps its shape.** The turn's output is read once. `parsePlan` reads the plan half
   unchanged, and `parsePlanDispositions` reads the list. `plan-<n>.json`, `state.plan` and
   everything downstream never see `dispositions`. An unreadable plan fails the turn as before. A

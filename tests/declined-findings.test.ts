@@ -40,7 +40,8 @@ const RUN = { prefix: 'vibe-declined-', task: 'declined findings' } as const;
 const DECLINED = findingFixture({ id: 'declined-one', severity: 'P2', defer: true });
 
 const CARRIED_HEADING = '## Known open issues with this plan';
-const DECLINED_HEADING = '## Declined by the reviewer';
+// The plan critique declined these, not a reviewer (#509).
+const DECLINED_HEADING = '## Declined by the plan critique';
 
 /** A run that will not stop after planning, in a repo it can commit to. */
 function fullRun(): RunState {
@@ -203,7 +204,11 @@ test('the carried section still renders exactly what it rendered before this cha
   //
   // Acceptance criterion 4 is about the prompt a no-deferral run produces, and
   // a prompt is the model's input - a moved byte is a changed input.
-  const before =
+  //
+  // One splice since (#509): these are the plan critique's findings, and the
+  // section now says so. The splice must find its anchor exactly once, so the
+  // rest of the literal is still 37c6fc2's output.
+  const frozen =
     '## Known open issues with this plan\n\n' +
     'The reviewer raised these and they were **not** resolved before implementation, ' +
     'because they are the kind of question that is settled by running the code rather ' +
@@ -212,6 +217,8 @@ test('the carried section still renders exactly what it rendered before this cha
     '- **A carried title** `carried-one`\n' +
     '  A carried detail.\n' +
     '  *Suggested fix:* A carried fix.\n';
+  assert.equal(frozen.split('The reviewer raised these').length, 2);
+  const before = frozen.replace('The reviewer raised these', 'The plan critique raised these');
 
   const carried: Finding = {
     id: 'carried-one',

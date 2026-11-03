@@ -382,11 +382,13 @@ test('a legacy plan with no boundary contributes no section and no file', () => 
  */
 
 const DEFERRED_MARK = 'Deferred by the reviewer';
+// A plan finding was deferred by the plan critique, not a reviewer (#509).
+const PLAN_DEFERRED_MARK = 'Deferred by the plan critique';
 const PLANNER_NOTE = 'Preserving the boundary is the correct response';
 const FIXER_NOTE = 'A deferred finding is not work to do here';
 const OTHER: OutOfScopeItem = { item: 'configurable roles', why: 'tracked in issue #2' };
 
-test('a revision is told which of its findings the reviewer deferred', () => {
+test('a revision is told which of its findings the plan critique deferred', () => {
   // The mixed round is the case: a blocker is what sends the plan back at all,
   // and the deferred item rides along with it.
   const prompt = revisePlanPrompt({
@@ -394,12 +396,13 @@ test('a revision is told which of its findings the reviewer deferred', () => {
     outOfScope: [ITEM],
     round: 2,
   });
-  assert.ok(prompt.includes(DEFERRED_MARK));
+  assert.ok(prompt.includes(PLAN_DEFERRED_MARK));
   assert.ok(prompt.includes(PLANNER_NOTE));
 });
 
 test('a revision whose findings are all live carries no deferral wording', () => {
   const prompt = revisePlanPrompt({ findings: [finding()], outOfScope: [ITEM], round: 2 });
+  assert.ok(!prompt.includes(PLAN_DEFERRED_MARK));
   assert.ok(!prompt.includes(DEFERRED_MARK));
   assert.ok(!prompt.includes(PLANNER_NOTE));
 });
