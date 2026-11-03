@@ -272,9 +272,16 @@ const CODEX_SLOT: Readonly<Record<Role, SlotName>> = {
  * answer for every role but the reviewer.
  */
 function defaultSlot(role: Role, provider: AgentProvider): SlotName {
-  // Claude has exactly one conversation, whatever the job: `main` is the session
-  // rotation compacts, and there is no second Claude thread to be on.
-  return provider === 'claude' ? 'main' : CODEX_SLOT[role];
+  // Claude has two carried conversations. `main` is the planner's and the
+  // implementer's - the session rotation compacts - and every Claude role but
+  // one talks through it. The reviewer is that one (#490): on `main` it judged
+  // the code from inside the session that planned and wrote it, carrying the
+  // author's reasoning and self-justification into the verdict. `review-claude`
+  // is its own, kept round to round so it still remembers its earlier findings
+  // and the fixer's reports (#435), and never rotated, as the Codex reviewer's
+  // `review` thread is not.
+  if (provider === 'claude') return role === 'reviewer' ? 'review-claude' : 'main';
+  return CODEX_SLOT[role];
 }
 
 /** The keys a role object may carry. Anything else is a mistake worth naming. */
@@ -292,9 +299,9 @@ export const FINDER_KEYS: readonly string[] = [...ROLE_OBJECT_KEYS, 'focus'];
  *
  * Never `main`: that is the implementer's own session, and a model judging the
  * code it wrote is the self-preference failure more finders exist to avoid -
- * which is what `defaultSlot` would hand a Claude seat. Never `review` or
- * `judge` either, because those resume a thread and a seat is memoryless by
- * design. Not `write`, which is the Codex writer's. `seatTable` seats every
+ * which is what `defaultSlot` would hand a Claude seat. Never `review`,
+ * `review-claude` or `judge` either, because those resume a conversation and a
+ * seat is memoryless by design. Not `write`, which is the Codex writer's. `seatTable` seats every
  * additional finder here (#388 Part B).
  */
 export function seatSlot(provider: AgentProvider): SlotName {
@@ -839,6 +846,10 @@ export function rotatingSlot(roles: RoleTable = ROLES): SlotName {
  * `compactDuringCodex`, then as a comparison of providers - both true of today's
  * table and neither the thing being asked. Two roles on one provider but on
  * different conversations may overlap; two on one conversation may not.
+ *
+ * Which is why a Claude reviewer may now be reviewed beside a rotation of
+ * `main` (#490): it talks through `review-claude`, not the conversation being
+ * compacted. Nothing here changed to allow it - the slots did.
  */
 export function rotatesConcurrentlyWith(workRole: Role, roles: RoleTable = ROLES): boolean {
   return slotForRole(workRole, roles) !== rotatingSlot(roles);
@@ -1071,12 +1082,18 @@ export const GENERATIVE_ROLES: readonly Role[] = ['planner', 'implementer'];
  * after turn one, or - if the flag were forced off silently - a run whose memory
  * quietly disappeared. Refused rather than repaired, so the choice stays the
  * user's.
+ *
+ * The second refusal is an invariant rather than a setting (#490): the
+ * reviewer never resumes a conversation a generative role carries. No table
+ * `tableFor` builds can break it - `defaultSlot` gives a Claude reviewer
+ * `review-claude` - so it exists for a table built any other way, which would
+ * otherwise collapse author and judge into one session without a word.
  */
 export function roleRefusals(cfg: Config, roles: RoleTable = rolesFor(cfg)): string[] {
   // Asked of the slot, not of the setting: a writer is seated on `write`, which
   // never carries a thread, so a table built here is never refused. What is
   // still refused is a table that puts a writer on a carried Codex thread.
-  return ROLE_NAMES.filter(
+  const refusals = ROLE_NAMES.filter(
     (role) =>
       roles[role].provider === 'codex' &&
       roles[role].access === 'write' &&
@@ -1088,6 +1105,21 @@ export function roleRefusals(cfg: Config, roles: RoleTable = rolesFor(cfg)): str
       `resumed turn silently reverts to read-only. Set codex.persistSession to false ` +
       `(--no-codex-session) for a Codex ${role}.`,
   );
+  // Asked of the slot too, and only of a carried one: two roles on a one-shot
+  // slot such as `write` share a name, not a conversation.
+  const reviewerSlot = slotForRole('reviewer', roles);
+  if (SLOTS[reviewerSlot].persists(cfg)) {
+    for (const writer of GENERATIVE_ROLES) {
+      if (slotForRole(writer, roles) !== reviewerSlot) continue;
+      refusals.push(
+        `roles.reviewer and roles.${writer} are both seated on the "${reviewerSlot}" ` +
+          `conversation, so the review would be formed inside the session that ` +
+          `${writer === 'planner' ? 'planned' : 'wrote'} the change. A reviewer must never ` +
+          `resume a writer's conversation.`,
+      );
+    }
+  }
+  return refusals;
 }
 
 /** The judging roles, for the independence warning below. */
@@ -1114,7 +1146,6 @@ export function roleWarnings(cfg: Config, roles: RoleTable = rolesFor(cfg)): str
   );
   if (firstShared !== undefined) {
     const shared = [firstShared, ...restShared];
-    const named = namePaths(shared);
     // Whether they share a *conversation* is a different fact from sharing a
     // provider, and claiming memory a one-shot thread does not have would be a
     // false statement in the one place a user acts on it. Asked of each role
@@ -1124,19 +1155,33 @@ export function roleWarnings(cfg: Config, roles: RoleTable = rolesFor(cfg)): str
     // table that runs today answers exactly as it did - a Codex implementer is
     // on the one-shot `write` slot, which no judge shares and nothing carries.
     const implementerSlot = slotForRole('implementer', roles);
-    const persists =
-      shared.some((role) => slotForRole(role, roles) === implementerSlot) &&
-      SLOTS[implementerSlot].persists(cfg);
-    if (persists) {
+    // Split by role since #490, which seated a Claude reviewer on a carried
+    // conversation of its own: the critic and answerer still sit in the
+    // implementer's session under an all-Claude table, and the reviewer does
+    // not. Each is told only what is true of it. A table where every shared
+    // judge sits in the implementer's conversation gets today's one sentence.
+    const onWriter = SLOTS[implementerSlot].persists(cfg)
+      ? shared.filter((role) => slotForRole(role, roles) === implementerSlot)
+      : [];
+    const apart = shared.filter((role) => !onWriter.includes(role));
+    // "Each turn is one-shot" was true of every judge outside the implementer's
+    // conversation until one of them could carry a conversation of its own. Said
+    // only where it still holds, so a table of one-shot judges reads as it did.
+    const noneShared = (group: readonly Role[]): string =>
+      group.some((role) => SLOTS[slotForRole(role, roles)].persists(cfg))
+        ? "Their conversations are not the implementer's, so none is shared with it"
+        : 'Each turn is one-shot, so no conversation is shared';
+    if (onWriter.length > 0) {
       // Unchanged, and asked first: a carried shared conversation is the
       // dominant fact whatever models the two seats name, because the judge
       // remembers the writing either way.
       warnings.push(
-        `${named} share the implementer's ${implementer} conversation, so the judge remembers ` +
+        `${namePaths(onWriter)} share the implementer's ${implementer} conversation, so the judge remembers ` +
           `writing the code it is judging. Review independence is most of what this tool buys; ` +
           `the run continues without it.`,
       );
-    } else {
+    }
+    if (apart.length > 0) {
       // "the same provider and model" was true while a model was uniform per
       // provider, and is false the moment two seats on one provider name
       // different ones (#60). A warning that states something false is worse
@@ -1145,13 +1190,13 @@ export function roleWarnings(cfg: Config, roles: RoleTable = rolesFor(cfg)): str
       // a table with both prints in a stable order - and a table where every
       // shared role matches gets today's sentence, verbatim.
       const implementerModel = modelFor('implementer', cfg, roles);
-      const sameModel = shared.filter((role) => modelFor(role, cfg, roles) === implementerModel);
-      const otherModel = shared.filter((role) => modelFor(role, cfg, roles) !== implementerModel);
+      const sameModel = apart.filter((role) => modelFor(role, cfg, roles) === implementerModel);
+      const otherModel = apart.filter((role) => modelFor(role, cfg, roles) !== implementerModel);
       if (sameModel.length > 0) {
         warnings.push(
           `${namePaths(sameModel)} run on the same provider and model as the implementer ` +
-            `(${implementer}), so their judgement is not independent of the code's author. Each ` +
-            `turn is one-shot, so no conversation is shared; the run continues.`,
+            `(${implementer}), so their judgement is not independent of the code's author. ` +
+            `${noneShared(sameModel)}; the run continues.`,
         );
       }
       if (otherModel.length > 0) {
@@ -1165,8 +1210,8 @@ export function roleWarnings(cfg: Config, roles: RoleTable = rolesFor(cfg)): str
           .join(', ');
         warnings.push(
           `${named} run on the implementer's provider (${implementer}) but on a different model ` +
-            `than the implementer (${implementerModel}). Each turn is one-shot, so no conversation ` +
-            `is shared and the judge is not the model that wrote the code; the shared provider is ` +
+            `than the implementer (${implementerModel}). ${noneShared(otherModel)} ` +
+            `and the judge is not the model that wrote the code; the shared provider is ` +
             `what remains of the dependence, and the run continues.`,
         );
       }

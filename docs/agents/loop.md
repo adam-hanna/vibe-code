@@ -804,12 +804,15 @@ seat with no code of their own. `roles.reviewer` is the first finder, byte for b
 new narration. Finders run after the first has reviewed every part, up to `review.maxParallel`
 of them at once (#403; `1`, the default, is one after another) - see *Seats at once* below.
 
-- **The dispatch guard.** `claudeDispatch` asks `perTurnSlot(slot)` (`src/slots.ts`) before
-  `shouldRotate` and before `recordTurnContext`. Both are about `main`: asked with a finder's
-  model, which `main` was never measured under, `shouldRotate` reads "unmeasured, so rotate"
-  after any implement turn, and `recordTurnContext` would overwrite `main`'s occupancy with a
-  fresh finder's. `fresh-slot-dispatch.test.ts` switches context on to prove it, with a control
-  that does rotate a Claude reviewer on `main`.
+- **The dispatch guard.** `claudeDispatch` asks `slotHoldsRunContext(slot)` (`src/slots.ts`)
+  before `shouldRotate` and before `recordTurnContext`. Both are about `main`: asked with a
+  finder's model, which `main` was never measured under, `shouldRotate` reads "unmeasured, so
+  rotate" after any implement turn, and `recordTurnContext` would overwrite `main`'s occupancy
+  with a fresh finder's. It was `perTurnSlot` until #490, and a Claude reviewer on its own
+  `review-claude` is the case that split them: a conversation of the run, so not per-turn, but
+  not `main` either. `fresh-slot-dispatch.test.ts` switches context on to prove it, with a
+  control that does rotate a Claude turn a hand-built table seats on `main`;
+  `claude-reviewer-session.test.ts` asserts a Claude reviewer does not.
 - **Grounding is per turn, attribution stays the role.** Each finder turn goes through
   `groundAndRecord` as a chunk does, so the guards judge it by what it did, and `raisedBy` stays
   `reviewer`. A finder's own parts merge with `mergeReviewReports` first.
@@ -863,9 +866,10 @@ of them at once (#403; `1`, the default, is one after another) - see *Seats at o
   from scratch, so a `review_finder_failed` from the attempt it replaced must not lower the
   count. The cost half comes from `chargedTurns`, `turn_failed` included. The window's "found by
   n of m" takes `m` from the same frame, which `replayRun` carries, and never the configured count.
-- **The first finder keeps its memory, and that stays** (#435). `roles.reviewer` keeps its conversation across
-  rounds (the Codex `review` thread by default, Claude's `main` session if it is seated on
-  Claude) while additional finders are fresh every round, so it is less independent than the
+- **The first finder keeps its memory, and that stays** (#435). `roles.reviewer` keeps its
+  own conversation across rounds (the Codex `review` thread by default, its own Claude
+  `review-claude` session if it is seated on Claude - never the author's, see the next bullet)
+  while additional finders are fresh every round, so it is less independent than the
   others. Accepted, because a fresh first seat would break the default run's identity.
   **Decided, on a measurement that cannot settle it** (2026-10-26). The trade is memory of what
   it raised and of the fixer's reports against independence from its own last round. The test
@@ -881,11 +885,60 @@ of them at once (#403; `1`, the default, is one after another) - see *Seats at o
   `how-it-works.md`, the README's `review.finders` row) say so. The facts they
   state: a Codex reviewer is on `SLOTS.review`, carried under `codex.persistSession`, and
   `--no-codex-session` makes it fresh along with every Codex role; a Claude reviewer is on
-  `main`, the planner's and implementer's session, whose `persists` is constant; additional
-  finders are on `fresh-claude`/`fresh-codex` and get `hasMemory: false`. Every seat gets the
-  same `latestReport`; only the carried reviewer also has its earlier findings and earlier
-  reports in context, and no reviewer is shown the dispositions. Reopening it needs a way to
-  count a fresh finder's re-raise, and then the bench in #435's comments is the place to run it.
+  `review-claude`, its own session, whose `persists` is constant; additional finders are on
+  `fresh-claude`/`fresh-codex` and get `hasMemory: false`. Every seat gets the same
+  `latestReport`; only the carried reviewer also has its earlier findings and earlier reports in
+  context, and no reviewer is shown the dispositions. Reopening it needs a way to count a fresh
+  finder's re-raise, and then the bench in #435's comments is the place to run it.
+- **A Claude reviewer has its own conversation, never the author's** (#490, decided
+  2026-11-03). Until then `defaultSlot` seated every Claude role on `main`, so a Claude reviewer
+  judged from the planner's investigation and the implementer's own reasoning and
+  self-justification: separation of duties was a property of the default provider mapping, not
+  of the orchestrator. #435 never measured that case - its bench ran the default table only, with
+  the reviewer on Codex - and the reason it gave, the default run's identity, does not reach it.
+  The evidence is the author's context: an author's self-declared correctness moved LLM code
+  judges by up to 34.3 points (arXiv 2505.16222), models err more with their own earlier mistakes
+  in context (arXiv 2509.09677), and filtered input improved monitors in 14 of 16 pairs (arXiv
+  2601.21112). Against: removing the trajectory entirely hurt R2E-Gym's verifier, which is why
+  every seat still gets the latest write turn's report under the "untrusted" framing - that stays,
+  and only the rest of the author's conversation goes. Of the issue's three options, this is the
+  third: **a review-only resumable Claude session**, keeping #435's property exactly. Fresh every
+  round (option 1) would reverse #435 for this table without the measurement it says reopening
+  needs; a fresh seat plus #498's findings ledger (option 2) has no groundwork, and **once #498
+  lands, moving to it is a separate decision** and the route this one expects. What is true:
+  - `SLOTS['review-claude']` (`src/slots.ts`) is `main`'s lifecycle in `review`'s role:
+    client-origin, its own id minted on the reviewer's first turn, its own `started` and
+    `registered` markers (`reviewClaudeSession*`, named only there and read in `stored.ts`), its
+    own `reset`, `persists` constant and no setting. **Never rotated**: `rotatingSlot` stays
+    `main`. `occupancy: null`, because Claude's ratio is stored once, as the run-level
+    `contextRatio`/`contextModel`, which are `main`'s; a turn's own figure is on its event.
+  - `defaultSlot` gives the reviewer on Claude `review-claude` and every other Claude role `main`.
+    The Claude-seated critic and answerer on `main` are the same shape on the plan side and a
+    separate issue.
+  - **The invariant.** `roleRefusals` refuses a table whose reviewer sits on the carried
+    conversation of the planner or the implementer, naming both roles and the slot. No table
+    `tableFor` builds trips it; it is there so a hand-built one cannot collapse author and judge.
+  - **Compaction may overlap a Claude review**: `rotatesConcurrentlyWith('reviewer')` is true
+    for it because the slots differ, and `withConcurrentCompaction` rotates `main` beside the
+    review - the rule as written.
+  - **A run in flight** whose Claude reviewer already reviewed on `main` resumes onto a fresh
+    `review-claude`: not started, so `continuityNote` tells it it does not have its earlier
+    findings, and nothing is copied from `main`.
+  - **A dead turn needs an id.** `slotHasDeadTurn` asks for one since this slot's id is optional:
+    a malformed stored id is dropped on load while its registration survives, and that
+    registration names nothing to resume - read as dead, the prompt would claim memory of a
+    conversation dispatch then mints fresh. `claudeDispatch` mints the id before `noteSpawn`
+    records its registration, because a lazily minted id goes through `reset`, which deletes it.
+  - **Forks reset it, as they reset `review`.** The child's id, `started` and `registered`
+    fields are cleared, so it inherits neither the parent's id nor a registration that would read
+    as a session that died mid-turn (#74); a parent conversation that started is owed in
+    `forkPending`, so the child's first review forks the reviewer's own history - never `main`'s -
+    into a new id. A parent that never opened it lists no such conversation at all, which keeps a
+    default run's fork record as it was.
+  - Under the default table every prompt, state field and artifact is byte-identical,
+    pinned by `claude-reviewer-pin.test.ts` against a record made before the change. A Claude
+    reviewer's prompts change only where `continuityNote` follows `hasMemory`; what moved is the
+    session. `claude-reviewer-session.test.ts` holds the rest.
 - **One finder by default, and no vote** (#447, the owner's decision of 2026-10-26). The same
   bench measured the panel: the finder caught 3 bugs the reviewer missed, and 3 of 4 reviews
   with it flagged a test edit that hid bugs against 0 of 4 without it; all 8 bench votes
