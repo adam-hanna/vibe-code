@@ -47,6 +47,15 @@ becomes "A finding's proposed remedy", and `fix breadth`'s last bullet, the thre
 disposition the planner has no report to put in, is gone. The pin had included both defects (case
 2 of AGENTS.md). `fix-round1.txt` and every other caller of `fix breadth` did not move.
 
+## #506: `fix-round1.txt` and `revise-findings.txt` spliced again
+
+Neither fixture was regenerated. `fix breadth`'s remedy sentence, which every caller sends, now says
+"a finding's proposed remedy" rather than "the reviewer's proposed remedy", and both tests splice
+that. `fix-dispositions.test.ts` splices one more region into the review fix rendering only: the
+report bullet's "(fixed, rebutted, or deferred)" becomes "(the one you give it in `dispositions`,
+below)", so the bullet and `## Dispositions` name one set of values. The verify-fix rendering keeps
+the three values. Each splice must find its anchor exactly once. Case 2 of AGENTS.md both times.
+
 ## Historical fixture contracts
 
 The sections below record the baselines and deliberate deltas before this regeneration.

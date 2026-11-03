@@ -405,6 +405,27 @@ test('a run in which nobody raised anything renders exactly the prompt it did be
   assert.match(rendered, /### \[P1\] Finding finding-one {2}`finding-one`\nDetail\.\n\n\*Suggested fix:\*/);
 });
 
+test('a person\'s finding is set against the agent that would otherwise have raised it: the reviewer, or the plan critique (#506)', () => {
+  const human: Finding = { ...p1('human-mine'), raisedBy: 'human' };
+  // The review side, byte for byte what it always said.
+  const review =
+    '*Raised by the person running this, not by the reviewer. It cost no turn and no ' +
+    'tokens, and it has not been through a review round - judge it on what it says.*';
+  const fix = P.fixPrompt([human], 1);
+  assert.ok(fix.includes(review));
+  assert.ok(P.fixPrompt([human], 1, undefined, null, true).includes(review), 'the review fix turn too');
+  // The plan side names the plan critique, as the revision's opening line does.
+  const revise = P.revisePlanPrompt({ findings: [human], round: 1 });
+  assert.ok(
+    revise.includes(
+      '*Raised by the person running this, not by the plan critique. It cost no turn and no ' +
+        'tokens, and it has not been through a critique round - judge it on what it says.*',
+    ),
+  );
+  assert.equal(revise.includes('not by the reviewer'), false);
+  assert.equal(revise.includes('review round'), false);
+});
+
 test('a finding stamped by an agent renders no attribution line either', () => {
   const reviewed: Finding = { ...p1('finding-one'), raisedBy: 'reviewer' };
   assert.equal(P.fixPrompt([reviewed], 1), P.fixPrompt([p1('finding-one')], 1));
