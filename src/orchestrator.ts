@@ -967,6 +967,10 @@ async function runPhases(
           // project file over the run's settings, so a run approved with the
           // setting on and resumed with it off must get the old prompt.
           planToAddress(cfg, state.planNonBlocking ?? []),
+          // The gates vibe will run, from the facts the planner is given (#483):
+          // a writer with no planner history otherwise never sees them.
+          state.environment,
+          roles,
           // An approved plan can predate the answers to its advisory questions
           // (#277); the implementer is told them, and that they win.
         ) + P.advisoryAnswers(state.advisoryAnswers, 'implementer'),
@@ -1699,6 +1703,9 @@ async function reviewPhase(
             // held to the same bar (#50).
             state.acceptanceCriteria,
             plan,
+            false,
+            state.environment,
+            roles,
           ),
           planInPrompt: true,
           cwd,
@@ -1999,7 +2006,7 @@ async function runFinalFix(
     cwd,
     {
       role: 'implementer',
-      prompt: P.fixPrompt(findings, state.reviewRound, state.acceptanceCriteria, plan, true),
+      prompt: P.fixPrompt(findings, state.reviewRound, state.acceptanceCriteria, plan, true, state.environment, roles),
       planInPrompt: true,
       cwd,
       label: `final-fix-${state.reviewRound}`,
@@ -2187,7 +2194,7 @@ async function runFixRound(
     cwd,
     {
       role: 'implementer',
-      prompt: P.fixPrompt(findings, state.reviewRound, state.acceptanceCriteria, state.plan, true),
+      prompt: P.fixPrompt(findings, state.reviewRound, state.acceptanceCriteria, state.plan, true, state.environment, roles),
       planInPrompt: state.plan !== null,
       cwd,
       label: `fix-${state.reviewRound}`,

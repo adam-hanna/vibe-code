@@ -488,6 +488,31 @@ A round with review finders records every reporting seat's verdict, not only the
 their combination, failing closed (the rule is under the finders, below). A round with no
 finders has no `verdicts` key anywhere, so its record is byte-for-byte what it was.
 
+**The writer is told which gates will run, and not to pass them by editing tests** (#483).
+#112 records and judges an edit to the judge after the fact; nothing told the writer beforehand.
+The implement prompt asked for "the project's existing build, lint, and test commands" without
+naming them, and `environmentBlock`, which does name them, rendered only for the planner and the
+judging seats. A Claude implementer on `main` inherited the planner's copy; a rotated session and
+a Codex implementer (a fresh `codex exec` on `SLOTS.write`) never saw it. Two things changed:
+
+- **`environmentBlock` has an `implementer` audience**, and `implementPrompt` and `fixPrompt`
+  take the environment, so every writer turn (implement, `fix-<n>`, `final-fix-<n>`,
+  `verify-fix-<n>`) gets the same facts and gate lines as the planner. Only the closing line
+  differs: run each listed command exactly as written, as many consecutive times as it says, and
+  fix what fails. The reviewer's caution about its own sandbox is not given, being about judging
+  another shell. With nothing runnable the run-them sentence is left out; with no facts (a run
+  that skipped the probe) nothing renders, as for every other audience.
+- **`existing tests`, an overridable block, in every writer prompt and no other**, just before
+  "Do not commit": do not edit, delete, skip or loosen an existing test, or `vibe.config.json`,
+  to make a gate pass. It is #112's "justified" said to the writer, so a change the plan calls for
+  because the behaviour moved is still allowed, and a test or criterion that looks wrong is
+  reported with evidence rather than changed. ImpossibleBench (arXiv 2510.20270) found test
+  modification is over 79% of Claude-family cheating on contradictory tasks, and that
+  resubmission raises the rate from 33% to 38%; the verify-fix loop is a resubmission loop.
+  Anti-hack prompting cut Sonnet 4.5's rate from 53% to 20% (system card); the effect is
+  model-dependent. `suggestedFix`'s flaky-gate text already forbids loosening or deleting the
+  assertion, which agrees with it.
+
 **Nothing under `.vibe/runs/` is read through a link, and there is one predicate for all
 three levels.** `linkageOf` in `src/run.ts` is `lstat(...).isSymbolicLink()`, which is true of
 a POSIX symlink, a Node `'junction'` and an `mklink /J` junction alike — one measurement, no
