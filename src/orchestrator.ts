@@ -2151,7 +2151,11 @@ async function runFinalFix(
   ) {
     state.finalFixConfirmations = {
       round: state.reviewRound,
-      since: await headBeforeFinalFix(cwd),
+      // Only under per-round commits is HEAD the commit the fix starts from:
+      // otherwise the earlier rounds' work is uncommitted too, and the change
+      // since the review cannot be told from the rest. Decided here, as the
+      // round starts, so a resume reads the same scope this round began with.
+      since: cfg.git.commitEachRound ? await headBeforeFinalFix(cwd) : null,
       claims,
       findings: [],
     };
@@ -2583,6 +2587,11 @@ async function headBeforeFinalFix(cwd: string): Promise<string | null> {
   }
 }
 
+/** What a confirmation's diff covered (#489): the change since the review only when an anchor was kept. */
+function confirmScopeOf(record: FinalFixConfirmations | undefined): P.ConfirmScope {
+  return record?.since === null || record?.since === undefined ? 'whole-run' : 'since-last-review';
+}
+
 /** The recorded confirmation of one finding, when the record is this round's (#489). */
 function confirmationFor(state: RunState, id: string): FinalFixConfirmation | undefined {
   const record = state.finalFixConfirmations;
@@ -2707,10 +2716,10 @@ async function confirmFinalFix(
     saveState(state);
   }
 
-  // Only under per-round commits is the anchor the commit the fix started from;
-  // otherwise the change since the review cannot be told from the rest.
-  const since = record.since !== null && cfg.git.commitEachRound ? record.since : null;
-  const scope: P.ConfirmScope = since !== null ? 'since-last-review' : 'whole-run';
+  // Null when the round began without per-round commits, or with no anchor to
+  // read: then the change since the review cannot be told from the rest.
+  const since = record.since;
+  const scope = confirmScopeOf(record);
 
   const chosen = confirmSeat(cfg, roles);
   const table = seatTable(roles, chosen.setting, CONFIRM_SCHEMA);
@@ -2797,7 +2806,11 @@ async function confirmFinalFix(
         source: 'seat',
         seat,
         reason: said.reason,
-        evidence: grounded.evidence,
+        // Only the citations a reader can use. `groundFindings` leaves a
+        // malformed one in place, and the state reader refuses an entry it
+        // cannot read - so storing it would drop this verdict on the next load
+        // and buy it again. The count above was made from all of them.
+        evidence: readEvidence(grounded.evidence),
         ...(counted.countedReason === undefined ? {} : { countedReason: counted.countedReason }),
       };
     } catch (err: unknown) {
@@ -2984,7 +2997,8 @@ function renderOutstanding(
           ? ''
           : `${closed} of them carried a test the reviewer wrote to make it fail, and those tests ` +
             'pass now, which closes them by evidence. ') +
-        `After the gates passed, a fresh read-only turn shown only the claim and the fix's diff ` +
+        `After the gates passed, a fresh read-only turn shown only the claim and ` +
+        `${confirmScopeOf(state.finalFixConfirmations) === 'whole-run' ? "the run's whole diff" : "the fix's diff"} ` +
         `checked ${closed === 0 ? (rest.length === 1 ? 'it' : 'them') : 'the rest'}: ${confirmCounts(checked)} - ` +
         'each is below. That check is a record; it reopened nothing.' +
         (unchecked === 0

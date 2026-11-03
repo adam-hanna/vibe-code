@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { Cancelled } from '@src/cancel.js';
 import { DEFAULTS, loadConfig } from '@src/config.js';
@@ -187,6 +188,7 @@ test('a tolerated P1 confirmed fixed: recorded, rendered, counted, and the run e
   assert.match(text, /\*After the final fix:\* confirmed fixed - a fresh read-only codex turn \(default\): the guard is in place/);
   assert.equal(text.includes('nobody has confirmed they are gone'), false);
   assert.match(text, /checked it: 1 confirmed fixed/);
+  assert.match(text, /shown only the claim and the fix's diff/);
 
   const artifact = JSON.parse(readFileSync(path.join(state.dir, 'final-fix-confirm-1.json'), 'utf8')) as {
     round: number;
@@ -531,6 +533,78 @@ test('a whole-run diff says it is the whole run, not the fix', () => {
   assert.doesNotMatch(since, /whole run/);
   assert.match(whole, /## Diff of the whole run/);
   assert.match(whole, /could not be separated from the rest of the run/);
+});
+
+test('without per-round commits the check reads the whole run, and OUTSTANDING.md says so', async () => {
+  const state = reviewingRun(RUN);
+  const d = await drive(state, config({}, verifying(state)), {
+    codex: reviewer([p1('tolerated-one')], () => answer('fixed')),
+    claude: fixer(state),
+  });
+
+  assert.deepEqual(d.calls, ['review-0', 'final-fix-1', 'confirm-1-1']);
+  assert.equal(record(state).since, null);
+  assert.match(d.prompts.get('confirm-1-1') ?? '', /## Diff of the whole run/);
+  const artifact = JSON.parse(readFileSync(path.join(state.dir, 'final-fix-confirm-1.json'), 'utf8')) as { scope: string };
+  assert.equal(artifact.scope, 'whole-run');
+  const text = outstandingText(state);
+  assert.match(text, /shown only the claim and the run's whole diff/);
+  assert.doesNotMatch(text, /the fix's diff/);
+});
+
+test('an intent-to-add the index refuses is a diff that could not be read: no turn, not confirmed', async () => {
+  // Without per-round commits, so the final fix's new file is untracked and
+  // only `add -N` (or `add -A` with no base) can show it. The gate after the
+  // fix leaves an index lock, which refuses both.
+  for (const withBase of [false, true]) {
+    const state = reviewingRun(RUN);
+    if (withBase) {
+      state.baseSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: state.targetDir, encoding: 'utf8' }).trim();
+    }
+    writeFileSync(
+      path.join(state.targetDir, 'vibe-lock.mjs'),
+      "import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';\n" +
+        "appendFileSync('vibe-lock-runs.txt', 'ran\\n');\n" +
+        "const runs = readFileSync('vibe-lock-runs.txt', 'utf8').split('\\n').filter(Boolean).length;\n" +
+        "if (runs >= 2) writeFileSync('.git/index.lock', '');\n",
+      'utf8',
+    );
+    const d = await drive(
+      state,
+      config({}, { verify: { ...DEFAULTS.verify, enabled: true, command: 'node vibe-lock.mjs', runs: 1, timeoutMs: 30_000 } }),
+      {
+        codex: reviewer([p1('tolerated-one')], () => assert.fail('no turn on a diff that could not be read')),
+        claude: (label) => {
+          work(state, `brand-new-${label}.ts`, 'export const added = 1;\n');
+          return 'fixed it';
+        },
+      },
+    );
+
+    assert.deepEqual(d.calls, ['review-0', 'final-fix-1'], `base: ${withBase}`);
+    const v = verdictOf(state, 'tolerated-one');
+    assert.equal(v.counted, 'cannot-tell');
+    assert.match(v.reason, /the diff since the last review could not be read/);
+    assert.equal(state.phase, 'complete');
+  }
+});
+
+test('a verdict whose citations include one the reader cannot use survives a reload with no repair', async () => {
+  const state = reviewingRun(RUN);
+  await drive(state, cfgFor(state), {
+    codex: reviewer([p1('tolerated-one')], () => answer('fixed', [...CITED, { path: 'x' }])),
+    claude: fixer(state),
+  });
+  assert.equal(verdictOf(state, 'tolerated-one').counted, 'fixed');
+
+  const reloaded = loadRun(state.targetDir, state.id);
+  assert.equal(
+    reloaded.events.some((e) => e.type === 'state_repaired' && e['field'] === 'finalFixConfirmations'),
+    false,
+  );
+  const v = reloaded.finalFixConfirmations?.findings.find((c) => c.id === 'tolerated-one');
+  assert.equal(v?.counted, 'fixed');
+  assert.deepEqual(v?.evidence, [...CITED]);
 });
 
 test('the diff runs to the working tree, so a verify fix whose commit failed is in it', async () => {

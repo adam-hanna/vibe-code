@@ -743,7 +743,13 @@ async function resolveDiffMode(
     // `base..HEAD`, which the branch below prefers whenever it is non-empty,
     // would show the fix and leave the repair out. Intent-to-add for the
     // reason given below: new files appear, and no content is staged.
-    await git(cwd, ['add', '-N', '.'], { allowFail: true });
+    //
+    // **Required to succeed here, unlike the review's read.** A refused `add -N`
+    // (an index lock a gate left behind) leaves every later diff command
+    // succeeding without the new files, and a confirmation shown that diff can
+    // call a defect fixed on a change it never saw. So it throws, and the
+    // caller records the finding as not confirmed without buying a turn.
+    await git(cwd, ['add', '-N', '.']);
     const prefix = ['diff', baseSha];
     const { stdout: whole } = await git(cwd, prefix);
     return { prefix, whole };
@@ -772,7 +778,9 @@ async function resolveDiffMode(
     ({ stdout: whole } = await git(cwd, ['diff', 'HEAD']));
     return { prefix: ['diff', 'HEAD'], whole };
   }
-  await git(cwd, ['add', '-A'], { allowFail: true });
+  // Strict for the confirmation (#489), for the reason given above; the review
+  // keeps tolerating a refusal, as it always has.
+  await git(cwd, ['add', '-A'], { allowFail: options.toWorkingTree !== true });
   // **Against the empty tree, not against HEAD.** `git diff --cached` alone
   // compares the index to HEAD, and falls back to the empty tree only while
   // there is no HEAD - so the moment the implement round committed, a greenfield

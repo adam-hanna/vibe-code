@@ -1501,8 +1501,13 @@ check can buy nothing.
   (`finalFixConfirmations.since`, the commit before the `final-fix` checkpoint) to the **working
   tree**, through `diffChunks(..., { toWorkingTree: true })`. Taking it to HEAD would be wrong:
   `maybeCommit` tolerates a failed commit, so a verify fix after the final fix can pass the gate
-  without being committed, and `since..HEAD` would leave it out. With `git.commitEachRound` off, or
-  with no recorded anchor, the prompt shows the whole run's diff and says so (`scope: whole-run`).
+  without being committed, and `since..HEAD` would leave it out. The anchor is kept only when the
+  round starts under `git.commitEachRound`; with it off, or with no recorded anchor, the prompt
+  shows the whole run's diff and says so (`scope: whole-run`), and so does OUTSTANDING.md. The
+  intent-to-add that makes new files visible must succeed for this read, unlike the review's: a
+  refusal (an index lock a gate left) would leave a diff without them, so it counts as a diff that
+  could not be read. A citation the state reader could not read back is not stored with the
+  verdict, so a reload never drops the verdict and buys it again.
 - **Counting fails closed**, as a ballot does. A `fixed` whose evidence resolves to nothing counts
   `cannot-tell` (`countConfirmation`), and the record keeps both. `still-present` needs no evidence.
   An answer `parseConfirm` cannot read, and a failed turn, count `cannot-tell` with the failure as
