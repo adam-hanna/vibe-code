@@ -29,10 +29,12 @@ import {
 } from '@src/stored.js';
 import type { RolePatches } from '@src/roles.js';
 import type {
+  CheckpointBoundary,
   Config,
   ConfigOverrides,
   ForkOrigin,
   RunCheckpointMeta,
+  RunStart,
   RunState,
 } from '@src/types.js';
 
@@ -59,6 +61,19 @@ import type {
 
 const RUNS_DIR = path.join('.vibe', 'runs');
 
+/**
+ * The boundaries planning writes (#488). Each is written with `NO_COMMIT`
+ * because planning is read-only, so the tree it describes is the run's start
+ * commit - which is where a branching fork of one is put. `complete` is not one,
+ * even on a plan-only run: it is the end of the run, and nothing about it says
+ * the tree was never touched.
+ */
+const PLANNING_BOUNDARIES: ReadonlySet<CheckpointBoundary> = new Set<CheckpointBoundary>([
+  'question-round',
+  'plan-round',
+  'plan-approved',
+]);
+
 /** A refusal a user can act on. Never thrown after anything has been created. */
 export class ForkError extends Error {
   constructor(message: string) {
@@ -76,6 +91,17 @@ export interface ForkPlan {
   cfg: Config;
   /** The canonical 40-hex commit, already resolved against this repo, or null. */
   commit: string | null;
+  /**
+   * Where `commit` came from (#488). `'start'` is the run's start commit, taken
+   * because the checkpoint is from planning and recorded none of its own; the
+   * child then keeps the fields that describe that start, because they are true
+   * of a branch made there.
+   *
+   * Optional, and absent means `'checkpoint'`, for `environmentStale`'s reason:
+   * `ForkPlan` is built by hand in `linked-run-entry.test.ts`, and absent is what
+   * every fork before this key did.
+   */
+  commitFrom?: 'checkpoint' | 'start' | undefined;
   /**
    * Rule D's verdict on the checkpoint's token share (#87), or null when there
    * was nothing to clamp. `checkpointState` above already carries the clamped
@@ -108,11 +134,23 @@ const runsRootOf = (targetDir: string): string => path.join(targetDir, RUNS_DIR)
  * its own entry point rather than being reached through `planFork`: `vibe fork
  * ../other` with no `--at` takes the listing path, and a positional argument
  * must never reach `readdirSync` unchecked.
+ *
+ * `start` is set on a planning checkpoint that recorded no commit and carries
+ * the run's start (#488): that is the commit a branching fork of it is put at.
+ * It is read from the checkpoint file's own state - the field `planFork` checks
+ * - and, like a committed checkpoint's commit, never resolved here: a listing
+ * runs no git. `planFork` still refuses a start this repository cannot resolve
+ * exactly.
  */
 export function listForkPoints(
   targetDir: string,
   sourceId: string,
-): { n: number; meta: RunCheckpointMeta | null; linked?: true | undefined }[] {
+): {
+  n: number;
+  meta: RunCheckpointMeta | null;
+  linked?: true | undefined;
+  start?: RunStart | undefined;
+}[] {
   const root = runsRootOf(targetDir);
   assertUsableRunId(sourceId, root);
   // Before `listCheckpoints`, which `readdirSync`s inside the entry: a linked
@@ -122,10 +160,13 @@ export function listForkPoints(
   // `linked` carried through rather than flattened away: the row it produces
   // has to say the file was not opened, which is a different fact from the
   // `(unreadable)` row a damaged snapshot produces (#102).
-  return listCheckpoints(path.join(root, sourceId)).map(({ n, meta, linked: isLink }) => ({
+  return listCheckpoints(path.join(root, sourceId)).map(({ n, meta, linked: isLink, start }) => ({
     n,
     meta,
     ...(isLink === undefined ? {} : { linked: isLink }),
+    ...(start !== undefined && meta !== null && meta.commit === null && PLANNING_BOUNDARIES.has(meta.boundary)
+      ? { start }
+      : {}),
   }));
 }
 
@@ -287,6 +328,7 @@ export async function planFork(
   }
   const isRepo = await git.isRepo(targetDir);
   let commit: string | null = null;
+  let commitFrom: 'checkpoint' | 'start' = 'checkpoint';
 
   if (meta.commit !== null) {
     if (!isRepo) {
@@ -308,10 +350,6 @@ export async function planFork(
     commit = resolved;
   }
 
-  // Exactly the condition `commitFork` creates a branch under, so what is said
-  // here is what will actually be true afterwards.
-  const willBranch = cfg.git.useBranch && isRepo && commit !== null;
-
   if (cfg.git.useBranch) {
     if (!isRepo) {
       losses.push('this is not a git repository, so the fork gets no branch of its own');
@@ -319,12 +357,41 @@ export async function planFork(
         'without a branch, the fork will run on whatever is checked out when you resume it',
       );
     } else if (commit === null) {
+      // A planning checkpoint recorded no commit because planning commits
+      // nothing, so its tree is the one the run started from (#488) - and the
+      // run recorded that commit when it took its branch (#249). Branched there,
+      // and held to the bar a recorded commit is held to: compared to what was
+      // stored, never adopted. No start, or any other boundary, is refused below
+      // exactly as before; a start is never inferred.
+      const planning = PLANNING_BOUNDARIES.has(meta.boundary);
+      const start = checkpointState.start;
+      if (planning && start !== undefined) {
+        const resolved = await git.resolveCommit(targetDir, start.sha);
+        if (resolved !== start.sha) {
+          throw new ForkError(
+            `Checkpoint ${n} of run ${sourceId} is from planning, so the fork would branch at the ` +
+              `run's start commit ${start.sha}, which this repository cannot resolve to that exact ` +
+              'commit. Nothing was created.\n' +
+              '  Or fork with --no-branch to run on whatever is checked out.',
+          );
+        }
+        commit = resolved;
+        commitFrom = 'start';
+      }
+    }
+    if (isRepo && commit === null) {
       const withCommits = listCheckpoints(sourceDir)
         .filter((c) => c.meta?.commit != null)
         .map((c) => c.n);
       throw new ForkError(
         `Checkpoint ${n} of run ${sourceId} recorded no commit (${meta.commitNote}), so there is ` +
-          'no point in the history to branch from. Nothing was created.\n' +
+          'no point in the history to branch from.' +
+          (PLANNING_BOUNDARIES.has(meta.boundary)
+            ? " A planning checkpoint is branched at the run's start commit, and this run " +
+              'recorded none: it started before vibe recorded one (#249), or its repository had ' +
+              'no commits.'
+            : '') +
+          ' Nothing was created.\n' +
           (withCommits.length > 0
             ? `  Checkpoints with a commit: ${withCommits.join(', ')}\n`
             : '  No checkpoint of this run recorded a commit.\n') +
@@ -338,16 +405,37 @@ export async function planFork(
     );
   }
 
+  // Exactly the condition `commitFork` creates a branch under, so what is said
+  // here is what will actually be true afterwards. After the block above, which
+  // can set `commit` from the run's start.
+  const willBranch = cfg.git.useBranch && isRepo && commit !== null;
+
   // Only when there will BE a branch. Under `--no-branch` - or outside a
   // repository - both of these describe a ref that is never created, and a
   // losses list that states things about a result it did not produce is worse
   // than one that says less: `notInherited` is read as a record of what actually
   // happened.
-  if (willBranch) {
+  if (willBranch && commitFrom === 'start' && commit !== null) {
+    losses.push(
+      "the checkpoint is from planning, which wrote nothing, so the fork branches from the run's " +
+        `start commit (${commit.slice(0, 7)}) rather than a commit of its own - not from today's ` +
+        'HEAD, which may have moved on',
+    );
+    // "May": nothing recorded at a planning checkpoint says whether the parent's
+    // tree was clean - `gateBaseline.clean` is only taken after plan approval.
+    // Whatever it held went into the parent's first round commit, which is not
+    // the start commit.
+    losses.push(
+      "uncommitted changes the parent's tree may have held when it started are not on the " +
+        "fork's branch: they went into the parent's first round commit, not into the start commit",
+    );
+  } else if (willBranch) {
     losses.push(
       'the repository may have moved on since the checkpoint - the fork branches from the ' +
         "commit the checkpoint recorded, not from today's HEAD",
     );
+  }
+  if (willBranch) {
     losses.push(
       "the fork's branch is a new ref at the same commit, not a copy of the parent's branch",
     );
@@ -362,6 +450,7 @@ export async function planFork(
     meta,
     cfg,
     commit,
+    commitFrom,
     tokenShare,
     environmentStale: staleEnvironment,
     losses,
@@ -515,24 +604,44 @@ export async function commitFork(targetDir: string, plan: ForkPlan): Promise<For
     // probe - so the facts go and preflight rewrites them (#89). `=== true` is
     // what makes a plan built by hand, carrying no such field, keep them.
     if (plan.environmentStale === true) delete child.environment;
-    // Where the PARENT's branch started (#249), which is false of the child: its
-    // branch is created at the checkpoint commit above. `git.baseRef` never
-    // applies to a fork, so the child records no start of its own either.
-    delete child.start;
+    // Two roads, and which fields describe the child depends on where its branch
+    // was made (#488).
+    //
+    // **At the parent's start**, because the checkpoint is from planning: the
+    // child's branch starts exactly where the parent's did, so the start (its
+    // `ref` as recorded - nothing re-resolves `git.baseRef` from it), the
+    // REVIEW.md record read from that commit and the debt to baseline that tree
+    // are all true of it, and are kept. `baseSha` is null at every planning
+    // checkpoint; the child marks its own when implementing begins, after
+    // `prepareGit` has checked out the start, so a kept `baselineDue` takes a
+    // baseline attributed to the child's real start.
+    //
+    // **Anywhere else** - a committed checkpoint, `--no-branch`, or a plan built
+    // by hand without `commitFrom` - they stay what they were: false of a child
+    // whose tree is not the parent's start.
+    const atStart = plan.commitFrom === 'start' && branch !== null;
+    if (!atStart) {
+      // Where the PARENT's branch started (#249), which is false of the child:
+      // its branch is created at the checkpoint commit above. `git.baseRef` never
+      // applies to a fork, so the child records no start of its own either.
+      delete child.start;
+      // Read from the parent's start, which is false of the child; its first
+      // review reads its own `start ?? baseSha` (#389).
+      delete child.reviewMd;
+      // The debt to baseline the PARENT's start tree (#484): a fork from the
+      // plan-approved checkpoint with no branch there must not run gates against
+      // a tree that is not its start.
+      delete child.baselineDue;
+    }
     // The name the PARENT asked for with --branch (#356), which is the parent's
     // branch and already exists: a fork's branch is the one created above, and
-    // `runBranch` must never fall back to the parent's.
+    // `runBranch` must never fall back to the parent's. Both roads.
     delete child.requestedBranch;
-    // Read from the parent's start, which is false of the child; its first
-    // review reads its own `start ?? baseSha` (#389).
-    delete child.reviewMd;
-    // The gates as they stood on the PARENT's start tree (#484), which is false
-    // of the child: its branch starts at the checkpoint commit, and a baseline
-    // it cannot attribute is worse than none. The debt goes with it, so a fork
-    // from the plan-approved checkpoint does not run gates against a tree that
-    // is not its start either. #488 may revisit both.
+    // The gates as they stood on the PARENT's start tree (#484). Off the start
+    // road it is false of the child, and a baseline it cannot attribute is worse
+    // than none; on it there is nothing to keep, because a planning checkpoint
+    // is written before any baseline is taken. Both roads, failing closed.
     delete child.gateBaseline;
-    delete child.baselineDue;
     if (branch === null) delete child.branchPending;
     else child.branchPending = true;
 

@@ -34,6 +34,7 @@ import {
   isRecord,
   parseStoredState,
   readCheckpointShape,
+  readStartShape,
   StoredStateError,
   summariseStored,
   validateStoredState,
@@ -53,6 +54,7 @@ import type {
   RunArtifact,
   RunPhase,
   RunState,
+  RunStart,
   RunSummary,
 } from '@src/types.js';
 
@@ -1358,6 +1360,14 @@ export interface CheckpointEntry {
    * have a listing report "unreadable" about a file it never opened.
    */
   linked?: true | undefined;
+  /**
+   * The run's start as THIS checkpoint file recorded it (#488), and only when it
+   * reads as a full start. Never resolved against git: a listing reads files.
+   * `vibe fork` shows a planning checkpoint that carries one as forkable at it,
+   * and `planFork` reads the same field - through the validator, by the same
+   * predicate - so the listing and the fork cannot disagree.
+   */
+  start?: RunStart | undefined;
 }
 
 /**
@@ -1417,14 +1427,17 @@ export function listCheckpoints(dir: string): CheckpointEntry[] {
       continue;
     }
     let meta: RunCheckpointMeta | null = null;
+    let start: RunStart | null = null;
     try {
       const raw: unknown = JSON.parse(readFileSync(file, 'utf8'));
       const held = isRecord(raw) ? raw['checkpoint'] : undefined;
       meta = readCheckpointShape(held);
+      start = isRecord(raw) ? readStartShape(raw['start']) : null;
     } catch {
       meta = null;
+      start = null;
     }
-    out.push({ n: Number(found[1]), file, meta });
+    out.push({ n: Number(found[1]), file, meta, ...(start === null ? {} : { start }) });
   }
   return out.sort((a, b) => a.n - b.n);
 }

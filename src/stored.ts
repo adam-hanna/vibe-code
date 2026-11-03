@@ -1719,11 +1719,29 @@ const FULL_SHA = /^[0-9a-f]{40}$/;
  *
  * Dropped rather than repaired, for `readTestChanges`'s reason: a start is a
  * measurement of a commit, and a repaired one would be a commit nobody saw. It
- * is optional and descriptive - nothing acts on it but the summary - so absence
- * is the honest degrade, and the repair is still logged so the damage shows.
+ * is optional, so absence is the honest degrade, and the repair is still logged
+ * so the damage shows. The one thing that acts on it is a fork of a planning
+ * checkpoint, which branches there (#488) - and a dropped start is refused by
+ * that fork rather than guessed at.
  */
 function readStart(raw: unknown, ctx: ReadContext): RunStart | undefined {
   if (raw === undefined) return undefined;
+  const start = readStartShape(raw);
+  if (start !== null) return start;
+  ctx.repairs.dropped('start', 'start');
+  return undefined;
+}
+
+/**
+ * A start as `readStart` accepts it, or null, recording no repair.
+ *
+ * Exported for `listCheckpoints` (#488), which shows a planning checkpoint as
+ * forkable at the start its own file recorded. One predicate for both, so the
+ * listing and `planFork` - which reads the start through `validateStoredState` -
+ * cannot disagree about whether a checkpoint has one. `readCheckpointShape` is
+ * shared the same way, for the same reason.
+ */
+export function readStartShape(raw: unknown): RunStart | null {
   if (
     isRecord(raw) &&
     isString(raw['sha']) &&
@@ -1732,8 +1750,7 @@ function readStart(raw: unknown, ctx: ReadContext): RunStart | undefined {
   ) {
     return { sha: raw['sha'], ref: raw['ref'] };
   }
-  ctx.repairs.dropped('start', 'start');
-  return undefined;
+  return null;
 }
 
 const BASELINE_STATUSES = {

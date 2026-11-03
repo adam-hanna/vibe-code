@@ -324,6 +324,13 @@ test('a checkpoint with no commit refuses when a branch is wanted, and says whic
   const parent = await parentRun('no commit here');
   const withoutCommit = listCheckpoints(parent.dir).find((c) => c.meta?.commit == null);
   assert.ok(withoutCommit !== undefined, 'a plan-side boundary records no commit');
+  // Without the run's start, as a run from before #249 has it. A planning
+  // checkpoint that carries one is branched there since #488
+  // (`fork-planning-checkpoint.test.ts`), so the refusal is for one that does not.
+  const file = path.join(parent.dir, `checkpoint-${withoutCommit.n}.json`);
+  const held = JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown>;
+  delete held['start'];
+  writeFileSync(file, JSON.stringify(held), 'utf8');
 
   await assert.rejects(() => fork(parent, withoutCommit.n), /recorded no commit/);
   await assert.rejects(() => fork(parent, withoutCommit.n), /--no-branch/);
