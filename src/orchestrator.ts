@@ -237,6 +237,7 @@ import { describeEnding as describeChildEnding, endingOf, isAbnormal } from '@sr
 import { reviewStandardsFor } from '@src/review-md.js';
 import { workDirOf } from '@src/worktree.js';
 import { formatWork, withWorkProgress, workData } from '@src/work.js';
+import { answerDeclined, riskFactsAt } from '@src/riskfacts.js';
 
 /**
  * A write turn is about to start, so this run can no longer vouch for any
@@ -902,6 +903,11 @@ async function runPhases(
     // No key at all when nothing is eligible, so a run with the baseline off is
     // byte-identical to one from before it existed.
     if (baselineGates(cfg, cwd) !== null) state.baselineDue = true;
+    // What the run decided without a person, as counts, on the same save (#492):
+    // from the CLI a `step` row never holds, so a defaults run passes this
+    // boundary unseen, and the checkpoint below is the record of it. Records
+    // only - nothing reads it, and the gate below is decided exactly as before.
+    state.riskFacts = riskFactsAt(state, cfg, plan);
     advancePhase(state, 'implementing');
     writeCheckpoint(state, 'plan-approved', NO_COMMIT);
     await holdAt(state, cfg, host, 'plan-approved');
@@ -6837,9 +6843,8 @@ async function resolveQuestions(
   for (const q of questions) markAnswered(state, q.question);
   for (const a of answers) markAnswered(state, a.question);
 
-  const declined = (a: Answer): boolean =>
-    (cfg.questions.escalateOnDefer && a.defer_to_human) ||
-    (cfg.questions.escalateOnLowConfidence && a.confidence === 'low');
+  // One rule, shared with the risk facts' count of answers a model gave (#492).
+  const declined = (a: Answer): boolean => answerDeclined(cfg, a);
 
   const usable = answers.filter((a) => !declined(a));
   const refused = answers.filter(declined);

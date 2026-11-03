@@ -3,7 +3,8 @@ import path from 'node:path';
 import { EXIT } from '@src/charge.js';
 import { seatOf } from '@src/replay.js';
 import { LINKED_STATUS, listRuns, RUNS_DIR, UNVERIFIED_STATUS } from '@src/run.js';
-import type { RunSummary } from '@src/types.js';
+import { readRiskFactsRecord } from '@src/stored.js';
+import type { RiskFacts, RunSummary } from '@src/types.js';
 
 /**
  * What twenty-six run records say about the loop, and what they do not.
@@ -48,7 +49,8 @@ import type { RunSummary } from '@src/types.js';
  * Bumped when a field here changes meaning, so a reader can refuse a shape it does not know.
  *
  * Still 1 after `turns.byKind` and `turns.unplaced` arrived (#114), and after
- * `findings.outcomes` (#393), and after `findings.critiqueOutcomes` (#453): adding a field changes the meaning of none that
+ * `findings.outcomes` (#393), after `findings.critiqueOutcomes` (#453), and after
+ * `riskFacts` (#492): adding a field changes the meaning of none that
  * were already here, and a reader that does not know the new ones can ignore
  * them.
  */
@@ -214,6 +216,29 @@ export interface CritiqueOutcomes {
   excluded: Tally;
 }
 
+/**
+ * One risk fact across the archive (#492): the histogram, and how the runs
+ * where it was non-zero ended - the two halves of the question whether an
+ * `auto-unless` gate on `plan-approved` is worth building.
+ */
+export interface RiskFactCensus extends RoundCensus {
+  /** `status` of the runs whose count was above zero. */
+  nonZeroEndings: Tally;
+}
+
+/** The facts, in the order they are rendered. */
+export const RISK_FACTS = [
+  'carriedP1s',
+  'assumptions',
+  'deferredQuestions',
+  'modelAnswers',
+  'planStalls',
+  'planRounds',
+  'namedFiles',
+] as const satisfies readonly (keyof RiskFacts)[];
+
+export type RiskFactName = (typeof RISK_FACTS)[number];
+
 export interface Scorecard {
   version: number;
   archive: {
@@ -299,6 +324,18 @@ export interface Scorecard {
     suppressed: Measure;
     /** Questions a human answered in NEEDS-INPUT.md (#65). */
     resolvedByHuman: Measure;
+  };
+  /**
+   * What each run had decided without a person when its plan was approved
+   * (#492), from `riskFacts`. A run with no readable record - one from before
+   * #492, a plan-only run, one that never approved a plan, a damaged record -
+   * is unmeasured for every fact, never a zero; a record without
+   * `modelAnswers` is unmeasured for that fact alone.
+   */
+  riskFacts: {
+    /** Runs carrying a readable record, of `archive.read`. */
+    recorded: number;
+    byFact: Record<RiskFactName, RiskFactCensus>;
   };
   unmeasurable: readonly { dimension: string; why: string }[];
 }
@@ -401,6 +438,28 @@ function census(): RoundCensus {
   return { measured: 0, unmeasured: 0, total: 0, max: 0, histogram: {} };
 }
 
+function riskCensus(): Record<RiskFactName, RiskFactCensus> {
+  const out = {} as Record<RiskFactName, RiskFactCensus>;
+  for (const name of RISK_FACTS) out[name] = { ...census(), nonZeroEndings: {} };
+  return out;
+}
+
+/**
+ * One run's risk facts (#492), through the reader `loadRun` uses, so a record
+ * the resume would drop is not counted here either.
+ */
+function countRiskFacts(card: Scorecard, raw: Record<string, unknown>): void {
+  const facts = readRiskFactsRecord(raw['riskFacts']);
+  if (facts !== null) card.riskFacts.recorded += 1;
+  const status = typeof raw['status'] === 'string' ? raw['status'] : 'unrecorded';
+  for (const name of RISK_FACTS) {
+    const c = card.riskFacts.byFact[name];
+    const v = facts === null ? undefined : facts[name];
+    countRound(c, v);
+    if (typeof v === 'number' && v > 0) bump(c.nonZeroEndings, status);
+  }
+}
+
 function countRound(c: RoundCensus, v: unknown): void {
   const n = counter(v);
   if (n === null) {
@@ -456,6 +515,7 @@ export function scoreArchive(targetDir: string): Scorecard {
       suppressed: measure(),
       resolvedByHuman: measure(),
     },
+    riskFacts: { recorded: 0, byFact: riskCensus() },
     unmeasurable: UNMEASURABLE,
   };
 
@@ -575,6 +635,7 @@ function countRun(
 
   countGates(card, raw['gateOutcomes']);
   countQuestions(card, raw);
+  countRiskFacts(card, raw);
   countOutcomes(card.findings.outcomes, raw, events, runDir);
   countCritiqueOutcomes(card.findings.critiqueOutcomes, events);
 }
@@ -1018,9 +1079,38 @@ export function renderScorecard(card: Scorecard): string[] {
   out.push(`  ${pad('re-asks suppressed')} ${rate(card.questions.suppressed, 'run', 'runs')}`);
   out.push(`  ${pad('answered by a human')} ${rate(card.questions.resolvedByHuman, 'run', 'runs')}`);
 
+  renderRiskFacts(out, card);
+
   out.push('', 'Not measured, and not estimated');
   for (const u of card.unmeasurable) out.push(`  ${pad(u.dimension)} ${u.why}`);
   return out;
+}
+
+/** The words for each fact: what was counted, so no line reads as a score. */
+const RISK_FACT_NAMES: Record<RiskFactName, string> = {
+  carriedP1s: 'P1s carried',
+  assumptions: 'planner assumptions',
+  deferredQuestions: "left on planner's default",
+  modelAnswers: 'answered by a model',
+  planStalls: 'plan stalls',
+  planRounds: 'plan revisions',
+  namedFiles: 'files the plan names',
+};
+
+/**
+ * The risk facts (#492): each a histogram over the runs that recorded it, and
+ * how the runs where it was non-zero ended. No rate and no threshold - these
+ * are counts the run took of itself, and a percentage would read as a verdict.
+ */
+function renderRiskFacts(out: string[], card: Scorecard): void {
+  const r = card.riskFacts;
+  out.push('', 'Risk facts at plan approval  (counts of what each run recorded; no threshold)');
+  out.push(`  ${pad('runs recording them')} ${r.recorded} of ${card.archive.read}`);
+  for (const name of RISK_FACTS) {
+    const c = r.byFact[name];
+    const ended = sorted(c.nonZeroEndings).map(([s, n]) => `${n} ${s}`).join(', ');
+    out.push(`  ${pad(RISK_FACT_NAMES[name])} ${describeRounds(c)}${ended === '' ? '' : `; non-zero ended ${ended}`}`);
+  }
 }
 
 /**

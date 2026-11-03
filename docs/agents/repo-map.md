@@ -17,6 +17,7 @@ src/gates.ts         which boundaries hold a run, what a hold costs, and the two
 src/orchestrator.ts  the loop: planPhase, reviewPhase, the guards, the prompt dispatch
 src/run.ts           run state, artifacts, checkpoints, convergence maths (assessConvergence, planStall et al)
 src/scorecard.ts     what the run archive says about the loop, and what it cannot
+src/riskfacts.ts     what a run decided without a person, counted at plan approval - records only, no threshold (#492)
 src/fork.ts          `vibe fork`: preflight that only reads, then a commit phase that creates
 src/similarity.ts    the one similarity metric, its threshold, and the censuses behind it
 src/finder-merge.ts  one review or critique round's reports across finders, merged by claim, with foundBy; near pairs flagged to the fixer (#388, #405, #462)

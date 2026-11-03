@@ -29,9 +29,9 @@ Most files are conditional: a missing one means the run had nothing to put in it
 | `OUTSTANDING.md` | P1 findings carried under `loop.p1Tolerance`: fixed in a final round that is deliberately not re-reviewed. |
 | `FOLLOW-UPS.md` | Findings the critic or the reviewer said belong in a different change, review findings the verifiers' vote moved to P2 (marked *Unconfirmed by vote*), and the plan's declared out-of-scope work. **The file to read after a clean run.** |
 | `handoff-<n>.md` | The briefing carried across each session rotation. |
-| `state.json` | The run's resumable state: phase, rounds, findings, token and cost totals, the configuration, and the event log. |
+| `state.json` | The run's resumable state: phase, rounds, findings, token and cost totals, the configuration, and the event log. From plan approval on it also holds `riskFacts`: counts of what the run decided without you up to then (P1s carried, planner assumptions, questions left on the planner's default, questions a model answered, plan stalls, plan rounds, files the plan names). A count the record cannot establish is left out, not written as 0. |
 | `transcript.log` | Everything the run printed. |
-| `checkpoint-<n>.json` | The state as it stood at each phase and round boundary. This is what `vibe fork` reads. |
+| `checkpoint-<n>.json` | The state as it stood at each phase and round boundary. This is what `vibe fork` reads. The `plan-approved` checkpoint carries the run's `riskFacts`. |
 | `run.lock` | Held while a process is working on the run. Names the pid, the host and when it started. |
 | `ending.json` | How the last process to hold this run went away. A lock with a dead process and no `ending.json` means something killed it from outside. |
 | `codex/` | Raw schema and output files from Codex turns. `<label>.cutoff.json` is an answer Codex cut off at its output limit: its text, with long runs of blank space shortened, and the findings it had written in full. |
@@ -47,7 +47,7 @@ Most files are conditional: a missing one means the run had nothing to put in it
 | this host, process gone | interrupted | proceeds, and charges what the dead process had spent |
 | another host, or unreadable | unknown | refused; `--force` overrides it |
 
-`vibe stats` reads every run in the archive and reports how the loop has behaved: rounds per run, turns and their tokens, and questions. Every rate carries its denominator, because older runs predate newer fields, and a dimension no run recorded is shown as absent rather than as zero. `vibe stats --json` prints the same document. Neither command writes anything.
+`vibe stats` reads every run in the archive and reports how the loop has behaved: rounds per run, turns and their tokens, questions, and the risk facts each run recorded at plan approval. Every rate carries its denominator, because older runs predate newer fields, and a dimension no run recorded is shown as absent rather than as zero. `vibe stats --json` prints the same document. Neither command writes anything.
 
 ## Branches and commits
 
