@@ -65,6 +65,7 @@ function gateIn(dir: string, failRuns: readonly number[], runs: number): Resolve
     timeoutMs: 30_000,
     required: true,
     baseline: true,
+    replay: true,
     artifacts: [],
   };
 }
@@ -137,6 +138,7 @@ test('a command that cannot start is not run again', async () => {
     timeoutMs: 30_000,
     required: true,
     baseline: true,
+    replay: true,
     artifacts: [],
   };
   const result = await runGateCommand(dir, gate, CONTRACT);

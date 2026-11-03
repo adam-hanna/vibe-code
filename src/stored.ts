@@ -47,6 +47,11 @@ import type {
   JudgeSnapshot,
   ModelAnswer,
   TestChanges,
+  TestReplay,
+  TestReplayCache,
+  TestReplayFile,
+  TestReplayInFlight,
+  TestReplayVerdict,
   RiskFacts,
   UnaddressedFinding,
   RoundClaim,
@@ -1855,6 +1860,248 @@ function readFixReproductions(raw: unknown, ctx: ReadContext): FixReproductions 
   return { round: raw['round'], outcomes };
 }
 
+const REPLAY_VERDICTS = {
+  preserved: 'preserved',
+  'earlier-fails': 'earlier-fails',
+  unproven: 'unproven',
+  unchanged: 'unchanged',
+  deleted: 'deleted',
+  renamed: 'renamed',
+  'no-committed-version': 'no-committed-version',
+  'not-a-test': 'not-a-test',
+} satisfies Record<TestReplayVerdict, TestReplayVerdict>;
+
+const REPLAY_AT = { review: 'review', 'final-fix': 'final-fix' } satisfies Record<
+  TestReplay['at'],
+  TestReplay['at']
+>;
+
+const isStringArray = (v: unknown): v is string[] => Array.isArray(v) && v.every(isString);
+
+/** One replay file entry, or null for anything the writer does not produce. */
+function readReplayFile(raw: unknown): TestReplayFile | null {
+  if (!isRecord(raw) || !isString(raw['path'])) return null;
+  const verdict = enumOf(raw['verdict'], REPLAY_VERDICTS);
+  if (verdict === null) return null;
+  const out: TestReplayFile = { path: raw['path'], verdict };
+  const earliest = raw['earliest'];
+  if (earliest !== undefined) {
+    if (
+      !isRecord(earliest) ||
+      !isString(earliest['commit']) ||
+      !FULL_SHA.test(earliest['commit']) ||
+      !isString(earliest['blob']) ||
+      !BLOB_ID.test(earliest['blob'])
+    ) {
+      return null;
+    }
+    out.earliest = { commit: earliest['commit'], blob: earliest['blob'] };
+  }
+  const head = raw['head'];
+  if (head !== undefined) {
+    if (!isString(head) || !BLOB_ID.test(head)) return null;
+    out.head = head;
+  }
+  const gate = raw['gate'];
+  if (gate !== undefined) {
+    if (!isString(gate) || verdict !== 'earlier-fails') return null;
+    out.gate = gate;
+  }
+  const gates = raw['gates'];
+  if (gates !== undefined) {
+    if (!isStringArray(gates)) return null;
+    out.gates = [...gates];
+  }
+  const reason = raw['reason'];
+  if (reason !== undefined) {
+    if (!isString(reason)) return null;
+    out.reason = reason;
+  }
+  const cached = raw['cached'];
+  if (cached !== undefined) {
+    if (cached !== true) return null;
+    out.cached = true;
+  }
+  // What each measured verdict carries when the writer produces it, and what
+  // it is worth nothing without: the versions compared, the gates that ran,
+  // and - for a failure - the gate that failed, as the last one run. Without
+  // them the entry would read as an attributed verdict nobody measured.
+  if (verdict === 'preserved' || verdict === 'earlier-fails') {
+    if (out.earliest === undefined || out.head === undefined || out.gates === undefined || out.gates.length === 0) {
+      return null;
+    }
+    if (verdict === 'earlier-fails' && (out.gate === undefined || out.gates[out.gates.length - 1] !== out.gate)) {
+      return null;
+    }
+  }
+  return out;
+}
+
+/**
+ * A replay record (#486), or nothing. A damaged record drops the key; a
+ * damaged entry is dropped and said, in `readTestChanges`' style. Nothing acts
+ * on this record - it is read by the end of the run and by people - so losing
+ * one entry loses one sentence, never a decision.
+ */
+function readTestReplay(
+  raw: unknown,
+  ctx: ReadContext,
+  field: 'testReplay' | 'testReplayAfterReview',
+): TestReplay | undefined {
+  if (raw === undefined) return undefined;
+  const at = isRecord(raw) ? enumOf(raw['at'], REPLAY_AT) : null;
+  const tree = isRecord(raw) ? raw['tree'] : undefined;
+  if (
+    !isRecord(raw) ||
+    !isCounter(raw['round']) ||
+    at === null ||
+    !(tree === null || (isString(tree) && BLOB_ID.test(tree))) ||
+    !Array.isArray(raw['files'])
+  ) {
+    ctx.repairs.dropped(field, field);
+    return undefined;
+  }
+  const files: TestReplayFile[] = [];
+  for (const [i, entry] of (raw['files'] as unknown[]).entries()) {
+    const file = readReplayFile(entry);
+    if (file === null) ctx.repairs.dropped(field, `${field}.files[${i}]`);
+    else files.push(file);
+  }
+  return { round: raw['round'], at, tree, files };
+}
+
+/**
+ * The replay cache (#486), or nothing. The same rules; its entries may only be
+ * the two verdicts a run measured, `preserved` and `earlier-fails`.
+ */
+function readTestReplayCache(raw: unknown, ctx: ReadContext): TestReplayCache | undefined {
+  if (raw === undefined) return undefined;
+  const field = 'testReplayCache';
+  const tree = isRecord(raw) ? raw['tree'] : undefined;
+  const rawGates = isRecord(raw) ? raw['gates'] : undefined;
+  if (
+    !isRecord(raw) ||
+    !isString(tree) ||
+    !BLOB_ID.test(tree) ||
+    !Array.isArray(rawGates) ||
+    !rawGates.every((g) => isRecord(g) && isString(g['name']) && isString(g['command'])) ||
+    !Array.isArray(raw['files'])
+  ) {
+    ctx.repairs.dropped(field, field);
+    return undefined;
+  }
+  const gates = (rawGates as Record<string, unknown>[]).map((g) => ({
+    name: g['name'] as string,
+    command: g['command'] as string,
+  }));
+  const files: TestReplayCache['files'] = [];
+  for (const [i, entry] of (raw['files'] as unknown[]).entries()) {
+    const verdict = isRecord(entry) ? entry['verdict'] : undefined;
+    const gate = isRecord(entry) ? entry['gate'] : undefined;
+    if (
+      !isRecord(entry) ||
+      !isString(entry['path']) ||
+      !isString(entry['earliest']) ||
+      !BLOB_ID.test(entry['earliest']) ||
+      !(verdict === 'preserved' || verdict === 'earlier-fails') ||
+      !isStringArray(entry['gates']) ||
+      !(gate === undefined || (isString(gate) && verdict === 'earlier-fails')) ||
+      !coversKey(verdict, gate, entry['gates'], gates)
+    ) {
+      ctx.repairs.dropped(field, `${field}.files[${i}]`);
+      continue;
+    }
+    files.push({
+      path: entry['path'],
+      earliest: entry['earliest'],
+      verdict,
+      ...(gate === undefined ? {} : { gate }),
+      gates: [...entry['gates']],
+    });
+  }
+  return { tree, gates, files };
+}
+
+/**
+ * Whether a cached verdict is the measurement its key names (#486). A pass ran
+ * every gate in the key, in order; a failure ran them in order up to the one
+ * that failed, which is named. Anything else would let the cache answer for
+ * gates that never ran on that version - a pass that suppresses a real run.
+ */
+function coversKey(
+  verdict: 'preserved' | 'earlier-fails',
+  gate: unknown,
+  ran: readonly string[],
+  key: readonly { name: string }[],
+): boolean {
+  const names = key.map((g) => g.name);
+  if (verdict === 'preserved') return ran.length === names.length && ran.every((n, i) => n === names[i]);
+  return (
+    isString(gate) &&
+    ran.length > 0 &&
+    ran.length <= names.length &&
+    ran.every((n, i) => n === names[i]) &&
+    ran[ran.length - 1] === gate
+  );
+}
+
+const SHA256 = /^[0-9a-f]{64}$/;
+
+/**
+ * Test files swapped to an earlier version when the last process stopped
+ * (#486), or nothing.
+ *
+ * **Refused, never repaired or dropped.** Every other replay field degrades to
+ * absence; this one cannot, because absence means "nothing is swapped" and a
+ * dropped marker could leave an earlier test in the tree for every gate and
+ * turn after it. So anything the writer does not produce stops the run with
+ * the field named, and the person restores by hand from the backups.
+ *
+ * The backup name is checked against the one the writer gives it, never
+ * trusted: it is joined to the run directory and read from, so a stored `../x`
+ * would read a file the run never wrote.
+ */
+function readTestReplayInFlight(raw: unknown, ctx: ReadContext): TestReplayInFlight | undefined {
+  if (raw === undefined) return undefined;
+  const refuseMarker = (why: string): never => {
+    throw new StoredStateError(
+      `Run ${ctx.id} cannot be resumed: state.json field "testReplayInFlight" ${why}. It records ` +
+        "test files vibe swapped to an earlier committed version, and those may still be in the " +
+        `working tree. Their head copies are under ${path.join(ctx.dir, 'test-replay-*')}/; restore ` +
+        'them by hand, then remove the field. Nothing was run.',
+    );
+  };
+  if (!isRecord(raw)) return refuseMarker(`holds ${describe(raw)}, not a record`);
+  const round = raw['round'];
+  if (!isCounter(round)) return refuseMarker('has no usable round');
+  const files = raw['files'];
+  if (!Array.isArray(files) || files.length === 0) return refuseMarker('names no files');
+  const out: TestReplayInFlight['files'] = [];
+  for (const [i, entry] of (files as unknown[]).entries()) {
+    if (!isRecord(entry)) return refuseMarker(`has an unreadable entry at files[${i}]`);
+    const file = entry['path'];
+    const sha256 = entry['sha256'];
+    const backup = entry['backup'];
+    if (
+      !isString(file) ||
+      file === '' ||
+      path.posix.isAbsolute(file) ||
+      path.win32.isAbsolute(file) ||
+      file.split(/[\\/]/).some((seg) => seg === '' || seg === '.' || seg === '..')
+    ) {
+      return refuseMarker(`has a path at files[${i}] that is not a plain repository-relative path`);
+    }
+    if (!isString(sha256) || !SHA256.test(sha256)) {
+      return refuseMarker(`has no usable content hash at files[${i}] (${file})`);
+    }
+    if (backup !== `test-replay-${round}/${sha256}.head`) {
+      return refuseMarker(`names a backup for ${file} that is not the one vibe writes`);
+    }
+    out.push({ path: file, backup, sha256 });
+  }
+  return { round, files: out };
+}
+
 /**
  * The seat that took the last recorded review round's turn (#393), or critique
  * round's turn (#453), or nothing.
@@ -2618,6 +2865,14 @@ const READERS = {
   finalFixConfirmations: (raw, ctx) => readFinalFixConfirmations(raw, ctx),
   // Absent stays absent: no ordinary fix round has re-run a reproducer (#489).
   fixReproductions: (raw, ctx) => readFixReproductions(raw, ctx),
+  // Absent stays absent: no replay ran (#486). A damaged record or cache is
+  // dropped, which says nothing rather than something nobody measured.
+  testReplay: (raw, ctx) => readTestReplay(raw, ctx, 'testReplay'),
+  testReplayAfterReview: (raw, ctx) => readTestReplay(raw, ctx, 'testReplayAfterReview'),
+  testReplayCache: (raw, ctx) => readTestReplayCache(raw, ctx),
+  // Absent stays absent: nothing is swapped. Anything else unreadable STOPS the
+  // run - a dropped marker could leave an earlier test in the tree.
+  testReplayInFlight: (raw, ctx) => readTestReplayInFlight(raw, ctx),
   // Absent stays absent: a run from before #393, or one that has not recorded a
   // review round. A damaged value is dropped, so its round credits no seat.
   reviewSeat: (raw, ctx) => readRoundSeat(raw, ctx, 'reviewSeat'),

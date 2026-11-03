@@ -1,4 +1,5 @@
-import { lstatSync, readFileSync, statSync } from 'node:fs';
+import { execFile } from 'node:child_process';
+import { copyFileSync, existsSync, lstatSync, readFileSync, rmSync, statSync, utimesSync } from 'node:fs';
 import path from 'node:path';
 import { run, resolveBin } from '@src/proc.js';
 import { detail, warn } from '@src/log.js';
@@ -31,9 +32,19 @@ interface GitResult {
 async function git(
   cwd: string,
   args: readonly string[],
-  options: { allowFail?: boolean; raw?: boolean } = {},
+  options: { allowFail?: boolean; raw?: boolean; index?: string | undefined } = {},
 ): Promise<GitResult> {
-  const { code, stdout, stderr } = await run(gitBin(), args, { cwd });
+  // A disposable index (#486): `GIT_INDEX_FILE` points every read and write at
+  // a copy, and fsmonitor is off so a cache built for the REAL index cannot vouch
+  // for files in this one. Absent, the call is exactly what it always was.
+  const index = options.index;
+  const { code, stdout, stderr } =
+    index === undefined
+      ? await run(gitBin(), args, { cwd })
+      : await run(gitBin(), ['-c', 'core.fsmonitor=false', ...args], {
+          cwd,
+          env: { ...process.env, GIT_INDEX_FILE: index },
+        });
   if (code !== 0 && !options.allowFail) {
     throw new Error(`git ${args.join(' ')} failed (${code}): ${stderr.trim()}`);
   }
@@ -959,12 +970,12 @@ export async function diffChunks(
 async function fileChanges(
   cwd: string,
   prefix: readonly string[],
-  options: { renames?: boolean } = {},
+  options: { renames?: boolean; index?: string | undefined } = {},
 ): Promise<FileChange[]> {
   const base = ['--literal-pathspecs', ...prefix, '-z', options.renames === false ? '--no-renames' : '-M'];
   const [named, counted] = await Promise.all([
-    git(cwd, [...base, '--name-status'], { raw: true }),
-    git(cwd, [...base, '--numstat'], { raw: true }),
+    git(cwd, [...base, '--name-status'], { raw: true, index: options.index }),
+    git(cwd, [...base, '--numstat'], { raw: true, index: options.index }),
   ]);
 
   const counts = new Map<string, { added: number | null; removed: number | null }>();
@@ -1075,20 +1086,28 @@ async function fileChanges(
 export async function treeChanges(
   cwd: string,
   baseSha: string | null,
+  /**
+   * A disposable index to read through instead of the real one (#486). The
+   * replay lists the judge this way, so its `add -N` and `add -A` land in a
+   * copy and the user's staged changes are never touched. #485's callers pass
+   * nothing and read exactly as before.
+   */
+  options: { index?: string } = {},
 ): Promise<{ changes: FileChange[]; renamedFrom: Map<string, string> }> {
+  const index = options.index;
   let prefix: string[];
   if (baseSha) {
-    await git(cwd, ['add', '-N', '.']);
+    await git(cwd, ['add', '-N', '.'], { index });
     prefix = ['diff', baseSha];
   } else {
-    await git(cwd, ['add', '-A']);
+    await git(cwd, ['add', '-A'], { index });
     const empty = await emptyTree(cwd);
     if (empty === null) throw new Error('git could not name the empty tree');
     prefix = ['diff', '--cached', empty];
   }
   const [changes, paired] = await Promise.all([
-    fileChanges(cwd, prefix, { renames: false }),
-    fileChanges(cwd, prefix),
+    fileChanges(cwd, prefix, { renames: false, index }),
+    fileChanges(cwd, prefix, { index }),
   ]);
   const renamedFrom = new Map<string, string>();
   for (const c of paired) if (c.oldPath !== null) renamedFrom.set(c.path, c.oldPath);
@@ -1124,6 +1143,134 @@ export async function hashObjects(cwd: string, paths: readonly string[]): Promis
   if (ids.length !== paths.length) return null;
   return ids.every((id) => /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(id)) ? ids : null;
 }
+
+/**
+ * Seed a disposable index from the real one, and say whether any entry hides
+ * a working-tree change (#486). Null when it could not be made.
+ *
+ * Copying only READS the real index; every later write goes to `file`. The
+ * real index's path comes from `rev-parse --git-path index`, so a linked
+ * worktree gets its own rather than the main checkout's. A repository with no
+ * index yet leaves `file` absent, which git reads as an empty index.
+ *
+ * `hidden` is true when an entry is assume-unchanged (a lowercase tag in
+ * `ls-files -v`) or skip-worktree (`S`). For such an entry `add -A` keeps the
+ * indexed blob whatever the file now holds, so a tree id taken through this
+ * index could describe code that is no longer there. The caller does not clear
+ * the flags - clearing skip-worktree in a sparse checkout reads every absent
+ * file as deleted - it declines to cache instead.
+ */
+export async function openScratchIndex(cwd: string, file: string): Promise<{ hidden: boolean } | null> {
+  try {
+    const { code, stdout } = await git(cwd, ['rev-parse', '--git-path', 'index'], { allowFail: true });
+    if (code !== 0 || stdout === '') return null;
+    const real = path.resolve(cwd, stdout);
+    rmSync(file, { force: true });
+    if (existsSync(real)) {
+      copyFileSync(real, file);
+      // Back-dated, not left at "now". Git trusts an entry's cached stat only
+      // when the file is older than the INDEX FILE itself (the racy-git rule);
+      // a fresh copy is newer than every edit, so a same-size edit made in the
+      // second the real index was written would read as unchanged and drop out
+      // of the listing - measured, on a fast suite. Two seconds before the real
+      // index covers a filesystem with two-second times, and only ever makes
+      // git re-read more files, never fewer.
+      const { atime, mtimeMs } = statSync(real);
+      utimesSync(file, atime, new Date(mtimeMs - 2_000));
+    }
+    const listed = await git(cwd, ['ls-files', '-v', '-z'], { raw: true, allowFail: true, index: file });
+    if (listed.code !== 0) return null;
+    const hidden = splitNul(listed.stdout).some((entry) => {
+      const tag = entry[0] ?? '';
+      return tag === 'S' || (tag !== '' && tag !== tag.toUpperCase());
+    });
+    return { hidden };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The working tree as a tree id, read through the disposable index `file`, or
+ * null when git would not say (#486, decision 6). Never touches the real index.
+ *
+ * `add -A` writes blob objects for untracked files into the object store. They
+ * are unreferenced, and `git gc` prunes them like any other loose object.
+ */
+export async function scratchTreeId(cwd: string, file: string): Promise<string | null> {
+  try {
+    const added = await git(cwd, ['add', '-A', '--', '.'], { allowFail: true, index: file });
+    if (added.code !== 0) return null;
+    const { code, stdout } = await git(cwd, ['write-tree'], { allowFail: true, index: file });
+    if (code !== 0) return null;
+    return /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(stdout) ? stdout : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The first commit after `base` on HEAD's history that contains `file`, or null
+ * when none does (#486). With no base, the first commit there is. Throws when
+ * git fails, so "no commit" is never a git that would not answer.
+ */
+export async function firstCommitWith(cwd: string, base: string | null, file: string): Promise<string | null> {
+  if (!(await hasCommits(cwd))) return null;
+  const range = base === null ? ['HEAD'] : [`${base}..HEAD`];
+  const { stdout } = await git(cwd, ['--literal-pathspecs', 'rev-list', '--reverse', ...range, '--', file]);
+  const first = stdout.split('\n')[0]?.trim() ?? '';
+  if (first === '') return null;
+  // `rev-list -- <path>` lists the commits that CHANGED it, so the first one
+  // either added it or, in a history that deleted and re-added it, is still the
+  // earliest point after the base at which it changed. Its tree is checked by
+  // `entryAt`, which says `absent` for a commit that deleted it.
+  return isFullSha(first) ? first : null;
+}
+
+/**
+ * `file`'s entry at `commit`: its blob id and mode, or `absent` (#486). Parsed
+ * as `readReviewMd` parses it. Throws when git fails or prints something
+ * unreadable.
+ */
+export async function entryAt(
+  cwd: string,
+  commit: string,
+  file: string,
+): Promise<{ blob: string; mode: string; type: string } | 'absent'> {
+  const { stdout } = await git(cwd, ['--literal-pathspecs', 'ls-tree', '-z', commit, '--', file], { raw: true });
+  const entry = splitNul(stdout).find((e) => e.endsWith(`\t${file}`));
+  if (entry === undefined) return 'absent';
+  const m = /^(\d{6}) (\w+) ([0-9a-f]{40}(?:[0-9a-f]{24})?)\t/.exec(entry);
+  if (m === null) throw new Error(`git ls-tree printed a line vibe could not read: ${entry}`);
+  const [, mode, type, blob] = m as unknown as [string, string, string, string];
+  return { blob, mode, type };
+}
+
+/**
+ * A blob's bytes as a checkout of `file` would write them, or null (#486).
+ *
+ * Through `execFile` with a Buffer rather than `run`: `run` decodes UTF-8 and
+ * redacts held keys, and either would write a different file than was
+ * committed. `--filters` applies the attributes `file` has now (eol, smudge),
+ * because a checkout is what the project's runners see. A smudge that does not
+ * round-trip with its clean filter is caught by the caller, which hashes the
+ * file back and compares it with the blob before any gate runs.
+ */
+export function blobBytes(cwd: string, blob: string, file: string): Promise<Buffer | null> {
+  return new Promise((resolve) => {
+    try {
+      execFile(
+        gitBin(),
+        ['cat-file', '--filters', `--path=${file}`, blob],
+        { cwd, encoding: 'buffer', maxBuffer: 256 * 1024 * 1024, windowsHide: true },
+        (err, stdout) => resolve(err === null ? stdout : null),
+      );
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
 
 
 /**

@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { Cancelled, CANCEL_ENDING, cancelRequested, currentTurnGroup, registerInterruptible } from '@src/cancel.js';
@@ -699,10 +699,14 @@ const VERIFY_LOG = 'vibe-verify-runs.txt';
  * command: a case that counts executions from the first verification, or fails
  * a numbered one, says `baseline: false`, because the baseline would otherwise
  * take run 1.
+ *
+ * `replay` is the same, for the replay of edited tests (#486): it runs this
+ * command once more after a pass in which a test file was edited, so a case
+ * that counts executions and edits a test says `replay: false`.
  */
 export function verifying(
   state: RunState,
-  options: { failures?: number; failRuns?: readonly number[]; runs?: number; baseline?: boolean } = {},
+  options: { failures?: number; failRuns?: readonly number[]; runs?: number; baseline?: boolean; replay?: boolean } = {},
 ): Partial<Config> {
   const failing =
     options.failRuns ?? Array.from({ length: options.failures ?? 0 }, (_unused, i) => i + 1);
@@ -725,6 +729,7 @@ export function verifying(
       runs: options.runs ?? 1,
       timeoutMs: 30_000,
       ...(options.baseline === undefined ? {} : { baseline: options.baseline }),
+      ...(options.replay === undefined ? {} : { replay: options.replay }),
     },
   };
 }
@@ -837,6 +842,88 @@ export function markerRuns(state: RunState, name: string): number {
   const log = path.join(state.targetDir, `vibe-marker-${name}-runs.txt`);
   if (!existsSync(log)) return 0;
   return readFileSync(log, 'utf8').split('\n').filter(Boolean).length;
+}
+
+/**
+ * A gate that passes only while every `expect: <token>` line under `tests/`
+ * names a line of `src/code.txt` (#486).
+ *
+ * It decides by the content of the test files, which is what a replay changes:
+ * swap in an earlier version of a test and the tokens it expects change with it.
+ * Every execution appends one JSON line - the tokens it saw, the SHA-256 of the
+ * real `.git/index`, every file under `test-replay-*` directories of the run, and
+ * the bytes of every test and control file - so a case can say what the tree
+ * held while each run happened (`assertLog`).
+ *
+ * The script and its log are listed in `.git/info/exclude`, so neither is
+ * committed nor part of a tree id the replay computes. `sleepWhenAll` makes the
+ * script outlive a short `timeoutMs` when every token it names is present at
+ * once, which is how a batch that times out is built.
+ */
+export function assertionGate(
+  state: RunState,
+  name: string,
+  options: { sleepWhenAll?: readonly string[]; sleepMs?: number } = {},
+): string {
+  const script = `vibe-assert-${name}.mjs`;
+  const runs = `vibe-assert-${name}-runs.txt`;
+  // `info/` is made here: the suite's empty `GIT_TEMPLATE_DIR` creates none.
+  mkdirSync(path.join(state.targetDir, '.git', 'info'), { recursive: true });
+  appendFileSync(path.join(state.targetDir, '.git', 'info', 'exclude'), `${script}\n${runs}\n`, 'utf8');
+  writeFileSync(
+    path.join(state.targetDir, script),
+    "import { appendFileSync, existsSync, readdirSync, readFileSync, statSync } from 'node:fs';\n" +
+      "import { createHash } from 'node:crypto';\n" +
+      "import path from 'node:path';\n" +
+      'const walk = (d) => existsSync(d) ? readdirSync(d, { withFileTypes: true }).flatMap((e) => ' +
+      'e.isDirectory() ? walk(path.join(d, e.name)) : [path.join(d, e.name)]) : [];\n' +
+      "const rel = (f) => f.split(path.sep).join('/');\n" +
+      "const tests = walk('tests');\n" +
+      "const tokens = tests.flatMap((f) => readFileSync(f, 'utf8').split(/\\r?\\n/)" +
+      ".filter((l) => l.startsWith('expect: ')).map((l) => l.slice(8).trim()));\n" +
+      "const code = existsSync('src/code.txt') ? readFileSync('src/code.txt', 'utf8').split(/\\r?\\n/).map((l) => l.trim()) : [];\n" +
+      "const index = existsSync('.git/index') ? createHash('sha256').update(readFileSync('.git/index')).digest('hex') : null;\n" +
+      "const runsDir = path.join('.vibe', 'runs');\n" +
+      'const backups = existsSync(runsDir) ? readdirSync(runsDir).flatMap((id) => {\n' +
+      '  const d = path.join(runsDir, id);\n' +
+      "  return statSync(d).isDirectory() ? readdirSync(d).filter((n) => n.startsWith('test-replay-') && statSync(path.join(d, n)).isDirectory())" +
+      ".flatMap((n) => readdirSync(path.join(d, n)).map((f) => n + '/' + f)) : [];\n" +
+      '}) : [];\n' +
+      "const files = Object.fromEntries([...tests, 'vibe.config.json', 'REVIEW.md'].filter((f) => existsSync(f))" +
+      ".map((f) => [rel(f), readFileSync(f).toString('base64')]));\n" +
+      `appendFileSync(${JSON.stringify(runs)}, JSON.stringify({ tokens, index, backups, files }) + '\\n');\n` +
+      `const sleepAll = ${JSON.stringify(options.sleepWhenAll ?? [])};\n` +
+      'if (sleepAll.length > 0 && sleepAll.every((t) => tokens.includes(t))) {\n' +
+      `  await new Promise((r) => setTimeout(r, ${String(options.sleepMs ?? 5_000)}));\n` +
+      '}\n' +
+      'process.exit(tokens.every((t) => code.includes(t)) ? 0 : 1);\n',
+    'utf8',
+  );
+  return `node ${script}`;
+}
+
+/** One execution of an `assertionGate` command, as it recorded itself. */
+export interface AssertRun {
+  tokens: string[];
+  index: string | null;
+  backups: string[];
+  /** Repo-relative path to the file's bytes, base64. */
+  files: Record<string, string>;
+}
+
+/** Every execution of the `assertionGate` command, in order. */
+export function assertLog(state: RunState, name: string): AssertRun[] {
+  const log = path.join(state.targetDir, `vibe-assert-${name}-runs.txt`);
+  if (!existsSync(log)) return [];
+  return readFileSync(log, 'utf8')
+    .split('\n')
+    .filter(Boolean)
+    .map((l) => JSON.parse(l) as AssertRun);
+}
+
+/** How many times the `assertionGate` command has run. */
+export function assertRuns(state: RunState, name: string): number {
+  return assertLog(state, name).length;
 }
 
 /** Commit everything in the target tree, so a case can start from a clean one. */

@@ -53,6 +53,7 @@ src/cliversions.ts   the installed claude/codex against the tested versions, and
 src/verify.ts        the verification gates — the list, every run, and broken vs flaky
 src/judge.ts         which changed files are the run's own judge, and the reviewer's verdict on each
 src/reproducer.ts    a reviewer's test: placed, run by the user's own gate, taken back out
+src/test-replay.ts   an edited test's earliest committed version: swapped in, run by the gates, put back
 src/progress.ts      in-turn heartbeat
 src/work.ts          how far a write turn has got - measured, and labelled a proxy
 src/schemas.ts       the JSON schemas both CLIs are pinned to

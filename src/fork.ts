@@ -227,6 +227,17 @@ export async function planFork(
         'and nothing was written. Wait for it to finish, then fork.',
     );
   }
+  // Beside the liveness refusal, from the same read of the live state (#486). A
+  // parent that stopped mid-replay may have earlier versions of its tests in the
+  // tree. Restoring them here would be a write to the parent's tree, and this
+  // function writes nothing, so it refuses and says what puts them back.
+  if (isRecord(raw) && raw['testReplayInFlight'] !== undefined) {
+    throw new ForkError(
+      `Run ${sourceId} cannot be forked: it stopped while earlier versions of its tests were swapped into ` +
+        'the working tree. Nothing was read further and nothing was written. Resume the parent first, which ' +
+        'restores the files, then fork.',
+    );
+  }
 
   // Before `existsSync`, which FOLLOWS a link: a checkpoint that is a symlink
   // would otherwise be reported as present or absent according to what it points

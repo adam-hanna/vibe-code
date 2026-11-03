@@ -24,6 +24,20 @@ import { CONFIRM_SCHEMA, FIX_SCHEMA, PLAN_VOTE_SCHEMA, REVISE_SCHEMA, VOTE_SCHEM
 import { dispositionSummary, settleDispositions, settlePlanDispositions } from '@src/dispositions.js';
 import { countBallot, countConfirmation, describeVotes, failedBallot, failedConfirmation, tally } from '@src/vote.js';
 import { describeOutcome, observe } from '@src/reproducer.js';
+import {
+  cached,
+  classify,
+  describeReplay,
+  gateKey,
+  passedGates,
+  replayCounts,
+  replayGates,
+  replayWhen,
+  restoreInFlight,
+  runReplay,
+} from '@src/test-replay.js';
+import type { Candidate } from '@src/test-replay.js';
+import { rmSync } from 'node:fs';
 import { gateMode } from '@src/gates.js';
 import { moveSection, raisePhase, raiseSection } from '@src/raise.js';
 import { decisionsPrefix, planDecisions, writeDecisions } from '@src/decisions.js';
@@ -202,6 +216,7 @@ import type {
   FileChange,
   FixDispositions,
   TestChanges,
+  TestReplay,
   UnaddressedFinding,
   GateBaseline,
   GateBaselineEntry,
@@ -860,6 +875,11 @@ async function runPhases(
   // answer "which tree" from a different field while holding a state that says
   // otherwise - which is the same reason `roles` is resolved here.
   const cwd = workDirOf(state);
+  // Before anything else, `prepareGit` and every turn included (#486): a process
+  // that died mid-replay left earlier versions of tests in the tree. `execute`
+  // has already done this before preflight; this is for direct callers, and it
+  // does nothing once the marker is gone.
+  await restoreInFlight(state, cwd);
   // Resolved once and threaded, so no step below can answer "who does this job"
   // from the module default while holding a config that says otherwise.
   const roles = rolesFor(cfg);
@@ -1808,8 +1828,17 @@ async function reviewPhase(
       // the judge can be named (#485). After the gate has passed, because the
       // verify fixes before it are part of that road too.
       await recordJudgeEditedAfterReview(state, cfg, cwd);
+      // Those same files, replayed at their earliest committed version (#486):
+      // the gate has just passed on this tree and no turn is live.
+      await replayEditedTests(state, cfg, cwd, 'final-fix');
       break;
     }
+
+    // After the gate passed on this tree, and before the review heading and
+    // `withConcurrentCompaction`, which can start a turn that reads the tree
+    // (#486). The edits the coming review will judge, replayed at their earliest
+    // committed version.
+    await replayEditedTests(state, cfg, cwd, 'review');
 
     log.heading(`Code review (round ${state.reviewRound + 1})`, {
       id: 'phase_started',
@@ -1977,9 +2006,20 @@ async function readJudgeTree(
   cfg: Config,
   cwd: string,
   keep: ReadonlySet<string> | null = null,
-): Promise<{ all: FileChange[]; judged: FileChange[]; blobs: Map<string, string | null> } | null> {
+  /** A disposable index to list through, for the replay (#486). #485 passes none. */
+  index?: string,
+): Promise<{
+  all: FileChange[];
+  judged: FileChange[];
+  blobs: Map<string, string | null>;
+  renamedFrom: Map<string, string>;
+} | null> {
   try {
-    const { changes: all, renamedFrom } = await git.treeChanges(cwd, state.baseSha);
+    const { changes: all, renamedFrom } = await git.treeChanges(
+      cwd,
+      state.baseSha,
+      index === undefined ? {} : { index },
+    );
     const judged =
       keep === null
         ? judgeTracked(all, renamedFrom, judgePatterns(cfg.verify))
@@ -1990,7 +2030,7 @@ async function readJudgeTree(
     const blobs = new Map<string, string | null>();
     for (const c of judged) blobs.set(c.path, null);
     present.forEach((p, i) => blobs.set(p, ids[i] ?? null));
-    return { all, judged, blobs };
+    return { all, judged, blobs, renamedFrom };
   } catch {
     return null;
   }
@@ -2051,6 +2091,146 @@ async function recordJudgeEditedAfterReview(state: RunState, cfg: Config, cwd: s
       data: { sinceRound: snap.round, count: paths.length + restored.length, files: paths, restored },
     },
   );
+}
+
+/**
+ * Replay the earliest committed version of each edited test (#486), and record
+ * what it said in its own field - `testReplay` before a review, or
+ * `testReplayAfterReview` at the end of the final fix road - never in
+ * `testChanges`, whose readers keep their meaning.
+ *
+ * Called only right after a gate pass and before any turn can be live, so the
+ * swap is never seen by an agent and `state.gateOutcomes` is the same-tree pass
+ * a failure is measured against.
+ *
+ * Nothing at all with no eligible gate (decision 7): no git call, no record, no
+ * artifact, no narration, and a record an earlier process left is removed.
+ *
+ * Every git read here goes through a disposable index seeded from the real one,
+ * so the user's staged changes are never touched: the listing's `add -N`, the
+ * flag check and the tree id all land in the copy, which is deleted before any
+ * gate runs. A listing that cannot be read records nothing and says so, never
+ * "nothing was edited".
+ */
+async function replayEditedTests(
+  state: RunState,
+  cfg: Config,
+  cwd: string,
+  at: 'review' | 'final-fix',
+): Promise<void> {
+  const field = at === 'review' ? 'testReplay' : 'testReplayAfterReview';
+  const clear = (): void => {
+    if (state[field] === undefined) return;
+    delete state[field];
+    saveState(state);
+  };
+  const gates = replayGates(cfg, cwd);
+  if (gates === null) {
+    clear();
+    return;
+  }
+
+  const patterns = judgePatterns(cfg.verify);
+  // Absolute: git resolves `GIT_INDEX_FILE` against its own cwd, the work tree.
+  const indexFile = path.resolve(state.dir, 'test-replay.index');
+  let read: Awaited<ReturnType<typeof readJudgeTree>> = null;
+  let tree: string | null = null;
+  let entries: Awaited<ReturnType<typeof classify>> = [];
+  try {
+    const scratch = await git.openScratchIndex(cwd, indexFile);
+    read = scratch === null ? null : await readJudgeTree(state, cfg, cwd, null, indexFile);
+    if (read !== null) {
+      let judged = read.judged;
+      if (at === 'final-fix') {
+        const named = new Set((state.judgeEditedAfterReview?.files ?? []).map((f) => f.path));
+        judged = judged.filter((c) => named.has(c.path));
+      }
+      entries = await classify(cwd, judged, read.renamedFrom, read.blobs, patterns, state.baseSha);
+      if (entries.some((e) => e.candidate !== null) && scratch !== null && !scratch.hidden) {
+        tree = await git.scratchTreeId(cwd, indexFile);
+      }
+    }
+  } finally {
+    rmSync(indexFile, { force: true });
+  }
+  if (read === null) {
+    clear();
+    log.warn("The run's edited tests could not be listed, so no earlier version of them was replayed.", {
+      id: 'test_replay_unchecked',
+      data: { at, round: state.reviewRound },
+    });
+    return;
+  }
+  if (entries.length === 0) {
+    clear();
+    return;
+  }
+
+  // The cache first, then one batched replay of everything it did not answer.
+  const files = entries.map((e) => e.file);
+  const pending: Candidate[] = [];
+  for (const [i, e] of entries.entries()) {
+    if (e.candidate === null) continue;
+    const hit = cached(state.testReplayCache, tree, gates, e.candidate);
+    if (hit !== null) files[i] = hit;
+    else pending.push(e.candidate);
+  }
+  const round = state.reviewRound;
+  if (pending.length > 0) {
+    const outcomes = await runReplay(
+      { state, cwd, round, gates, passed: passedGates(state, gates), contract: cfg.toolchain },
+      pending,
+    );
+    for (const [i, f] of files.entries()) {
+      const o = outcomes.get(f.path);
+      if (o === undefined || entries[i]?.candidate === null) continue;
+      const { reason: _reason, ...kept } = f;
+      files[i] = {
+        ...kept,
+        verdict: o.verdict,
+        ...(o.gate === undefined ? {} : { gate: o.gate }),
+        gates: o.gates,
+        ...(o.reason === undefined ? {} : { reason: o.reason }),
+      };
+    }
+  }
+
+  const record: TestReplay = { round, at, tree, files };
+  // Only a tree that could be named keys a cache, and only measured verdicts
+  // go in it: a cache entry is a claim about this tree and nothing else.
+  if (tree !== null && files.some((f) => f.earliest !== undefined)) {
+    state.testReplayCache = {
+      tree,
+      gates: gateKey(gates),
+      files: files.flatMap((f) =>
+        (f.verdict === 'preserved' || f.verdict === 'earlier-fails') && f.earliest !== undefined
+          ? [
+              {
+                path: f.path,
+                earliest: f.earliest.blob,
+                verdict: f.verdict,
+                ...(f.gate === undefined ? {} : { gate: f.gate }),
+                gates: f.gates ?? [],
+              },
+            ]
+          : [],
+      ),
+    };
+  }
+  state[field] = record;
+  artifact(state, `test-replay-${round}.json`, record);
+  saveState(state);
+
+  // Narration with no event, under `recordAndSay`'s rule: the record is durable
+  // in state and in the artifact. Warn only when an earlier version fails.
+  const counts = replayCounts(record);
+  const sentence =
+    describeReplay(record) ??
+    `No edited test needed replaying ${replayWhen(record)}: ${files
+      .map((f) => `\`${f.path}\` ${f.verdict}`)
+      .join(', ')}.`;
+  const say = counts.earlierFails > 0 ? log.warn : log.info;
+  say(sentence, { id: 'test_replay', data: { round, at, ...counts } });
 }
 
 /**
