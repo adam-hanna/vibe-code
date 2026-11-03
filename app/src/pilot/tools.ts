@@ -112,8 +112,72 @@ export type Effect =
    * definition here would disagree with it eventually. `origin` rides alongside
    * so the release leaves an attributed row in `state.events` — read by
    * `readOrigin`, which fails to absent rather than to a name.
+   *
+   * `at` is the gate it was proposed at (#521), because `askId` alone does not
+   * name one: ask ids restart at 1 in every run host, so after a resume a card
+   * proposed at round 1's gate matched round 2's. Optional only because a
+   * conversation saved before it has none; `lapsedWhy` falls back to the id.
    */
-  | { kind: 'answer'; askId: number; decision: Record<string, unknown> };
+  | { kind: 'answer'; askId: number; decision: Record<string, unknown>; at?: GateAt };
+
+/** Which gate an `answer` was proposed at: the boundary and the rounds it opened in. */
+export interface GateAt {
+  boundary: string;
+  planRound: number;
+  reviewRound: number;
+  verifyRound: number;
+}
+
+function gateAt(gate: GateAt): GateAt {
+  return {
+    boundary: gate.boundary,
+    planRound: gate.planRound,
+    reviewRound: gate.reviewRound,
+    verifyRound: gate.verifyRound,
+  };
+}
+
+/**
+ * Why a proposed gate answer can no longer be fired, or null while it still can (#521).
+ *
+ * **An `answer` only means something while its gate is open**, and the gate is
+ * not the card's to keep: the footer, the gate matrix, a phone or a stop can
+ * close it while the card waits. Left owed, the proposal blocked the composer
+ * for good - on #489's run it was still saying *answer the proposal above first*
+ * after the run had finished, about a gate released forty minutes earlier.
+ *
+ * Only what the window has seen decides it. An ended or lost run has no gate to
+ * answer; a live run this window narrates is holding at the proposed gate or it
+ * is not. A run that is still starting, still being read, or read from a record
+ * says nothing either way, so the proposal waits for it.
+ */
+export function lapsedWhy(effect: Effect, bound: Binding | null): string | null {
+  if (effect.kind !== 'answer' || bound === null || bound.kind !== 'run') return null;
+  const what = effect.at === undefined ? 'the gate it would have answered' : `the ${effect.at.boundary} gate`;
+  if (bound.state === 'ended') {
+    return `Nothing was sent: the run ended before anyone decided on this, so ${what} is gone.`;
+  }
+  if (bound.state === 'lost') {
+    return `Nothing was sent: the run was lost before anyone decided on this, so ${what} is gone.`;
+  }
+  if (bound.state !== 'live' || bound.source !== 'window') return null;
+  const gate = bound.run.gate;
+  if (gate !== null && gate.askId === effect.askId && (effect.at === undefined || sameGate(effect.at, gate))) {
+    return null;
+  }
+  return gate === null
+    ? `Nothing was sent: the loop is no longer holding at ${what}. It was answered another way before anyone decided on this.`
+    : `Nothing was sent: the loop is holding at the ${gate.boundary} gate now, not at ${what} this was proposed for.`;
+}
+
+function sameGate(a: GateAt, b: GateAt): boolean {
+  return (
+    a.boundary === b.boundary &&
+    a.planRound === b.planRound &&
+    a.reviewRound === b.reviewRound &&
+    a.verifyRound === b.verifyRound
+  );
+}
 
 /** The label every pilot-shaped decision carries into the run's event log. */
 export const ORIGIN = 'pilot';
@@ -624,6 +688,7 @@ const ANSWER_GATE: ToolDef = {
           kind: 'answer',
           askId: gate.askId,
           decision: { kind: 'continue', origin: ORIGIN },
+          at: gateAt(gate),
         },
       };
     }
@@ -640,6 +705,7 @@ const ANSWER_GATE: ToolDef = {
           kind: 'answer',
           askId: gate.askId,
           decision: { kind: 'stop', reason: why, origin: ORIGIN },
+          at: gateAt(gate),
         },
       };
     }

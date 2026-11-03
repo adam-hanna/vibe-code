@@ -153,7 +153,21 @@ enforcement is not in the component — a proposal appends no tool result, so th
 `unanswered()` and the conversation is unsendable until somebody answers. This is decision 1
 of the five #144 asks for, and the wireframe's 45-second auto-answer is deliberately not
 built: if a proposal should ever fire on its own, that is one more column on #140's gate
-matrix. There is **no config tool** (decision 3), pinned by a test rather than left as an
+matrix.
+
+**A gate proposal lapses when its gate closes** (#521). Unanswered calls block the
+conversation, and that blocking is what keeps the pilot to proposing. But nothing ever cleared
+an `answer_gate` card whose gate had been released from the footer, the gate matrix or a phone,
+or whose run had ended. On #489's run the finished run's pilot was still saying *answer the
+proposal above first* about a gate released forty minutes earlier. `lapsedWhy` in `tools.ts`
+says when a card has lapsed: its run has ended or been lost, or the live run this window narrates
+is holding at a different gate or at none. The pane then answers the card with *nothing was
+sent*, and why. A run still starting, still being read, or read from a record decides nothing.
+The effect records which gate it was proposed at (`at`: the boundary and the three rounds), not
+just `askId`. Ask ids restart at 1 in every run host, so after a resume the id alone matched
+the next round's gate. The lapse result goes straight after the turn that asked for the call,
+because Anthropic rejects a `tool_result` anywhere else. A lapse never starts a pilot turn.
+There is **no config tool** (decision 3), pinned by a test rather than left as an
 omission. Decision 4's archive tool landed with #114 as `read_archive`, a **read** rather than
 an effect: it returns the run listing and the scorecard for the repository on screen, asked
 fresh on every call.
