@@ -107,7 +107,7 @@ import type {
   RunSummary,
 } from '@src/types.js';
 import { findGateScratch } from '@src/artifacts.js';
-import { disagreements } from '@src/judge.js';
+import { disagreements, hadVerdict } from '@src/judge.js';
 
 const USAGE = `
 vibe - automated plan/critique/implement/review loop (Claude Code + Codex)
@@ -2412,6 +2412,7 @@ export async function execute(
     reportGates(state);
     reportReviewCoverage(state);
     reportTestChanges(state);
+    reportJudgeEditedAfterReview(state);
     reportDeferred(state);
     summary(state, started, recovery);
     return incomplete === null ? EXIT.OK : EXIT.UNVERIFIED;
@@ -3105,6 +3106,65 @@ export function reportTestChanges(state: RunState): void {
       split +
       'The reasons are in state.json under testChanges and in the round\'s code-review artifact.',
   );
+}
+
+/**
+ * Changes to the run's own judge made after the last review (#485): by the
+ * final fix, or the verify fixes after it, which no seat is ever asked about.
+ *
+ * Beside `reportTestChanges` and for its reason: the exit code does not move,
+ * and the end of the run is where a person reads. Two facts, kept apart in the
+ * wording. Every listed file's final content was judged by nobody - the opening
+ * says that of all of them. Whether its EARLIER content had a verdict at the
+ * review is per file, and asked through `hadVerdict`, because a combined
+ * `unjudged` can sit beside a seat that did give one (#404).
+ *
+ * Fails closed: a final fix with no snapshot to compare against says the edits
+ * could not be checked, and never prints a record left beside it. Silent when
+ * nothing was edited, and on every run that never took the final fix.
+ *
+ * Exported for the reason `reportDeferred` is.
+ */
+export function reportJudgeEditedAfterReview(state: RunState): void {
+  if (state.finalFixDone === true && state.judgeAtLastReview === undefined) {
+    log.warn("Edits to the run's own tests or config after the last review could not be checked for this run.");
+    return;
+  }
+  const record = state.judgeEditedAfterReview;
+  if (record === undefined) return;
+  const restored = record.restored ?? [];
+  if (record.files.length === 0 && restored.length === 0) return;
+  const r = record.sinceRound;
+  const parts: string[] = [];
+  if (record.files.length > 0) {
+    parts.push(
+      `After review round ${r}, the final fix or the verify fixes after it changed the run's own tests ` +
+        `or config, and no seat judged the result: ${record.files.map((f) => `\`${f.path}\` (${f.status})`).join(', ')}.`,
+    );
+  } else {
+    parts.push(
+      `After review round ${r}, the final fix or the verify fixes after it changed the run's own tests ` +
+        'or config, and no seat judged the result.',
+    );
+  }
+  const earlier = state.testChanges?.round === r ? state.testChanges.files : [];
+  for (const f of record.files) {
+    const at = earlier.find(
+      (e) =>
+        e.path === f.path ||
+        (e.oldPath !== null && e.oldPath === f.path) ||
+        (f.oldPath !== null && e.path === f.oldPath),
+    );
+    if (at === undefined) continue;
+    parts.push(
+      hadVerdict(at)
+        ? `\`${f.path}\` was judged at review round ${r}, and that verdict was for its earlier content.`
+        : `\`${f.path}\` was listed at review round ${r} but no seat judged it then either.`,
+    );
+  }
+  for (const p of restored) parts.push(`\`${p}\` returned to its base content after review round ${r}.`);
+  parts.push('The list is in state.json under judgeEditedAfterReview.');
+  log.warn(parts.join(' '));
 }
 
 /**

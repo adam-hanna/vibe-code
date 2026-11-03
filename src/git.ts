@@ -1,4 +1,4 @@
-import { readFileSync, statSync } from 'node:fs';
+import { lstatSync, readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { run, resolveBin } from '@src/proc.js';
 import { detail, warn } from '@src/log.js';
@@ -927,8 +927,12 @@ export async function diffChunks(
  * not counted" is not "no lines changed". A file `--numstat` did not mention
  * at all is null for the same reason.
  */
-async function fileChanges(cwd: string, prefix: readonly string[]): Promise<FileChange[]> {
-  const base = ['--literal-pathspecs', ...prefix, '-z', '-M'];
+async function fileChanges(
+  cwd: string,
+  prefix: readonly string[],
+  options: { renames?: boolean } = {},
+): Promise<FileChange[]> {
+  const base = ['--literal-pathspecs', ...prefix, '-z', options.renames === false ? '--no-renames' : '-M'];
   const [named, counted] = await Promise.all([
     git(cwd, [...base, '--name-status'], { raw: true }),
     git(cwd, [...base, '--numstat'], { raw: true }),
@@ -997,6 +1001,99 @@ async function fileChanges(cwd: string, prefix: readonly string[]): Promise<File
     });
   }
   return out;
+}
+
+/**
+ * Every changed file, base commit against the working tree, for the judge
+ * listing that brackets the final fix road (#485).
+ *
+ * **Not `resolveDiffMode`, deliberately.** That read answers `<base>..HEAD`
+ * whenever the range is non-empty, and reaches the working tree only when it is
+ * empty. With `git.commitEachRound` on, an earlier round's commit landed and the
+ * final fix's commit rejected - `commitAll` tolerates a failed commit, a
+ * pre-commit hook is enough - it would list the committed rounds alone, and a
+ * test the final fix rewrote would not be in it. This read compares the base
+ * with the tree itself, so a commit that did or did not land changes nothing.
+ * Where every commit landed, or commits are off, it lists what the review's
+ * read lists.
+ *
+ * **Strict, where `resolveDiffMode` is tolerant.** The review falls back so a
+ * reviewer still has something to read. This listing's only other answer is
+ * "nothing changed", so a step that failed - an `add -N` refused by an index
+ * lock leaves new files out of a diff that then succeeds, measured - would be a
+ * false "none". So every step throws, and the caller says the edits could not
+ * be checked instead.
+ *
+ * **No rename detection**, unlike the review's listing. The two reads are
+ * compared path by path, and rename pairing is decided afresh by each: a run
+ * that added an identical copy of a test before the review, and a final fix
+ * that then deleted the original, reads at the end as one rename onto the
+ * unchanged copy - and the deletion vanished from the comparison. With
+ * `--no-renames` a path is always itself, a move is a deletion and an addition,
+ * and both sides are compared.
+ *
+ * **But a rename still decides what is part of the judge**, as it does in the
+ * review (`judgeChanges`: either side). A test moved to `src/moved.ts` is judged
+ * through its old path, and losing that would let a later edit to it pass. So
+ * the same diff is also read with `-M`, and `renamedFrom` maps each rename's
+ * destination to its source - for classifying the snapshot only, never for
+ * comparing, and never at the end of the road (`judgeTracked` says why).
+ *
+ * `add -N` is intent-to-add and stages no content, as the review's read already
+ * relies on. With no base, the same `add -A` and empty-tree read as
+ * `resolveDiffMode`, minus its fallback to `--cached` against HEAD.
+ */
+export async function treeChanges(
+  cwd: string,
+  baseSha: string | null,
+): Promise<{ changes: FileChange[]; renamedFrom: Map<string, string> }> {
+  let prefix: string[];
+  if (baseSha) {
+    await git(cwd, ['add', '-N', '.']);
+    prefix = ['diff', baseSha];
+  } else {
+    await git(cwd, ['add', '-A']);
+    const empty = await emptyTree(cwd);
+    if (empty === null) throw new Error('git could not name the empty tree');
+    prefix = ['diff', '--cached', empty];
+  }
+  const [changes, paired] = await Promise.all([
+    fileChanges(cwd, prefix, { renames: false }),
+    fileChanges(cwd, prefix),
+  ]);
+  const renamedFrom = new Map<string, string>();
+  for (const c of paired) if (c.oldPath !== null) renamedFrom.set(c.path, c.oldPath);
+  return { changes, renamedFrom };
+}
+
+/**
+ * Git's object id for each path's content in the working tree, in order, or
+ * null when git would not say for every one of them (#485).
+ *
+ * Null rather than a partial list: an id that is missing or malformed cannot be
+ * compared, and comparing it as "changed" or "unchanged" would be a guess.
+ *
+ * **Null for anything that is not a regular file**, a symlink above all.
+ * `hash-object` given a path opens it and follows the link, so a link retargeted
+ * to another file with the same bytes hashes the same before and after while git
+ * itself records a different link. Hashing the link text instead would still
+ * make a link and a regular file holding that text look alike. A judge path that
+ * is a link is therefore one this comparison cannot vouch for, and says so.
+ */
+export async function hashObjects(cwd: string, paths: readonly string[]): Promise<string[] | null> {
+  if (paths.length === 0) return [];
+  for (const p of paths) {
+    try {
+      if (!lstatSync(path.join(cwd, p)).isFile()) return null;
+    } catch {
+      return null;
+    }
+  }
+  const { code, stdout } = await git(cwd, ['hash-object', '--', ...paths], { allowFail: true });
+  if (code !== 0) return null;
+  const ids = stdout === '' ? [] : stdout.split('\n').map((l) => l.trim());
+  if (ids.length !== paths.length) return null;
+  return ids.every((id) => /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(id)) ? ids : null;
 }
 
 
