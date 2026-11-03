@@ -56,6 +56,8 @@ vibe fork <run-id> --at <n>   # create a new run from checkpoint n, and stop
 
 Every run writes a checkpoint at each phase and round boundary. `vibe fork --at <n>` creates a new run from one of them, with the same plan, the same approved criteria and the same history up to that point, and a branch at the commit that boundary recorded.
 
+A checkpoint from planning (a question round, a plan round, or the approved plan) recorded no commit, because planning commits nothing. It is branched at the commit the original run started from, and the list shows it as `start <sha>`. Uncommitted changes the original run started with went into its first round commit, so they are not on that branch. A run from before vibe recorded its start commit, or one in a repository with no commits, has none to branch at: its planning checkpoints show `no commit`, and only `--no-branch` forks them.
+
 It does **not** touch your working tree: the branch is created but not checked out, and the original run stays resumable. It also does **not** start the run. `vibe resume <new-run-id>` does that, and that is when your checkout moves. The fork's token totals start from the checkpoint's, so its ceilings count what the original had already spent.
 
 ## `vibe list`

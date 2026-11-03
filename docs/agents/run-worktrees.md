@@ -85,7 +85,8 @@ Five things are load-bearing:
     never interruptible under `cancel.ts`. `--no-branch` with a base, an unresolvable ref, and
     a dirty repository with no worktree whose base is not HEAD are each refused by name. **Null
     is today's behaviour**: the branch at HEAD. A resume never resolves, fetches or moves
-    anything, and a fork's branch comes from its checkpoint.
+    anything, and a fork's branch comes from its checkpoint: the commit it recorded, or for a
+    planning checkpoint, which records none, the run's recorded start (#488).
   - **Refuse, never move.** When `prepareGit` adopts a pre-made branch it compares the
     worktree's HEAD with the branch's commit: equal is the default path and the checkout moves
     nothing; different is an `Escalation` naming both shas. This holds with `baseRef` unset,
@@ -102,7 +103,10 @@ Five things are load-bearing:
     `prepareGit` in the **same save** as `state.branch`, so neither is on disk without the
     other; `run_branch` carries `startSha`/`startRef` on that path only, the sentence says
     `from origin/develop (a7b5f9b)`, and the summary prints a `Start:` line when the field
-    exists. Absent on older runs and never back-filled; a fork drops its parent's.
+    exists. Absent on older runs and never back-filled. A fork branched from a planning
+    checkpoint **keeps** its parent's, because its branch starts exactly there (#488). A fork
+    from a committed checkpoint, or one made with `--no-branch`, drops it. A fork's `ref` is
+    never re-resolved: it records where the start came from.
 - **The script goes through a shell, and that is `verify.command`'s rule rather than a hole in
   `commands.ts`'s.** `verify.ts` states it at the one place a shell is used at all — *"Model-
   authored text is never passed to a shell"* — and this is the same category: a line a **person**

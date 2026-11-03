@@ -400,7 +400,10 @@ to `maxVerifyRounds` turns under pressure it had not earned. `takeGateBaseline` 
   gate whose command is no longer the one the baseline ran.
 - **Absent means unknown, never "passed at the start".** No record is written with
   verification off, with every gate's baseline off, on a plan-only run, or on a run from
-  before this. A fork drops both keys, because they describe the parent's start tree.
+  before this. A fork drops both keys, because they describe the parent's start tree. The
+  exception is a fork branched at that start from a planning checkpoint (#488, below). It
+  keeps `baselineDue`, so a `plan-approved` fork takes the baseline the parent would have
+  taken. There is never a `gateBaseline` for it to keep.
 
 **A failing gate can be read: the fixer is shown both ends, and every attempt keeps its
 whole output** (#248). In the #169 run the `core` gate failed 3 of 3 and the fixer was
@@ -1398,7 +1401,9 @@ does.
   blob. A mismatch means the record and the repository disagree, so it fails closed: the outcome
   becomes `unreadable`, `review_md_mismatch` is said, and nothing is sent.
 - **A fork drops the record.** The record describes the parent's start, and the child's first
-  review reads its own `start ?? baseSha`.
+  review reads its own `start ?? baseSha`. A fork branched at that same start from a planning
+  checkpoint keeps it, because there the record is true of the child (#488). In practice a
+  planning checkpoint never holds one: the record is made at the first review.
 - **Placement and framing.** The file goes after `SIMPLE_SOLUTION` in `reviewPrompt`, and after "How to
   vote" in `votePrompt`, so the severity definitions and `APPROVE_COST` still frame it. It sits
   under a heading naming it as the repository's. It is not a `block()`, so `prompts.<block>` cannot
@@ -1635,3 +1640,49 @@ What calls it, and what a stall does:
   `pendingAnswers`, and "accept" is a demotion, which approves the plan (see #142's section).
 - **`loop.stallAfter`**, default 3, `0` turns it off, and it has no CLI flag. The end-of-run
   summary prints how many step-backs a run took, and only when there were any.
+
+## Forking a planning checkpoint at the start commit (#488)
+
+Every planning checkpoint (`question-round`, `plan-round`, `plan-approved`) is written with
+`NO_COMMIT`, because planning commits nothing. Under `git.useBranch` that used to make
+`planFork` refuse it, since there was "no point in the history to branch from". The point is
+known all the same. Planning is read-only, so the tree a plan was written against is the run's
+start commit, and `prepareGit` has recorded that in `state.start` since #249. A fork of a
+planning checkpoint is now branched there. This is what lets a comparison hold a plan constant
+and vary what happens after it.
+
+- **The road, and its bar.** The checkpoint must be a planning boundary, its own state must
+  carry `start`, and `git.resolveCommit(start.sha)` must return exactly `start.sha`. That is
+  the bar a recorded commit is held to: compared, never adopted. Any other no-commit
+  checkpoint is refused as before, word for word. A planning checkpoint with no start (from
+  before #249, or from a repository with no commits) is refused with that reason added.
+  **A start is never inferred.** `complete` is not a planning boundary, even on a plan-only
+  run.
+- **Named in the plan.** `ForkPlan.commitFrom` is `'start'` on this road. It is optional, and
+  absent means `'checkpoint'`, for `environmentStale`'s reason: `ForkPlan` is built by hand in
+  tests. Branch creation is unchanged, and `forkedFrom.branchFrom` holds the start sha.
+- **Two losses are stated.** The fork branches from the run's start commit because the
+  checkpoint is from planning. And uncommitted changes the parent's tree *may* have held when
+  it started are not on the fork's branch. Nothing sweeps a dirty tree at the start:
+  `markBase` only reads, and those changes went into the parent's first round commit. It
+  says "may" because nothing recorded at a planning checkpoint says whether the tree was
+  clean; `gateBaseline.clean` is only taken after plan approval.
+- **What the child keeps, because it is now true of it:** `start` (with `ref` as recorded,
+  because nothing re-resolves `git.baseRef` from it), `reviewMd` (read from that commit) and
+  `baselineDue`. A `plan-approved` fork therefore takes the start-tree baseline the parent
+  would have taken. `baseSha` needs nothing: it is null at every planning checkpoint, and the
+  child marks its own when implementing begins, after `prepareGit` has checked out the start.
+  So the baseline's `sha` is the child's real start. `gateBaseline` and `requestedBranch` are
+  dropped on every road. A planning checkpoint cannot hold the first, and the second names
+  the parent's branch.
+- **Every other road is unchanged.** A fork of a committed checkpoint, one made with
+  `--no-branch`, and a hand-built plan without `commitFrom` all drop `start`, `reviewMd`,
+  `baselineDue` and `gateBaseline` as before. `--no-branch` needs no start.
+- **`git.worktree` behaves the same on both roads.** On resume the worktree site takes its
+  branch from `state.branch`, which already exists, so it creates none. `prepareGit` then
+  finds the worktree on that branch and clears `branchPending`. Which commit the ref points
+  at never comes into it.
+- **The listing agrees with the fork.** `listCheckpoints` reads `start` from each checkpoint
+  file with the predicate the validator uses (`readStartShape`). `vibe fork <run-id>` shows a
+  planning row that has one as `start <sha7>`, and one that has none as `no commit (...)`.
+  Like a committed row, it is never resolved there, because a listing runs no git.

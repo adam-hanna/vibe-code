@@ -1404,7 +1404,7 @@ async function cmdFork(args: readonly string[]): Promise<ExitCode> {
       return EXIT.ERROR;
     }
     log.heading(`Fork points in ${sourceId}`);
-    for (const { n, meta, linked } of points) {
+    for (const { n, meta, linked, start } of points) {
       if (linked === true) {
         // A different row from `(unreadable)`, and #53 drew the distinction:
         // one says a file was opened and could not be used, this one says vibe
@@ -1416,7 +1416,14 @@ async function cmdFork(args: readonly string[]): Promise<ExitCode> {
         console.log(`  ${String(n).padStart(3)}  (unreadable)`);
         continue;
       }
-      const commit = meta.commit === null ? `no commit (${meta.commitNote})` : meta.commit.slice(0, 7);
+      // A planning checkpoint that carries the run's start is branched there
+      // (#488), so it is shown as forkable at that commit rather than as none.
+      const commit =
+        meta.commit !== null
+          ? meta.commit.slice(0, 7)
+          : start !== undefined
+            ? `start ${start.sha.slice(0, 7)}`
+            : `no commit (${meta.commitNote})`;
       // Omitted rather than shown as zero on a checkpoint written before #139:
       // absent means the file never carried the counter, which is a different
       // fact from a run that asked itself nothing, and only one of them is a
