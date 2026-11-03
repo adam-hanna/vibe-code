@@ -359,6 +359,49 @@ short-circuit and costs exactly what it did. Three things about it:
   excluding a flake hides a defect in the suite; re-running a command that could not start
   buys nothing, since no amount of retrying makes a mistyped path resolve.
 
+**Each gate runs once against the start tree, so an inherited failure can be named**
+(#484). Gates only ever ran on head, so a gate that was already failing before the run
+started produced the same P0 `<gate>-failing` as one the run broke, and the fixer spent up
+to `maxVerifyRounds` turns under pressure it had not earned. `takeGateBaseline` runs between
+`markBase` and the implement turn, when the tree is still the one the run started from
+(planning is read-only, and `markBase` only reads). What it does and does not do:
+
+- **When is a flag, not the phase.** `baselineDue: true` is written in the save that
+  advances to `implementing`, so the `plan-approved` checkpoint carries it, and only when
+  verification is on and some gate has `baseline` on. The implementation block takes the
+  baseline while it is set and deletes it in the save that records the result. "The phase
+  was `planning` when this process started" is not the test: a `stop` at plan-approved
+  resumes at `implementing`, and that run would never take one. With the flag, a resume
+  after that stop takes it, a kill while taking it takes it again, a kill in the implement
+  turn (edits in the tree) takes none, and a run from before this never takes one. The
+  gates are resolved again with the resuming process's config; if none is eligible now,
+  the flag is cleared and nothing is said.
+- **Every gate, once each, and a failure does not stop the sequence.** It is a yes/no about
+  one tree, as a reproducer is (#113), so `runs: 1`, and the record says so, so that nobody
+  reads a pass as "not flaky". `runGate` stops at a failure so the fixer gets one problem;
+  a baseline wants every gate's state. An unlaunchable command is recorded rather than
+  escalated, because the real gate escalates with its own message when it runs.
+- **`runGate` is not reused.** It resets `gateOutcomes`, which the exit rule reads, emits
+  `verify_*` events keyed to review rounds, writes `verify-*` artifacts and preserves gate
+  artifacts. None of that describes a baseline. The record is `state.gateBaseline` and
+  `gate-baseline.json`, a failed gate's whole output is `gate-baseline-<gate>.log`, and it
+  is narrated (`gate_baseline`) rather than recorded as an event, under `recordAndSay`'s
+  rule: the fact is already durable in state.
+- **The P0 is unchanged.** A `<gate>-failing` for a gate that failed at the start gains one
+  sentence in its `detail` naming that and the log. It keeps its severity, its id and its
+  cost of a verify round; whether an inherited failure should buy rounds is a later
+  decision, which this record's census informs. The end of the run says, per gate that
+  failed at the start, what **the last verification** saw of it. It says that and not
+  "still fails", because a stop at `verify-round` or `review-round` comes after a fix and
+  before the gates run again.
+- **Matched on the name and the command.** A resume layers the project file over the run's
+  settings, so a gate can keep its name and change what it runs. The start tree's verdict was
+  on the old command, so neither the fixer's sentence nor the end-of-run line is given for a
+  gate whose command is no longer the one the baseline ran.
+- **Absent means unknown, never "passed at the start".** No record is written with
+  verification off, with every gate's baseline off, on a plan-only run, or on a run from
+  before this. A fork drops both keys, because they describe the parent's start tree.
+
 **A failing gate can be read: the fixer is shown both ends, and every attempt keeps its
 whole output** (#248). In the #169 run the `core` gate failed 3 of 3 and the fixer was
 handed the last 8,000 characters of the first failing attempt, which held `# fail 2` and

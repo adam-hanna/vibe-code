@@ -179,7 +179,7 @@ import {
   suggestedFix,
   verdictOf,
 } from '@src/verify.js';
-import type { VerifyResult } from '@src/verify.js';
+import type { ResolvedGate, VerifyResult } from '@src/verify.js';
 import type {
   Answer,
   Ballot,
@@ -192,6 +192,8 @@ import type {
   FixDispositions,
   TestChanges,
   UnaddressedFinding,
+  GateBaseline,
+  GateBaselineEntry,
   GateOutcome,
   OpenQuestion,
   ReproducerOutcome,
@@ -890,6 +892,13 @@ async function runPhases(
       });
       return state;
     }
+    // A baseline is owed (#484), and the debt is written in the same save as the
+    // phase, so the `plan-approved` checkpoint carries it. A flag rather than
+    // "the phase was planning when this process started": a `stop` at
+    // plan-approved resumes at `implementing`, and that run would never take one.
+    // No key at all when nothing is eligible, so a run with the baseline off is
+    // byte-identical to one from before it existed.
+    if (baselineGates(cfg, cwd) !== null) state.baselineDue = true;
     advancePhase(state, 'implementing');
     writeCheckpoint(state, 'plan-approved', NO_COMMIT);
     await holdAt(state, cfg, host, 'plan-approved');
@@ -907,6 +916,11 @@ async function runPhases(
     state.status = 'implementing';
     state.baseSha = await git.markBase(cwd);
     saveState(state);
+    // After `markBase`, which only reads, and before anything writes: the tree is
+    // still the one the run started from (#484). Only when owed, which is what
+    // makes a resume after a kill in the implement turn - edits in the tree -
+    // take none.
+    if (state.baselineDue === true) await takeGateBaseline(state, cfg, cwd);
     // Before the turn, not after it. See `beginReport`: a run killed inside this
     // turn must not leave the reviewer pointed at an earlier round's report.
     beginReport(state);
@@ -3378,6 +3392,160 @@ async function maybeCommit(
 const NO_COMMIT = { sha: null, note: 'no-commit-in-round' } as const;
 
 /**
+ * The gates a start-tree baseline would run, or null when none is eligible
+ * (#484): verification off, or every gate's `baseline` off.
+ *
+ * One function for both questions - "is one owed" when the plan is approved,
+ * and "what runs" when it is taken - so they cannot disagree. Asked again with
+ * this process's config at the second, because a resume may have changed it.
+ */
+function baselineGates(cfg: Config, cwd: string): ResolvedGate[] | null {
+  if (!cfg.verify.enabled) return null;
+  const gates = resolveGates(cfg.verify, cwd);
+  return gates.some((g) => g.baseline) ? gates : null;
+}
+
+/**
+ * Run every gate once against the tree the run started from, and record what
+ * each did (#484).
+ *
+ * The question is whether a gate was already failing before this run changed
+ * anything, so that a P0 `<gate>-failing` the run inherited can say so. That
+ * makes it a yes/no about one tree, which is why it is one run per gate, as a
+ * reproducer is (#113), and why the record says `runs: 1`: a pass here is not
+ * evidence that a gate is deterministic.
+ *
+ * **Not `runGate`**, which is right for verification and wrong for this at every
+ * step: it resets `state.gateOutcomes`, which the exit rule reads; it emits
+ * `verify_*` events keyed to review rounds; it writes `verify-*` artifacts and
+ * preserves gate artifacts; it STOPS at the first failure, so the fixer gets one
+ * problem; and it escalates on an unlaunchable command. A baseline wants every
+ * gate's state, so a failure does not stop the sequence, and an unlaunchable
+ * command is recorded rather than escalated - the real gate escalates with its
+ * own message when it runs.
+ *
+ * The record is durable in state, so it is narrated rather than recorded as an
+ * event (`recordAndSay`'s rule), and said after the save that holds it.
+ */
+async function takeGateBaseline(state: RunState, cfg: Config, cwd: string): Promise<void> {
+  const gates = baselineGates(cfg, cwd);
+  if (gates === null) {
+    // Owed when the plan was approved, and nothing is eligible under the config
+    // this resume runs on. The debt is cleared and nothing is said: absent is
+    // what "no baseline" looks like everywhere else.
+    delete state.baselineDue;
+    saveState(state);
+    return;
+  }
+
+  // Before any gate runs, because a gate may write files into the tree.
+  let clean: boolean | null;
+  try {
+    clean = !(await git.isDirty(cwd));
+  } catch {
+    clean = null;
+  }
+
+  const entries: GateBaselineEntry[] = [];
+  for (const gate of gates) {
+    if (!gate.baseline) {
+      entries.push({
+        name: gate.name,
+        command: gate.command,
+        status: 'skipped',
+        exitCode: null,
+        required: gate.required,
+        runs: null,
+        log: null,
+      });
+      continue;
+    }
+    const result = await runGateCommand(cwd, { ...gate, runs: 1 }, cfg.toolchain);
+    if (result.unavailable !== null) {
+      entries.push({
+        name: gate.name,
+        command: null,
+        status: 'unavailable',
+        exitCode: null,
+        required: gate.required,
+        runs: null,
+        log: null,
+      });
+      continue;
+    }
+    const status: GateBaselineEntry['status'] =
+      result.unlaunchable !== null ? 'unlaunchable' : result.ok ? 'passed' : 'failed';
+    let logName: string | null = null;
+    if (status !== 'passed') {
+      // The whole output, uncapped, because it is a file (#248). Gate names pass
+      // `GATE_NAME_RE`, so the name is always an artifact basename.
+      logName = `gate-baseline-${gate.name}.log`;
+      artifact(state, logName, result.outputs[0] ?? result.output);
+    }
+    entries.push({
+      name: gate.name,
+      command: result.command ?? gate.command,
+      status,
+      exitCode: result.attempts[0]?.exitCode ?? null,
+      required: gate.required,
+      runs: 1,
+      log: logName,
+    });
+  }
+
+  const record: GateBaseline = { sha: state.baseSha, clean, gates: entries };
+  artifact(state, 'gate-baseline.json', record);
+  state.gateBaseline = record;
+  delete state.baselineDue;
+  saveState(state);
+
+  const tree =
+    clean === true ? 'clean tree' : clean === false ? 'uncommitted changes in the tree' : 'tree state unknown';
+  const where = state.baseSha === null ? 'Start tree' : `Start commit ${state.baseSha.slice(0, 7)}`;
+  const said = entries
+    .map((e) => `${e.name} ${e.status}${e.status === 'failed' && e.log !== null ? ` (see ${e.log})` : ''}`)
+    .join(', ');
+  const failed = entries.some((e) => e.status === 'failed');
+  const sentence =
+    `${where} (${tree}): ${said}` +
+    (failed ? ' - a gate that failed before this run changed anything is still a P0, and its fixer is told so.' : '');
+  const narration = {
+    id: 'gate_baseline',
+    data: {
+      sha: record.sha,
+      clean: record.clean,
+      gates: entries.map((e) => ({ name: e.name, status: e.status })),
+    },
+  };
+  if (failed) log.warn(sentence, narration);
+  else log.info(sentence, narration);
+}
+
+/**
+ * The sentence a `<gate>-failing` finding gains when that gate also failed at
+ * the start commit (#484), or nothing.
+ *
+ * Nothing when there is no baseline (unknown, never a pass at the start) and
+ * nothing when the gate passed there, so the fixer's prompt changes only for a
+ * gate that failed before the run touched anything. The finding's severity, id
+ * and round cost are not touched: whether an inherited failure should buy rounds
+ * is a later decision.
+ *
+ * Matched on the command as well as the name. A resume layers the project file
+ * over the run's settings, so a gate can keep its name and change what it runs;
+ * the start tree's verdict on the old command says nothing about the new one, and
+ * claiming it would attribute a failure nobody measured.
+ */
+function inheritedNote(state: RunState, gateName: string, command: string | null): string {
+  const entry = state.gateBaseline?.gates.find((g) => g.name === gateName && g.command === command);
+  if (entry === undefined || entry.status !== 'failed') return '';
+  const sha = state.gateBaseline?.sha ?? null;
+  const at = sha === null ? 'the start commit' : `the start commit ${sha.slice(0, 7)}`;
+  const output = entry.log === null ? '' : `; that output is ${path.join(state.dir, entry.log)}`;
+  return `\n\nThis gate also failed at ${at}, before this run changed anything${output}.`;
+}
+
+/**
  * Run the project's verification gates, in order.
  *
  * Returns a P0 finding for the FIRST gate that fails, or null when the code is
@@ -3638,7 +3806,9 @@ async function runGate(state: RunState, cfg: Config, cwd: string): Promise<Findi
       // and at the file written one line above: the artifact is uniform, and
       // the fixer is pointed at the output it has to read (#48).
       evidence: [{ kind: 'artifact', path: `verify-failure-${state.reviewRound}.txt` }],
-      detail: describeFailure(shown, failedLogs),
+      // Plus one sentence when this gate also failed at the start commit (#484),
+      // and nothing otherwise - the prompt moves only for an inherited failure.
+      detail: describeFailure(shown, failedLogs) + inheritedNote(state, result.name, result.command),
       // Beside `describeFailure` in `verify.ts` rather than written here (#135).
       // The two sentences have to agree about which kind of failure this is -
       // a detail that says "not deterministic" over a fix that says "make it

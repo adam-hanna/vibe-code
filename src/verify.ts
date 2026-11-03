@@ -18,6 +18,8 @@ export interface ResolvedGate {
   runs: number;
   timeoutMs: number;
   required: boolean;
+  /** Whether this gate runs once against the start tree (#484). */
+  baseline: boolean;
   /**
    * What to preserve when this gate FAILS. Empty for a gate that named nothing
    * and for the synthesized legacy gate, which has no key that could name any.
@@ -202,6 +204,7 @@ export function resolveGates(cfg: VerifyConfig, cwd: string): ResolvedGate[] {
         runs: cfg.runs,
         timeoutMs: cfg.timeoutMs,
         required: true,
+        baseline: cfg.baseline,
         // Nothing: a legacy config has no key that could name an artifact, so
         // an empty list is the observation rather than a default (#62).
         artifacts: [],
@@ -215,6 +218,7 @@ export function resolveGates(cfg: VerifyConfig, cwd: string): ResolvedGate[] {
     runs: gate.runs ?? cfg.runs,
     timeoutMs: gate.timeoutMs ?? cfg.timeoutMs,
     required: gate.required ?? true,
+    baseline: gate.baseline ?? cfg.baseline,
     artifacts: gate.artifacts ?? [],
   }));
 }

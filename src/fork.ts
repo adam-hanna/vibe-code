@@ -526,6 +526,13 @@ export async function commitFork(targetDir: string, plan: ForkPlan): Promise<For
     // Read from the parent's start, which is false of the child; its first
     // review reads its own `start ?? baseSha` (#389).
     delete child.reviewMd;
+    // The gates as they stood on the PARENT's start tree (#484), which is false
+    // of the child: its branch starts at the checkpoint commit, and a baseline
+    // it cannot attribute is worse than none. The debt goes with it, so a fork
+    // from the plan-approved checkpoint does not run gates against a tree that
+    // is not its start either. #488 may revisit both.
+    delete child.gateBaseline;
+    delete child.baselineDue;
     if (branch === null) delete child.branchPending;
     else child.branchPending = true;
 

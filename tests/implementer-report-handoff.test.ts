@@ -96,7 +96,7 @@ test('a review after a verification repair is handed the repair report, not the 
 
   await orchestrate(
     state,
-    config({}, { ...committing(), ...verifying(state, { failures: 1 }) }),
+    config({}, { ...committing(), ...verifying(state, { failures: 1, baseline: false }) }),
     false,
     agents(reporting(state, reviewPrompts(prompts)), []),
   );
@@ -222,7 +222,7 @@ test('the pointer is cleared before a write turn, so a turn in flight has nothin
 
   await orchestrate(
     state,
-    config({}, { ...committing(), ...verifying(state, { failures: 1 }) }),
+    config({}, { ...committing(), ...verifying(state, { failures: 1, baseline: false }) }),
     false,
     agents(
       {
@@ -259,7 +259,7 @@ test('a run killed mid-write-turn hands its reviewer the notice, not the previou
 
   await orchestrate(
     state,
-    config({}, { ...committing(), ...verifying(state, { failures: 1 }) }),
+    config({}, { ...committing(), ...verifying(state, { failures: 1, baseline: false }) }),
     false,
     agents(
       {

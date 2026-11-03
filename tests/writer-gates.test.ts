@@ -285,7 +285,7 @@ async function loop(cfgOver: Partial<Config>, codexWrites: boolean): Promise<Map
   };
   return capture(
     state,
-    config({ p1Tolerance: 0, maxReviewRounds: 3, maxVerifyRounds: 3 }, { ...committing(), ...verifying(state, { failures: 1 }), ...cfgOver }),
+    config({ p1Tolerance: 0, maxReviewRounds: 3, maxVerifyRounds: 3 }, { ...committing(), ...verifying(state, { failures: 1, baseline: false }), ...cfgOver }),
     false,
     {
       claude: (label) => (label === 'plan' || label.startsWith('revise-') ? planFixture() : writer(label)),

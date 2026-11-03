@@ -103,6 +103,11 @@ test('a clean pass is legible as a sequence of ids, with no sentence read', asyn
       'findings_reported', // the four counts against the tolerance
       'plan_approved', //    and what the gate made of them
       'artifact_written', // PLAN.md, written once the plan is approved
+      // Each gate run once against the start tree, before anything writes to it
+      // (#484): the record as a file, then one line saying what it held.
+      // Narration with no event - `state.gateBaseline` is the durable record.
+      'artifact_written', // gate-baseline.json
+      'gate_baseline',
       'phase_started', //  implementing
       // The implementer announcing itself (#223). It did NOT, and the absence was
       // pinned here as deliberate - see the case below for the evidence that
@@ -178,10 +183,16 @@ test('the sequence grew by facts the run already recorded, and by nothing else',
       'plan-0.json',
       'plan-critique-0.json',
       'PLAN.md',
+      'gate-baseline.json',
       'implementation-report.md',
       'code-review-0.json',
     ],
   );
+
+  // The start-tree baseline (#484) under the same rule: said, and never an
+  // event, because `state.gateBaseline` already holds it.
+  assert.ok(said.has('gate_baseline'));
+  assert.equal(recorded.has('gate_baseline'), false);
 });
 
 test('turn_started names the role, so a host need not infer it from the label', async () => {

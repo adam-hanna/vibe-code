@@ -326,6 +326,7 @@ The verification gate is how vibe knows the code works rather than that a review
 | `verify.gates` | `null` | A list of named gates, in the order they run. See below. |
 | `verify.artifactMaxBytes` | `null` | A ceiling on what a failing gate's `artifacts` may copy into the run directory. `null` is no ceiling. Over it, nothing is copied and the run says so. |
 | `verify.reproducers` | `true` | Let a reviewer prove a blocking finding with a test file, run by your own gate. See [Reproducers](./how-it-works#reproducers). |
+| `verify.baseline` | `true` | Before the implement turn, run each gate once against the tree the run started from, and record which ones were already failing, in `gate-baseline.json`. A gate that failed there is still a P0 when it fails later; its fixer and the end of the run are told it was inherited. Costs one run of each gate per run, bounded by its `timeoutMs`. Turn it off for one long gate with `verify.gates[].baseline`. |
 | `verify.testPaths` | `**/*.test.*`, `**/*.spec.*`, `**/test/**`, `**/tests/**`, `**/__tests__/**`, `**/test_*.py`, `**/*_test.py`, `**/*_test.go` | Which changed files count as tests when the reviewer is asked whether a round edited its own judge. Replaces the built-in list. `vibe.config.json` always counts. |
 
 ### Named gates
@@ -352,9 +353,10 @@ One command can only fail one way. `verify.gates` names as many as the project n
 | `verify.gates[].runs` | Defaults to `verify.runs`. |
 | `verify.gates[].timeoutMs` | Defaults to `verify.timeoutMs`. |
 | `verify.gates[].required` | Defaults to `true`. An unavailable required gate makes a finished run exit 7. A gate that runs and fails always blocks, whatever this says. |
+| `verify.gates[].baseline` | Defaults to `verify.baseline`. Set `false` on a long end-to-end gate to skip it in the start-tree baseline; it is recorded as `skipped`. |
 | `verify.gates[].artifacts` | Project-relative files or directories (not globs) to copy into the run directory when this gate fails, one copy per round. Links are refused. |
 
-A failure stops the sequence, so the fixer gets one problem at a time. An unavailable gate does not. `gates: []` is refused: `enabled: false` is how you turn verification off.
+A failure stops the sequence, so the fixer gets one problem at a time. An unavailable gate does not. The start-tree baseline is the exception: it runs every gate once, whatever the one before it did, because it wants every gate's state. `gates: []` is refused: `enabled: false` is how you turn verification off.
 
 ## `progress`
 

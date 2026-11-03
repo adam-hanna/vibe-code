@@ -692,10 +692,17 @@ const VERIFY_LOG = 'vibe-verify-runs.txt';
  * `failRuns` names them individually, for the case that needs a gate which
  * passes before a fix round and fails after it. `runs: 1` by default:
  * `DEFAULTS.verify.runs` is 3, which would triple every count below.
+ *
+ * `baseline` is written only when given, so the default - on - is what a case
+ * gets unless it says otherwise (#484). A fresh run takes its start-tree
+ * baseline before the implement turn, and that is one execution of this
+ * command: a case that counts executions from the first verification, or fails
+ * a numbered one, says `baseline: false`, because the baseline would otherwise
+ * take run 1.
  */
 export function verifying(
   state: RunState,
-  options: { failures?: number; failRuns?: readonly number[]; runs?: number } = {},
+  options: { failures?: number; failRuns?: readonly number[]; runs?: number; baseline?: boolean } = {},
 ): Partial<Config> {
   const failing =
     options.failRuns ?? Array.from({ length: options.failures ?? 0 }, (_unused, i) => i + 1);
@@ -717,6 +724,7 @@ export function verifying(
       command: `node ${VERIFY_SCRIPT}`,
       runs: options.runs ?? 1,
       timeoutMs: 30_000,
+      ...(options.baseline === undefined ? {} : { baseline: options.baseline }),
     },
   };
 }
@@ -795,6 +803,46 @@ export function gateRuns(state: RunState, name: string): number {
   const log = path.join(state.targetDir, `vibe-gate-${name}-runs.txt`);
   if (!existsSync(log)) return 0;
   return readFileSync(log, 'utf8').split('\n').filter(Boolean).length;
+}
+
+/**
+ * A gate that fails while a marker file exists, and passes once it is gone
+ * (#484).
+ *
+ * The counter-based fixtures above decide by execution number, which a
+ * start-tree baseline would shift by one. This decides by the tree, which is
+ * what a baseline is a question about: a committed marker is a failure the run
+ * inherited, a turn that deletes it is the run fixing it, and a turn that
+ * creates it is the run breaking it. Every execution is logged, so "did this
+ * gate run at the baseline" is an observation (`markerRuns`).
+ */
+export function markerGate(state: RunState, name: string, marker: string): string {
+  const script = `vibe-marker-${name}.mjs`;
+  writeFileSync(
+    path.join(state.targetDir, script),
+    "import { appendFileSync, existsSync } from 'node:fs';\n" +
+      `appendFileSync(${JSON.stringify(`vibe-marker-${name}-runs.txt`)}, 'ran\\n');\n` +
+      `if (existsSync(${JSON.stringify(marker)})) {\n` +
+      `  console.log(${JSON.stringify(`MARKER ${marker} PRESENT`)});\n` +
+      '  process.exit(1);\n' +
+      '}\n' +
+      'process.exit(0);\n',
+    'utf8',
+  );
+  return `node ${script}`;
+}
+
+/** How many times the command `markerGate` wrote for this gate has run. */
+export function markerRuns(state: RunState, name: string): number {
+  const log = path.join(state.targetDir, `vibe-marker-${name}-runs.txt`);
+  if (!existsSync(log)) return 0;
+  return readFileSync(log, 'utf8').split('\n').filter(Boolean).length;
+}
+
+/** Commit everything in the target tree, so a case can start from a clean one. */
+export function commitTree(state: RunState, message = 'fixture'): void {
+  execFileSync('git', ['add', '-A'], { cwd: state.targetDir, stdio: 'pipe' });
+  execFileSync('git', ['commit', '-q', '-m', message], { cwd: state.targetDir, stdio: 'pipe' });
 }
 
 /**
