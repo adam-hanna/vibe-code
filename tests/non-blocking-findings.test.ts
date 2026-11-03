@@ -408,8 +408,9 @@ test('an approved plan hands its non-blocking findings to the implementer, in th
   const prompt = d.prompts.get('implement') ?? '';
   const at = prompt.indexOf(SECTION_HEADING);
   const known = prompt.indexOf('## Known open issues with this plan');
-  const declined = prompt.indexOf('## Declined by the reviewer');
+  const declined = prompt.indexOf('## Declined by the plan critique');
   assert.ok(at !== -1, 'the section is there');
+  assert.ok(declined !== -1, 'the declined section is there');
   assert.ok(at < known, 'before the carried section, which stays where it was');
   const section = prompt.slice(at, known);
   assert.match(section, /Address each one that belongs to the task as you implement, and leave the rest/);
