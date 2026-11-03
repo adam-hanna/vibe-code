@@ -60,6 +60,14 @@
       }
     },
     {
+      "level": "detail",
+      "id": "artifact_written",
+      "message": "Wrote plan-paths-0.json",
+      "data": {
+        "name": "plan-paths-0.json"
+      }
+    },
+    {
       "level": "ok",
       "id": null,
       "message": "Plan drafted - 0 assumption(s), 0 open question(s)",

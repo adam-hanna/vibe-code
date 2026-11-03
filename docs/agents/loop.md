@@ -1400,6 +1400,56 @@ does.
   remote-tracking ref, and calls itself a preview. Neither can know the commit a run will actually
   start at.
 
+## Which paths a plan names that the start commit lacks (#491)
+
+`src/plan-paths.ts`. After `parsePlan` in `runPlan`, and after every revision, each path
+`planNamedFiles` (`src/work.ts`) returns is resolved at `state.start.sha` and written to
+`plan-paths-<n>.json` beside `plan-<n>.json`, marked present (with git's object type) or absent.
+
+- **Why.** Of 276 critique findings across 25 archived runs, 75% dispute a fact about the existing
+  code and 52% would be settled by one command or one file read (the measurement behind
+  `planInspectionNote` in `src/prompts.ts`). The critic is told a plan citing a file that does not
+  exist is a P1, and until this the only harness-side check on a plan's content was
+  `refusePlaceholderPlan`. A cited path that the start commit does not hold is the cheapest such
+  fact to measure.
+- **Records only, and every prompt is byte-identical.** No prompt, guard or gate reads the file. A
+  plan legitimately names files it will create, so an absent path is not a defect. Rendering the
+  absent paths into the critique prompt, as a note in the `planInspectionNote` pattern and never as
+  a finding, is a later PR, and it waits on what the record yields. `plan-paths.test.ts` runs the
+  same two rounds in a repository that holds the paths and one that does not, and requires every
+  prompt to match.
+- **The start commit, never the working tree, and never a guessed commit.** No `state.start` (a
+  run not on a branch, or from before #249) records nothing. `baseSha` is not a fallback: it is
+  where the branch was marked, not what the planner read. A non-advancing revision replaces
+  `plan-<n>.json`, so it replaces this file too, and a revision whose paths could not be resolved
+  removes the earlier draft's file rather than leaving it to describe a plan no longer on disk.
+- **The object read REVIEW.md uses, many paths at once, behind a commit check.**
+  `resolveCommit` first, then one `git cat-file --batch-check`, without redaction. The order
+  matters: batch-check answers `missing` for every path under an id that does not exist, so
+  without the check an unreadable commit would read as a plan whose every path is absent. Any
+  failure (git not runnable, a non-zero exit, a line count or shape it did not expect) records
+  nothing. A path is never marked absent because a read failed. Each path is asked relative to the
+  run's directory and from the repository root, and either answer makes it present, because a plan
+  run in `app/` may write `app/src/x.ts` or `src/x.ts` for the same file. A path with a `..` segment
+  is listed under `notChecked` instead: it is not inside the commit, and `cat-file` exits fatally on
+  one.
+- **Best-effort.** `recordPlanPaths` never throws. A failure is one `detail` line, and the run goes
+  on as if the record did not exist. It is a quiet artifact, with no event and no state field: the
+  file is its own durable record, under `recordAndSay`'s rule.
+- **The census, before the prompt change** (2026-11-03, the root checkout's archive, read-only).
+  35 of 39 archived runs have a start commit, and all 35 resolved. Their 104 plans name 5,392
+  tokens. 1,089 are present, 4,289 absent and 14 not checked. **The extractor is the noise.** Of
+  the absent tokens, 2,799 have no slash (identifiers such as `status.runs` and `.then`, which pass
+  the final-extension rule, and bare basenames such as `context.ts`). 267 carry a `:line` suffix
+  (249 of those name a file the commit holds), 104 are globs and 264 are placeholders or code. 855
+  are slash paths. Of 235 findings in the critiques that judged those plans, none has an evidence
+  path among the absent ones. 70 mention an absent token in their text, mostly the identifiers
+  above. 10 (7 P1, 3 P2) mention an absent slash path, and several of those are not claims about a
+  file (`.vibe/runs`, which is untracked, `origin/main`, a URL base). So the record as
+  `planNamedFiles` extracts it is too loose to put before a critic unchanged. The later PR has to
+  narrow the extraction first, at least by stripping `:line` suffixes and dropping tokens with no
+  slash that the tree does not hold by basename.
+
 ## A Codex answer cut off at its output limit (#416)
 
 `src/schemas.ts` (the order), `src/cutoff.ts` (salvage and collapsing), `OutputCutOffError` in
