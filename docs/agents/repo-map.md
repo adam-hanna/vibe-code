@@ -25,6 +25,7 @@ src/vote.ts          the review and critique votes' fail-closed tally, pure: quo
 src/seat-group.ts    a round's finder or verifier turns, review.maxParallel or critique.maxParallel at once; a turn that ends the round stops its siblings, never the run's latch (#403)
 src/dispositions.ts  a review fix round's or a findings revision's dispositions joined onto its findings, with seats and (plan side) votes, pure (#393, #453)
 src/questions.ts     when two wordings are one question: the threshold, and REPHRASED.md
+src/decisions.ts     what a run decided without the person: PLAN.md's two closing sections and DECISIONS.md (#487)
 src/raise.ts         what a person does to a run's findings: raise one, move a severity
 src/literal.ts       agent text made inert before it is written into NEEDS-INPUT.md (#472)
 src/roles.ts         who does what: the role table, refusals, warnings

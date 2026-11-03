@@ -756,6 +756,14 @@
       }
     },
     {
+      "level": "detail",
+      "id": "artifact_written",
+      "message": "Wrote DECISIONS.md",
+      "data": {
+        "name": "DECISIONS.md"
+      }
+    },
+    {
       "level": "info",
       "id": null,
       "message": "Plan: .vibe/runs/<id>/PLAN.md",

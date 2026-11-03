@@ -3,6 +3,8 @@ import { EVIDENCE_RULE, REPRODUCER_RULE } from '@src/schemas.js';
 import { inspectedItems } from '@src/evidence.js';
 import { describeOutcome } from '@src/reproducer.js';
 import { nearPairs } from '@src/finder-merge.js';
+import { decidedSections } from '@src/decisions.js';
+import type { PlanDecisions } from '@src/decisions.js';
 import { movedByVote } from '@src/stored.js';
 import { authorOf, readEvidence, reproductionAt, severityChangesOf } from '@src/validate.js';
 import type { RoleTable } from '@src/roles.js';
@@ -618,13 +620,20 @@ export interface FrozenBar {
  * plan's own three-state field is rendered. A rotated implementer given the
  * plan's copy would be reading a bar the gate never approved, beside a direct
  * prompt carrying the one it did.
+ *
+ * `decisions` appends `## Assumptions` and `## Decided without you` (#487).
+ * Passed by the PLAN.md write at approval, by the fork's PLAN.md, and by the
+ * implementer's plan of record; absent, the output is byte for byte what it
+ * was before. **The answerer is never given it**: it is deciding, and must not
+ * be shown what was "decided without you" while it does.
  */
-export function renderPlanDoc(plan: Plan, frozen?: FrozenBar): string {
+export function renderPlanDoc(plan: Plan, frozen?: FrozenBar, decisions?: PlanDecisions): string {
   const criteria =
     frozen === undefined
       ? `\n## Acceptance criteria\n\n${formatAcceptanceCriteria(plan.acceptance_criteria)}\n`
       : implementerCriteria(frozen.acceptanceCriteria);
-  return `${plan.plan_md}\n\n## Out of scope\n\n${formatOutOfScope(plan.out_of_scope)}\n${criteria}`;
+  const decided = decisions === undefined ? '' : decidedSections(decisions);
+  return `${plan.plan_md}\n\n## Out of scope\n\n${formatOutOfScope(plan.out_of_scope)}\n${criteria}${decided}`;
 }
 
 /**
@@ -1138,8 +1147,22 @@ export function implementPrompt(
    * else did; absent renders nothing, as everywhere else.
    */
   environment?: EnvironmentFacts | null | undefined,
+  /**
+   * The approved plan's declared assumptions (#487). Before `roles`, as #483
+   * placed `environment`, so no existing call is reinterpreted. Only the
+   * critique seats were ever told them; a Claude implementer had them by
+   * resuming the planner's conversation, and a rotated or Codex one never did.
+   * Empty renders nothing, so a plan with none gets the prompt it got before.
+   */
+  assumptions: readonly Assumption[] = [],
   roles: RoleTable = ROLES,
 ): string {
+  // After the frozen bar and before the report request, whose Deviations
+  // heading the instruction names; the carried section stays the tail.
+  const restsOn =
+    assumptions.length === 0
+      ? ''
+      : `\n## Assumptions the plan rests on\n\nThe planner declared these unresolved when it wrote the plan. Build on them, and if one turns out to be false, say so under **Deviations** in your report, with the evidence that showed it.\n\n${formatAssumptions(assumptions)}\n`;
   const alsoRaised =
     nonBlocking.length === 0
       ? ''
@@ -1197,7 +1220,7 @@ ${planMd}
 ## Out of scope
 
 ${formatOutOfScope(outOfScope)}
-${implementerCriteria(acceptanceCriteria)}${reportRequest(acceptanceCriteria, 'implement')}${alsoRaised}${known}${notDoing}`;
+${implementerCriteria(acceptanceCriteria)}${restsOn}${reportRequest(acceptanceCriteria, 'implement')}${alsoRaised}${known}${notDoing}`;
 }
 
 /** One part of a review round, as the reviewer is told about it. */

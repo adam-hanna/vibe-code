@@ -26,6 +26,7 @@ import { countBallot, describeVotes, failedBallot, tally } from '@src/vote.js';
 import { describeOutcome, observe } from '@src/reproducer.js';
 import { gateMode } from '@src/gates.js';
 import { moveSection, raisePhase, raiseSection } from '@src/raise.js';
+import { decisionsPrefix, planDecisions, writeDecisions } from '@src/decisions.js';
 import * as git from '@src/git.js';
 import { readDecision, readOrigin } from '@src/host.js';
 import type { GateContext, Host } from '@src/host.js';
@@ -188,6 +189,7 @@ import type {
   Ballot,
   CheckpointCommitNote,
   ClaudeTurnResult,
+  Confidence,
   Config,
   Finding,
   FindingsReport,
@@ -993,6 +995,9 @@ async function runPhases(
           // The gates vibe will run, from the facts the planner is given (#483):
           // a writer with no planner history otherwise never sees them.
           state.environment,
+          // What the plan rests on (#487): a writer with no planner history,
+          // rotated or seated on Codex, never saw them.
+          plan.assumptions,
           roles,
           // An approved plan can predate the answers to its advisory questions
           // (#277); the implementer is told them, and that they win.
@@ -1416,6 +1421,12 @@ async function planPhase(
         );
       }
       state.questionRound += 1;
+      // The record of model answers (#487) starts with the run's first answerer
+      // turn, on this save rather than after the turn: a kill inside round 1
+      // resumes into round 2, and a check made after the turn would then never
+      // create it. A state from before #487 resumed past round 1 never gains it,
+      // because a list of only the rounds since would read as complete.
+      if (state.questionRound === 1) state.modelAnswers ??= [];
       saveState(state);
 
       const answers = await resolveQuestions(state, cfg, cwd, pending, plan, roles, turns);
@@ -1630,7 +1641,9 @@ async function planPhase(
     continue;
   }
 
-  const planFile = artifact(state, 'PLAN.md', P.renderPlanDoc(plan));
+  // With its decisions (#487), and DECISIONS.md beside it from the same items.
+  const planFile = artifact(state, 'PLAN.md', P.renderPlanDoc(plan, undefined, planDecisions(state, plan)));
+  writeDecisions(state, plan);
   log.info(`Plan: ${path.relative(cwd, planFile)}`);
   const followUps = writeFollowUps(state, plan);
   if (followUps !== null) log.info(`Follow-ups: ${path.relative(cwd, followUps)}`);
@@ -4180,7 +4193,10 @@ function freshConversationPrefix(
       planInPrompt ? null : planOfRecord(state, role),
       state.handoffStale === true,
     ) +
-    rehydratedPriorRuns(state, role)
+    rehydratedPriorRuns(state, role) +
+    // Kept out of `handoffContext`: with no briefing it says the conversation
+    // was rotated, which is false of a Codex writer that never had one.
+    (planInPrompt ? decisionsOfRecord(state, role) : '')
   );
 }
 
@@ -4237,9 +4253,31 @@ function rehydratedPriorRuns(state: RunState, role: Role): string {
  */
 function planOfRecord(state: RunState, role: Role): string | null {
   if (state.plan === null) return null;
+  // The implementer's copy carries the decisions the plan was approved with
+  // (#487); the planner's does not, since it is still the one making them.
   return role === 'implementer'
-    ? P.renderPlanDoc(state.plan, { acceptanceCriteria: state.acceptanceCriteria })
+    ? P.renderPlanDoc(
+        state.plan,
+        { acceptanceCriteria: state.acceptanceCriteria },
+        planDecisions(state, state.plan),
+      )
     : P.renderPlanDoc(state.plan);
+}
+
+/**
+ * The decisions of record, for a memoryless implementer turn whose own prompt
+ * restates the plan (#487).
+ *
+ * Every writer turn sets `planInPrompt`, so `freshConversationPrefix` never
+ * reaches `planOfRecord` for one: the plan body is in the prompt already. The
+ * decisions are not - no writer prompt restates them - so without this a
+ * rotated implementer, or a Codex one on a fresh exec every turn, would never
+ * see "Decided without you" at all. Implementer only, the scope
+ * `planOfRecord` gives them; the frozen bar stays the direct prompt's.
+ */
+function decisionsOfRecord(state: RunState, role: Role): string {
+  if (role !== 'implementer' || state.plan === null) return '';
+  return decisionsPrefix(planDecisions(state, state.plan));
 }
 
 /**
@@ -6819,6 +6857,8 @@ async function resolveQuestions(
     cfg,
     {
       role: 'answerer',
+      // No decisions (#487): the answerer is the one deciding, and must not be
+      // shown what was "decided without you" while it does.
       prompt: P.answerPrompt(questions, P.renderPlanDoc(plan)),
       cwd,
       // **The question round, not the plan round.** These were keyed by
@@ -6849,6 +6889,43 @@ async function resolveQuestions(
   const usable = answers.filter((a) => !declined(a));
   const refused = answers.filter(declined);
 
+  /**
+   * Answers as rows keyed by the question the *planner* wrote.
+   *
+   * The join happens here because this is the only side that has both the
+   * questions and `similarity`. An answer that paired with nothing keeps its own
+   * wording and travels anyway - dropping it would hide what the answerer said,
+   * and attaching it to the nearest question would state that it was about a
+   * question nobody has established it was about.
+   */
+  const asked = (
+    list: readonly Answer[],
+  ): {
+    question: string;
+    answer: string;
+    confidence: Confidence;
+    rationale: string;
+    deferToHuman: boolean;
+  }[] => {
+    const pairs = pairAnswers(
+      questions,
+      list,
+      (q) => q.question,
+      (a) => a.question,
+    );
+    const row = (question: string, a: Answer) => ({
+      question,
+      answer: a.answer,
+      confidence: a.confidence,
+      rationale: a.rationale,
+      deferToHuman: a.defer_to_human,
+    });
+    return [
+      ...pairs.paired.map((p) => row(p.question.question, p.answer)),
+      ...pairs.unpaired.map((a) => row(a.question, a)),
+    ];
+  };
+
   // **The marks and the answers they stand for land on one write** (#169).
   //
   // Marking stays here, before the revision, and that order is #65's: a stop
@@ -6869,6 +6946,24 @@ async function resolveQuestions(
   // not here either. A consequence that is intended: the post-answerer
   // `question-round` checkpoint (#139) now carries them, so a fork from it
   // revises against what this turn bought instead of losing it.
+  //
+  // The answers a model gave, kept as that (#487), on the same save. Absent
+  // stays absent - see `RunState.modelAnswers` - and every turn after the field
+  // exists writes it, `[]` included. Keyed by the planner's wording where an
+  // answer pairs, as `questions_answered` is.
+  if (state.modelAnswers !== undefined) {
+    const given = usable.filter((a) => !a.defer_to_human);
+    state.modelAnswers = [
+      ...state.modelAnswers,
+      ...asked(given).map((r) => ({
+        round: state.questionRound,
+        question: r.question,
+        answer: r.answer,
+        confidence: r.confidence,
+        rationale: r.rationale,
+      })),
+    ];
+  }
   state.pendingAnswers = usable.length > 0 ? [...usable] : null;
   saveState(state);
 
@@ -6924,43 +7019,6 @@ async function resolveQuestions(
       refusedBlocking,
     );
   }
-
-  /**
-   * Answers as rows keyed by the question the *planner* wrote.
-   *
-   * The join happens here because this is the only side that has both the
-   * questions and `similarity`. An answer that paired with nothing keeps its own
-   * wording and travels anyway - dropping it would hide what the answerer said,
-   * and attaching it to the nearest question would state that it was about a
-   * question nobody has established it was about.
-   */
-  const asked = (
-    list: readonly Answer[],
-  ): {
-    question: string;
-    answer: string;
-    confidence: string;
-    rationale: string;
-    deferToHuman: boolean;
-  }[] => {
-    const pairs = pairAnswers(
-      questions,
-      list,
-      (q) => q.question,
-      (a) => a.question,
-    );
-    const row = (question: string, a: Answer) => ({
-      question,
-      answer: a.answer,
-      confidence: a.confidence,
-      rationale: a.rationale,
-      deferToHuman: a.defer_to_human,
-    });
-    return [
-      ...pairs.paired.map((p) => row(p.question.question, p.answer)),
-      ...pairs.unpaired.map((a) => row(a.question, a)),
-    ];
-  };
 
   log.ok(`${answerer} answered ${usable.length} of ${questions.length} question(s)`, {
     // The other half of `1f` (#223). The pane is an inbox of open questions with

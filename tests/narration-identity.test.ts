@@ -92,7 +92,8 @@ test('a clean pass is legible as a sequence of ids, with no sentence read', asyn
       //
       // It appears once per file a clean pass writes, which is the whole of
       // what it writes: the plan, which of the plan's paths the start commit
-      // holds (#491), the critique, PLAN.md at approval, the gate baseline, the
+      // holds (#491), the critique, PLAN.md and DECISIONS.md at approval
+      // (#487), the gate baseline, the
       // implementation report, and the review. The files the *implementer*
       // writes are not among them and must not be - those go into the repository
       // and are the run's output, where these are the run's record of itself.
@@ -107,6 +108,7 @@ test('a clean pass is legible as a sequence of ids, with no sentence read', asyn
       'findings_reported', // the four counts against the tolerance
       'plan_approved', //    and what the gate made of them
       'artifact_written', // PLAN.md, written once the plan is approved
+      'artifact_written', // DECISIONS.md beside it, from the same decisions (#487)
       // Each gate run once against the start tree, before anything writes to it
       // (#484): the record as a file, then one line saying what it held.
       // Narration with no event - `state.gateBaseline` is the durable record.
@@ -188,6 +190,7 @@ test('the sequence grew by facts the run already recorded, and by nothing else',
       'plan-paths-0.json',
       'plan-critique-0.json',
       'PLAN.md',
+      'DECISIONS.md',
       'gate-baseline.json',
       'implementation-report.md',
       'code-review-0.json',

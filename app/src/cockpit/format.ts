@@ -240,8 +240,10 @@ const HOLDS: Readonly<Record<string, Hold>> = {
   },
   'plan-approved': {
     what: 'The critic cleared the plan. This is the last gate before anything is written.',
+    // The decisions first (#487): a short list of guesses to accept or reject is
+    // what a person can act on, where a long plausible plan misleads them.
     inspect:
-      'PLAN.md, and the last plan-critique-<round>.json beside it — that file is what the critic actually said, including what it let through.',
+      "PLAN.md's ## Assumptions and ## Decided without you first: what the plan rests on that nobody asked you about, and what was settled without you (DECISIONS.md beside it lists the same on its own). Then the rest of PLAN.md, and the last plan-critique-<round>.json beside it, which is what the critic actually said, including what it let through.",
     cost: 'Continuing starts the implementer: it writes code in your worktree and commits it. This is the expensive one, and the only gate after which the tree changes.',
   },
   implemented: {

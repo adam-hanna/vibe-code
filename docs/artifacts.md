@@ -8,7 +8,8 @@ Most files are conditional: a missing one means the run had nothing to put in it
 
 | File | What it is |
 |---|---|
-| `PLAN.md` | The approved plan. |
+| `PLAN.md` | The approved plan. It ends with `## Assumptions`, what the planner declared it was assuming, and `## Decided without you`: the answers the answerer gave to the planner's questions, the questions left on the planner's default, and the plan critique findings carried into implementation. |
+| `DECISIONS.md` | The same four lists, one section each: `## Assumptions` (with why, and what changes if one is wrong), `## Answered by a model` (with confidence and rationale), `## Left on the planner's default` (with the default used) and `## Carried into implementation`. Written beside `PLAN.md` when the plan is approved, and by `vibe fork` from the fork's own state. vibe never reads it back. On runs started before it existed, the model answers say "not recorded for this run". |
 | `plan-<n>.json` | Each plan round: the plan, its declared assumptions, open questions, out-of-scope list and acceptance criteria. |
 | `plan-paths-<n>.json` | Which repository paths `plan-<n>.json` names, each marked present or absent at the commit the run started from (`state.start`), with git's object type for a present one. A path with a `..` segment is listed as not checked rather than absent. It is a record only: no prompt reads it, so the critic is not told about absent paths (a plan can name files it will create). Missing on a run with no start commit (not on a branch, or from before the start commit was recorded), and when git could not read that commit: a path is never marked absent because a read failed. |
 | `plan-critique-<n>.json` | The critic's findings on each plan round. |
