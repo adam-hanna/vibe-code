@@ -68,6 +68,25 @@ const PLAN_DISPOSITIONS =
   'or `not-addressed`, with a sentence of reason. Use only those ids. Still explain a rebuttal in ' +
   'the plan itself: `plan_md` is what the implementer reads, and `dispositions` is not shown to it.';
 
+/**
+ * What every writer turn is told about the tests and the gate config (#483).
+ *
+ * ImpossibleBench (arXiv 2510.20270) found test modification is most of what a
+ * model does when it cheats a contradictory task, and that resubmitting raises
+ * the rate; the verify -> fix loop is a resubmission loop. The rule is #112's
+ * "justified", worded for the writer: an edit the plan calls for because the
+ * behaviour genuinely moved is legitimate, an edit to make a gate pass never
+ * is. A test that looks wrong is reported rather than changed, which is what
+ * lets the reviewer, who judges every such edit, see the claim.
+ */
+const EXISTING_TESTS = `## Existing tests
+
+Do not edit, delete, skip or loosen an existing test, or \`vibe.config.json\`, to
+make a gate pass. Change a test only where its claim is no longer the contract
+because the plan moves the behaviour it pins, and \`vibe.config.json\` only where
+the plan calls for it. If a test or an acceptance criterion looks wrong, leave it
+as it is and say so in your report, with the evidence.`;
+
 /** The step-back's measured line, from `planStall`'s `{counts, fresh}`. Not overridable. */
 function stallCountsLine({ counts, fresh }: StallMeasure): string {
   const rounds = counts.map((c, i) =>
@@ -147,7 +166,16 @@ ${answers.map(formatAnswer).join('\n\n')}
  */
 export function environmentBlock(
   facts: EnvironmentFacts | null | undefined,
-  audience: 'reviewer' | 'planner',
+  /**
+   * Who reads it. The facts are the same for all three; only the closing
+   * instruction differs. The reviewer's caution is about judging another
+   * agent's shell and is the one part a writer has no use for. The writer
+   * (#483) is told to run the gates listed, as vibe will run them: until then
+   * the implement prompt said only "the project's existing build, lint, and
+   * test commands", and a writer with no planner history (a Codex implementer
+   * on `SLOTS.write`, or a rotated Claude session) never saw which ones.
+   */
+  audience: 'reviewer' | 'planner' | 'implementer',
   /** The seam `runTurn` already has: who does what is read, not inferred. */
   roles: RoleTable = ROLES,
 ): string {
@@ -201,7 +229,9 @@ export function environmentBlock(
         'implementer cannot run it.** Do not raise findings about tool availability, ' +
         'runtime provisioning, or PATH - they are settled above, and a plan relying ' +
         'on a tool listed as available to the implementer is correct to do so.'
-      : '\n\nPlan against these. Do not add steps to install or locate a tool listed as available.';
+      : audience === 'planner'
+        ? '\n\nPlan against these. Do not add steps to install or locate a tool listed as available.'
+        : writerCaution(facts);
 
   return `## Verified environment
 
@@ -211,6 +241,25 @@ ${lines.join('\n')}
 ${verification}${caution}
 
 `;
+}
+
+/**
+ * The writer's closing line of the environment block (#483).
+ *
+ * Asked to run what vibe will run, the same number of times, because a gate
+ * that passes once in the writer's shell and fails on vibe's second run costs a
+ * verify-fix round. Only when something will run: with no command configured
+ * the block has already said nothing will execute the change, and telling the
+ * writer to run "these" would point at nothing.
+ */
+function writerCaution(facts: EnvironmentFacts): string {
+  const gates = facts.verifyGates ?? [];
+  const runnable =
+    gates.length > 0 ? gates.some((g) => g.command !== null) : facts.verifyCommand !== null;
+  const run = runnable
+    ? ' Before you finish, run each command listed exactly as written, as many consecutive times as it says, and fix what fails.'
+    : '';
+  return `\n\nWork against these.${run} Do not add steps to install or locate a tool listed as available.`;
 }
 
 /**
@@ -1083,6 +1132,13 @@ export function implementPrompt(
    * task, leave the rest.
    */
   nonBlocking: readonly Finding[] = [],
+  /**
+   * The verified environment and its gates (#483), rendered for the writer. A
+   * Claude implementer on `main` used to inherit the planner's copy and nothing
+   * else did; absent renders nothing, as everywhere else.
+   */
+  environment?: EnvironmentFacts | null | undefined,
+  roles: RoleTable = ROLES,
 ): string {
   const alsoRaised =
     nonBlocking.length === 0
@@ -1122,6 +1178,8 @@ You have write access. Work through the plan end to end:
 - Make the actual code changes.
 - Run the project's existing build, lint, and test commands as you go, and fix what you break.
 - If the plan turns out to be wrong about something in the codebase, do the right thing and note the deviation clearly in your final message rather than following the plan off a cliff.
+
+${environmentBlock(environment, 'implementer', roles)}${block(BLOCK.tests, EXISTING_TESTS)}
 
 Do not commit - the orchestrator handles git.
 
@@ -1670,6 +1728,9 @@ export function fixPrompt(
    * byte-identical to what it was, as is every rendering with this false.
    */
   dispositions = false,
+  /** The verified environment and its gates, for the writer (#483). Absent renders nothing. */
+  environment?: EnvironmentFacts | null | undefined,
+  roles: RoleTable = ROLES,
 ): string {
   return `A code reviewer found issues in your implementation. This is fix round ${round}.
 
@@ -1684,6 +1745,8 @@ ${block(BLOCK.simple, SIMPLE_SOLUTION)}
 ${plan == null ? '' : `## Approved plan of record\n\n${plan.plan_md}\n\n## Out of scope\n\n${formatOutOfScope(plan.out_of_scope)}\n`}
 
 Re-run the project's tests after fixing. If you believe a finding is incorrect, fix nothing for it but explain why in your final message - do not silently skip it.
+
+${environmentBlock(environment, 'implementer', roles)}${block(BLOCK.tests, EXISTING_TESTS)}
 
 Do not commit - the orchestrator handles git.
 ${implementerCriteria(acceptanceCriteria)}${reportRequest(acceptanceCriteria, 'fix')}${
@@ -2098,6 +2161,7 @@ const BLOCK = {
   simple: 'simple solution',
   stall: 'stall',
   planDispositions: 'plan dispositions',
+  tests: 'existing tests',
 } as const;
 
 let installed: Readonly<Record<string, string>> = {};
@@ -2235,6 +2299,8 @@ export function promptBlocks(): readonly PromptBlock[] {
     of(BLOCK.stall, ['planner'], STALL_STEP_BACK),
     // Only the revision answering a critique carries it (#453).
     of(BLOCK.planDispositions, ['planner'], PLAN_DISPOSITIONS),
+    // Every writer turn: implement, review fix, final fix and verify-fix (#483).
+    of(BLOCK.tests, ['implementer'], EXISTING_TESTS),
   ];
 }
 

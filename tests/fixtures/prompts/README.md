@@ -56,6 +56,14 @@ report bullet's "(fixed, rebutted, or deferred)" becomes "(the one you give it i
 below)", so the bullet and `## Dispositions` name one set of values. The verify-fix rendering keeps
 the three values. Each splice must find its anchor exactly once. Case 2 of AGENTS.md both times.
 
+## #483: `fix-round1.txt` spliced again
+
+Not regenerated. Every writer prompt now carries the `existing tests` block immediately before
+"Do not commit - the orchestrator handles git.", and `fix-dispositions.test.ts` splices it in at
+that anchor, which must appear exactly once. The fixture's arguments carry no environment, so the
+writer's environment block adds nothing to it; `writer-gates.test.ts` covers that. Case 2 of
+AGENTS.md: the fix prompts said nothing about editing a test to make a gate pass.
+
 ## Historical fixture contracts
 
 The sections below record the baselines and deliberate deltas before this regeneration.
