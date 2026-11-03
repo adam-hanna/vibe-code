@@ -1567,6 +1567,20 @@ export interface Answer {
   rationale: string;
 }
 
+/**
+ * One answer a model gave to the planner's question, kept as such (#487).
+ *
+ * Folded into a plan by a revision, an answer reads like any other decision; this
+ * is what still says a model made it, and in which question round.
+ */
+export interface ModelAnswer {
+  round: number;
+  question: string;
+  answer: string;
+  confidence: Confidence;
+  rationale: string;
+}
+
 export interface AnswersReport {
   answers: Answer[];
 }
@@ -2760,6 +2774,25 @@ export interface RunState {
    * the turn this exists to skip.
    */
   advisoryAnswers?: Answer[];
+  /**
+   * Every answer the answerer gave - not declined, not deferred to a person -
+   * with the question round it came in (#487). The record behind PLAN.md's
+   * "Decided without you" and DECISIONS.md.
+   *
+   * Three states, and the absent one is the reason for the rule below: absent
+   * is *not recorded for this run*, `[]` is recorded and nothing was answered,
+   * and a list is every model answer since round 1. It is created on the save
+   * before the run's first answerer turn and appended on every one after, so a
+   * state from before #487 resumed past round 1 never gains it - a list holding
+   * only the rounds since the upgrade would read as complete when it is not.
+   *
+   * "Gave" means not declined under the run's config and not `defer_to_human`.
+   * The second clause holds even with `questions.escalateOnDefer` off, where a
+   * `defer_to_human` answer is not refused and still reaches the revision: the
+   * answerer said a person should decide it, so it is not recorded as a model
+   * having decided it, and under that setting this list does not hold it.
+   */
+  modelAnswers?: ModelAnswer[];
   /**
    * Findings the run has paid for that no revision or fix round has yet
    * answered.

@@ -159,6 +159,14 @@
       }
     },
     {
+      "level": "detail",
+      "id": "artifact_written",
+      "message": "Wrote DECISIONS.md",
+      "data": {
+        "name": "DECISIONS.md"
+      }
+    },
+    {
       "level": "info",
       "id": null,
       "message": "Plan: .vibe/runs/<id>/PLAN.md",
@@ -402,7 +410,7 @@
     ]
   ],
   "artifacts": {
-    "PLAN.md": "# the plan\n\nDo the thing.\n\n## Out of scope\n\n(the planner considered this and declared nothing out of scope)\n\n## Acceptance criteria\n\n(the planner recorded no criteria - a claim that done-ness here is unobservable)\n",
+    "PLAN.md": "# the plan\n\nDo the thing.\n\n## Out of scope\n\n(the planner considered this and declared nothing out of scope)\n\n## Acceptance criteria\n\n(the planner recorded no criteria - a claim that done-ness here is unobservable)\n\n## Assumptions\n\n(the planner declared no material unresolved assumptions)\n\n## Decided without you\n\n(nothing - no question was answered by a model or left on the planner's default, and no plan critique finding was carried into implementation)\n",
     "code-review-0.json": "{\n  \"verdict\": \"APPROVE\",\n  \"summary\": \"summary\",\n  \"findings\": []\n}",
     "FOLLOW-UPS.md": "<absent>"
   },

@@ -12,6 +12,7 @@ import { EXIT, orchestrate } from '@src/orchestrator.js';
 import { artifact, listCheckpoints, listRuns, loadRun, mintRunId, saveState } from '@src/run.js';
 import { StoredStateError } from '@src/stored.js';
 import { renderPlanDoc } from '@src/prompts.js';
+import { planDecisions } from '@src/decisions.js';
 import {
   agents,
   committing,
@@ -447,9 +448,12 @@ test('the forked PLAN.md is the whole plan, not bare plan_md', async () => {
 
   const doc = readFileSync(path.join(child.dir, 'PLAN.md'), 'utf8');
   assert.ok(child.plan !== null);
-  assert.equal(doc, renderPlanDoc(child.plan));
+  // The whole plan includes the decisions it was approved with (#487), built
+  // from the child's own state.
+  assert.equal(doc, renderPlanDoc(child.plan, undefined, planDecisions(child, child.plan)));
   assert.ok(doc.includes('## Out of scope'));
   assert.ok(doc.includes('## Acceptance criteria'));
+  assert.ok(doc.includes('## Decided without you'));
 });
 
 test('a last report the parent no longer has is dropped, and the loss is stated', async () => {

@@ -204,6 +204,8 @@ A headless planner cannot ask you anything, so vibe makes its questions data: th
 2. **Blocking questions** go to the answerer (Codex, by default) first, which reads the code and answers what it can.
 3. **Anything the answerer will not guess**, such as product intent, priorities or taste, comes to you, and so does any answer it gives with low confidence. The run exits 2 with the questions in `NEEDS-INPUT.md`.
 
+What the run decided without you is listed at the end of `PLAN.md`, under `## Assumptions` and `## Decided without you` (the answerer's answers, the questions left on the planner's default, and any plan finding carried into implementation), and again in `DECISIONS.md` beside it.
+
 A round of answered questions does not use up one of the plan's critique rounds; `loop.maxQuestionRounds` bounds it separately. A question that only rephrases one already answered is not asked again, and `REPHRASED.md` records each such match so you can check it. The [`questions`](./configuration#questions) settings change who is asked.
 
 ## Context compaction

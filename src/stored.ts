@@ -40,6 +40,7 @@ import type {
   JudgeFile,
   JudgeSeatVerdict,
   JudgeSnapshot,
+  ModelAnswer,
   TestChanges,
   RiskFacts,
   UnaddressedFinding,
@@ -1452,6 +1453,46 @@ function readReviewCoverage(raw: unknown, ctx: ReadContext): ReviewCoverage | un
 }
 
 /**
+ * The model answers a run recorded (#487), entry by entry.
+ *
+ * The `readTestChanges` style, with one difference that matters: a value that
+ * is not a list drops the key to absent rather than repairing it to `[]`.
+ * Absent reads as "not recorded for this run"; an empty list would claim a
+ * complete record in which no model answered anything, which nobody wrote.
+ * A malformed entry is dropped and said, and the rest stand.
+ */
+function readModelAnswers(raw: unknown, ctx: ReadContext): ModelAnswer[] | undefined {
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw)) {
+    ctx.repairs.dropped('modelAnswers', 'modelAnswers');
+    return undefined;
+  }
+  const out: ModelAnswer[] = [];
+  for (const [i, entry] of (raw as unknown[]).entries()) {
+    const confidence = isRecord(entry) ? enumOf(entry['confidence'], CONFIDENCES) : null;
+    if (
+      !isRecord(entry) ||
+      confidence === null ||
+      !isPositiveInt(entry['round']) ||
+      !isString(entry['question']) ||
+      !isString(entry['answer']) ||
+      !isString(entry['rationale'])
+    ) {
+      ctx.repairs.dropped('modelAnswers', `modelAnswers[${i}]`);
+      continue;
+    }
+    out.push({
+      round: entry['round'],
+      question: entry['question'],
+      answer: entry['answer'],
+      confidence,
+      rationale: entry['rationale'],
+    });
+  }
+  return out;
+}
+
+/**
  * One verdict as stored: `unjudged`, or a justified flag with its reason, or
  * null for anything else, which each caller treats as damage in its own way.
  */
@@ -2492,6 +2533,7 @@ const READERS = {
     raw === undefined ? undefined : repairedArray('carried', raw, ctx, readFinding),
   advisoryAnswers: (raw, ctx) =>
     raw === undefined ? undefined : repairedArray('advisoryAnswers', raw, ctx, readAnswer),
+  modelAnswers: (raw, ctx) => readModelAnswers(raw, ctx),
   declined: (raw, ctx) =>
     raw === undefined ? undefined : repairedArray('declined', raw, ctx, readFinding),
   acceptanceCriteria: (raw, ctx) =>

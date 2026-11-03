@@ -200,6 +200,49 @@ stop, before `## Change a severity`. Each is `### A<n>. <question>` with a
 whether one already settles an assumption the run could not pair it with. Showing and filling
 decisions in the window or on the phone is a follow-up.
 
+**What the plan rests on travels with the plan (#487).** The planner's `assumptions[]` used to
+reach only the critique seats. PLAN.md left them out, and a model's answer that a revision folded
+in read like any other decision. A Claude implementer had the assumptions only by resuming the
+planner's conversation, and a rotated one or a Codex one never had them. The reasoning is He et
+al., CHI 2025 (248 users): a plausible long plan misled people, and their edits made plans that
+were already good worse. So the thing to put in front of a person is a short list of specific
+guesses to accept or reject, not the whole plan to edit.
+
+- **`state.modelAnswers` is the record.** Each answer the answerer gave (not declined, not
+  `defer_to_human`) is appended with its question round, on the same save as the marks and
+  `pendingAnswers`, keyed by the planner's wording where it pairs. It has three states: absent
+  is *not recorded for this run*, `[]` is recorded and empty, and a list is every model answer
+  since round 1. It is created on the save before the run's first answerer turn, not after it,
+  so a kill inside round 1 does not resume into round 2 without it. A state from before #487
+  resumed past round 1 never gains it, because a list holding only the rounds since the upgrade
+  would read as complete. With no question round run at all, "none" is a fact, and it says none.
+  `readModelAnswers` drops a malformed entry with a repair note, and drops a value that is not a
+  list to absent rather than to `[]`.
+- **`src/decisions.ts` renders it twice from one set of items.** PLAN.md gains `## Assumptions`
+  and `## Decided without you` (the model answers, the defaults, the carried P1s), through an
+  optional third parameter to `renderPlanDoc`. `DECISIONS.md` gets the same four lists, one
+  section each. A default a person settled is left out, by `reconcileAssumed`'s two rules, and so
+  is a model answer the person also answered: a `question-round` stop hands back every question,
+  and on resume the person's answer wins, so listing the model's would tell an implementer the
+  superseded one. `state.modelAnswers` itself keeps what the model said. Text
+  goes through `inert`, and vibe never reads `DECISIONS.md` back.
+- **Who passes the decisions to `renderPlanDoc`:** the PLAN.md write at approval, the fork's
+  PLAN.md (from the child's state), and `planOfRecord` for the implementer. **The answerer does
+  not.** It is deciding, and must not be shown what was "decided without you" while it does, so
+  its prompt is byte-identical.
+- **Why the decisions also ride in `freshConversationPrefix`.** Every writer turn sets
+  `planInPrompt`, because its prompt restates `plan_md`, so the prefix never calls
+  `planOfRecord` for one. Passing the decisions there alone reached no real implement turn. The
+  decisions are the part of the record no writer prompt restates, so a memoryless implementer
+  turn (after a rotation, and every Codex one, fixes included) gets them as
+  `## Decisions the approved plan carries`, appended after the handoff and kept out of
+  `handoffContext`, which would otherwise tell a never-rotated Codex writer it was rotated. The
+  frozen bar stays the direct prompt's. A Claude implementer resuming `main` gets no prefix.
+- **The implement prompt names the assumptions.** `implementPrompt` takes `assumptions` before
+  `roles`, where #483 put `environment`. It renders `## Assumptions the plan rests on` after the
+  frozen bar and before the report request, telling the writer to report a false one under
+  **Deviations** with evidence. An empty list renders nothing. `fixPrompt` is unchanged.
+
 **`vibe plan` is deliberately not a row.** #140 asked for `planOnly` to resolve to
 `gates['plan-approved'] = 'stop'`; it does not, because they are two different things rather
 than two mechanisms for one. `planOnly` says there is no next phase, so the run *completes* —

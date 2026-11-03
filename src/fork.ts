@@ -6,6 +6,7 @@ import type { TokenShareClamp } from '@src/consistency.js';
 import * as git from '@src/git.js';
 import { acquireLock, describeLiveness, livenessOf } from '@src/lock.js';
 import * as P from '@src/prompts.js';
+import { planDecisions, writeDecisions } from '@src/decisions.js';
 import {
   artifact,
   claimRunDir,
@@ -441,7 +442,8 @@ export async function planFork(
     );
   }
   losses.push(
-    'only PLAN.md and the last report are copied; every other artifact stays with the parent',
+    'only PLAN.md and the last report are copied; every other artifact stays with the parent, ' +
+      "and DECISIONS.md is written fresh from the fork's own state",
   );
 
   return {
@@ -651,7 +653,13 @@ export async function commitFork(targetDir: string, plan: ForkPlan): Promise<For
       // `renderPlanDoc`, never bare `plan_md`: this repo treats the plan
       // document as the plan plus its out-of-scope and acceptance sections, and
       // half of it on disk under a new run id is a plan nobody approved.
-      created.push(artifact(child, 'PLAN.md', P.renderPlanDoc(child.plan)));
+      //
+      // With its decisions, and DECISIONS.md beside it (#487), both from the
+      // child's state - the checkpoint's copy, which is what the fork carries on.
+      created.push(
+        artifact(child, 'PLAN.md', P.renderPlanDoc(child.plan, undefined, planDecisions(child, child.plan))),
+      );
+      created.push(writeDecisions(child, child.plan));
     }
 
     const report = child.lastReport;
