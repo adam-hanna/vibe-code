@@ -41,6 +41,7 @@ import type {
   JudgeSeatVerdict,
   JudgeSnapshot,
   TestChanges,
+  RiskFacts,
   UnaddressedFinding,
   RoundClaim,
   RoundRecord,
@@ -1463,6 +1464,60 @@ function readJudgeVerdict(raw: unknown): JudgeFile['verdict'] | null {
 }
 
 /**
+ * A `riskFacts` record (#492), or null when it is not one.
+ *
+ * Pure and exported, because two readers need the same answer: `loadRun`, which
+ * drops a damaged record with a repair note, and `vibe stats`, which reads the
+ * raw `state.json` and counts a damaged record as "not recorded". One predicate,
+ * so a record the resume refuses can never be counted by the scorecard.
+ *
+ * Whole or nothing, for `readTestChanges`'s reason: every figure is a count the
+ * writer took at one instant, and a record with one figure repaired would be a
+ * census nobody took. `modelAnswers` alone may be absent - that is how the writer
+ * says it could not be established - but present it must be a count too.
+ */
+export function readRiskFactsRecord(raw: unknown): RiskFacts | null {
+  if (!isRecord(raw)) return null;
+  const carriedP1s = raw['carriedP1s'];
+  const assumptions = raw['assumptions'];
+  const deferredQuestions = raw['deferredQuestions'];
+  const planStalls = raw['planStalls'];
+  const planRounds = raw['planRounds'];
+  const namedFiles = raw['namedFiles'];
+  const modelAnswers = raw['modelAnswers'];
+  if (
+    !isCounter(carriedP1s) ||
+    !isCounter(assumptions) ||
+    !isCounter(deferredQuestions) ||
+    !isCounter(planStalls) ||
+    !isCounter(planRounds) ||
+    !isCounter(namedFiles) ||
+    (modelAnswers !== undefined && !isCounter(modelAnswers))
+  ) {
+    return null;
+  }
+  return {
+    carriedP1s,
+    assumptions,
+    deferredQuestions,
+    ...(modelAnswers === undefined ? {} : { modelAnswers }),
+    planStalls,
+    planRounds,
+    namedFiles,
+  };
+}
+
+function readRiskFacts(raw: unknown, ctx: ReadContext): RiskFacts | undefined {
+  if (raw === undefined) return undefined;
+  const facts = readRiskFactsRecord(raw);
+  if (facts === null) {
+    ctx.repairs.dropped('riskFacts', 'riskFacts');
+    return undefined;
+  }
+  return facts;
+}
+
+/**
  * Every seat's verdict on one judge file (#404), entry by entry.
  *
  * Repaired rather than dropped whole, unlike the `readTestChanges` record it
@@ -2282,6 +2337,9 @@ const READERS = {
   planStalls: (raw, ctx) =>
     raw === undefined ? undefined : repairedArray('planStalls', raw, ctx, readPlanStall),
   planRevisedByAnswer: (raw, ctx) => optionalBool('planRevisedByAnswer', raw, ctx),
+  // Absent stays absent: a run from before #492, a plan-only run, or one that
+  // has not approved a plan. A damaged record is dropped whole, never zeroed.
+  riskFacts: (raw, ctx) => readRiskFacts(raw, ctx),
   verifyRounds: (raw, ctx) => repairedArray('verifyRounds', raw, ctx, roundReader(ctx)),
   answeredQuestions: (raw, ctx) => repairedArray('answeredQuestions', raw, ctx, readString),
   deferredQuestions: (raw, ctx) =>

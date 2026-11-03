@@ -340,6 +340,34 @@ export interface DeferredOutcome {
 }
 
 /**
+ * Which deferred questions a human answer disposed of, and which are still on
+ * the planner's fallback. Pure: it reads the state and writes nothing.
+ *
+ * Split out of `reconcileAssumed` so the risk facts recorded at plan approval
+ * (#492) count "questions left on the planner's default" by the rule that
+ * decides what `ASSUMED.md` says, rather than by a second rule that could drift.
+ */
+export function classifyDeferred(state: RunState): {
+  remaining: DeferredQuestion[];
+  resolved: ResolvedQuestion[];
+} {
+  const remaining: DeferredQuestion[] = [];
+  const resolved: ResolvedQuestion[] = [];
+  const answered = state.humanAnswered ?? [];
+  for (const q of state.deferredQuestions) {
+    // Exact: unambiguous, and silent - the same rule the guard uses.
+    if (answered.some((a) => isSameQuestion(a, q.question))) continue;
+    const near = findRephrase(q.question, answered);
+    if (near === null) {
+      remaining.push(q);
+      continue;
+    }
+    resolved.push({ question: q.question, answered: near.candidate, score: near.score });
+  }
+  return { remaining, resolved };
+}
+
+/**
  * Reconcile the deferred questions against what a human actually answered, and
  * bring `ASSUMED.md` into line with the answer.
  *
@@ -370,17 +398,9 @@ export function reconcileAssumed(
   const outcome: DeferredOutcome = { remaining: [], resolved: [], announced: [], file: null };
   if (state.deferredQuestions.length === 0) return outcome;
 
-  const answered = state.humanAnswered ?? [];
-  for (const q of state.deferredQuestions) {
-    // Exact: unambiguous, and silent - the same rule the guard uses.
-    if (answered.some((a) => isSameQuestion(a, q.question))) continue;
-    const near = findRephrase(q.question, answered);
-    if (near === null) {
-      outcome.remaining.push(q);
-      continue;
-    }
-    outcome.resolved.push({ question: q.question, answered: near.candidate, score: near.score });
-  }
+  const split = classifyDeferred(state);
+  outcome.remaining.push(...split.remaining);
+  outcome.resolved.push(...split.resolved);
 
   // By question identity, not by raw text, for the reason `recordSuppressed`
   // dedupes that way: the same disposal reached through a differently

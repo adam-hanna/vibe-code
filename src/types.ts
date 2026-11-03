@@ -284,6 +284,45 @@ export interface PlanStallEntry {
   sent?: boolean;
 }
 
+/**
+ * The run's risk facts at plan approval (#492), in `RunState.riskFacts`.
+ *
+ * Every field is a **count of something already in the run's record**, taken at
+ * the instant the plan was approved. None is a score and none is compared with
+ * anything: there is no threshold, and nothing in the loop reads these. They
+ * exist because from the CLI a `step` gate never holds, so a run on the default
+ * gates passes `plan-approved` with nobody seeing what it decided on its own -
+ * and whether an `auto-unless` mode (hold only when a named fact is non-zero) is
+ * worth building is a question only a census of these can answer.
+ */
+export interface RiskFacts {
+  /** P1s the plan critique raised that `loop.p1Tolerance` carried into implementation (`state.carried`). */
+  carriedP1s: number;
+  /** The approved plan's declared `assumptions`. */
+  assumptions: number;
+  /**
+   * Questions the run is carrying on the planner's fallback: `deferredQuestions`
+   * a person has not answered, by the rule `ASSUMED.md` is reconciled with.
+   */
+  deferredQuestions: number;
+  /**
+   * Answers the answerer gave that the run used, counted from every
+   * `answers-<n>.json` the question rounds wrote, less the ones the
+   * `questions.escalateOn*` settings declined.
+   *
+   * **Absent when that could not be established**: a question round whose file
+   * is missing, unreadable, a link or malformed (a killed turn, a fork whose
+   * parent holds the files, an answerer switched off). Never a zero.
+   */
+  modelAnswers?: number;
+  /** Stalls the plan loop recorded (`planStalls`, #394). */
+  planStalls: number;
+  /** Plan rounds spent (`planRound`) - critiques that sent the plan back. */
+  planRounds: number;
+  /** Distinct files the approved plan names in code spans (`planNamedFiles`). */
+  namedFiles: number;
+}
+
 export interface BudgetConfig {
   /**
    * Ceiling on Claude's reported `total_cost_usd`.
@@ -2210,6 +2249,16 @@ export interface RunState {
    * findings revision that follows it.
    */
   planRevisedByAnswer?: boolean;
+  /**
+   * What the run had decided without a person when its plan was approved (#492).
+   *
+   * Written once, on the save that moves the phase to `implementing`, so the
+   * `plan-approved` checkpoint carries it and it outlives `planStalls`, which is
+   * reset when implementation starts. Absent on every run from before #492, on a
+   * plan-only run (which never reaches that boundary), and on a run that has not
+   * yet approved a plan - and absent is "not recorded", never a row of zeros.
+   */
+  riskFacts?: RiskFacts;
   /** The same, for verification-fix rounds, which converge independently. */
   verifyRounds: RoundRecord[];
   /** Verification-fix rounds spent so far. */

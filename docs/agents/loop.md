@@ -652,6 +652,28 @@ read of each readable `state.json`, on a command nobody runs in a loop. Skipped 
 listed **with their reason**; a scorecard that quietly ignored three runs is the overclaim it
 exists to prevent.
 
+**At plan approval the run counts what it decided without a person, and nothing reads it**
+(#492). From the CLI a `step` row never holds, so a run on the default gates passes
+`plan-approved` with nobody seeing what it settled on its own. `riskFactsAt`
+(`src/riskfacts.ts`) writes `state.riskFacts` on the save that moves the phase to
+`implementing`, so the `plan-approved` checkpoint carries it, and it outlives `planStalls`, which
+is reset when implementation starts. Each field is a count of something already in the record:
+the P1s `p1Tolerance` carried (`state.carried`), the approved plan's `assumptions`, the deferred
+questions still on the planner's fallback (`classifyDeferred`, the rule `ASSUMED.md` is
+reconciled by), the answers a model gave that the run used, the plan stalls, `planRound`, and
+`planNamedFiles`. **The model-answer count is read from `answers-<n>.json` for every question
+round**, less what `answerDeclined` (the rule `resolveQuestions` uses) refuses. `pendingAnswers`
+and `advisoryAnswers` are consumed and are subsets of those files anyway. One round with no
+readable file leaves that count **absent, never 0**: that is a killed turn, a disabled answerer or
+a fork whose parent holds the files. A run from before #492, a plan-only run and a damaged record
+(`readRiskFactsRecord` drops it whole) have no record, and `vibe stats` shows every fact for them
+as not recorded. The stats line per fact is the histogram and how the non-zero runs ended, and no
+rate. **No threshold, no gate change, no setting**: `src/gates.ts` and `gate-matrix.test.ts` are
+untouched, and the prompts are byte-identical. **The `auto-unless` mode is not built.** That mode
+would hold at `plan-approved` only when a named fact is non-zero, and act like `stop` from the
+CLI. Whether it is worth building is what this census is for. Making it the default would also
+have to argue against the rule above that no row defaults to `stop`.
+
 **The scratch a killed preservation leaves is swept by the run and *reported* by the archive,
 and those are one definition** (#130). `sweepGateArtifacts` runs at the top of every pass, so
 a run that resumes tidies itself; #111 wrote its own limit into its own comment, because a run
