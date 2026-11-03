@@ -54,10 +54,19 @@ and the root is removed when the run ends. Three rules travel with it, pinned by
   what is left is the deliberately large states in `fork-kill` and the chat-store cases.
 - **Ctrl-C, SIGTERM and a closed terminal still remove the root**; the script waits for the runner and then cleans up. **A SIGKILL or a crash is swept by the next run**: each root holds the pid that made it,
   and a root whose pid has gone is removed at the start of the next run.
-- **Anything that appears in the real temp directory fails the run, by name.** That is a test
-  writing to a hard-coded `/tmp` or spawning a child with a hand-built environment, and it would
-  otherwise bring the leak back silently. Put a new fixture under `os.tmpdir()` and it is
-  covered without any cleanup of its own; `VIBE_KEEP_TEST_TMP=1` keeps the root and prints it.
+- **Anything the suite can have put in the real temp directory fails the run, by name.** That
+  is a test writing to a hard-coded `/tmp` or spawning a child with a hand-built environment,
+  and it would otherwise bring the leak back silently. Put a new fixture under `os.tmpdir()` and
+  it is covered without any cleanup of its own; `VIBE_KEEP_TEST_TMP=1` keeps the root and prints it.
+  "Can have put" is read from the code (#510): `scripts/temp-names.mjs` collects every `vibe-`
+  string in `src/`, `tests/`, `scripts/` and `dist/` at the start of the run, and a new
+  `vibe-*` entry no code here names is **reported on stderr and does not fail the run**. Until
+  then any new `vibe-*` name failed it, and vibe runs in sibling worktrees writing their own
+  scratch to `/tmp` failed every green run beside them. It is a scan and not a list because a
+  hand-kept list is how the leak came back the first time. A name built from a bare `vibe-` and
+  a value cannot be resolved, so it puts the check back to counting everything, and
+  `temp-names.test.ts` fails on one. The desktop pilot's `vibe-pilot-` scratch is the one known
+  name set aside: the app makes it while it is open.
 
 **`npm test` runs the compiled output, not the sources.** `pretest` builds, so a stale `dist/`
 is never what you tested — but if you invoke `node --test` directly, build first or you are

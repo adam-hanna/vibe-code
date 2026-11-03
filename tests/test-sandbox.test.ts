@@ -139,6 +139,86 @@ test('anything a test puts in the machine temp directory fails the run by name',
   assert.equal(entries(p.machineTmp).filter((name) => name.startsWith('vibe-escaped-')).length, 1);
 });
 
+// Names that no code in this repo makes, built at runtime rather than written
+// as literals: `scripts/temp-names.mjs` reads every `vibe-` string in this file
+// too, and a literal would make the name one of ours (#510).
+const NS = 'vibe';
+const foreignName = (rest: string): string => `${NS}-${rest}`;
+
+// Writes whatever name it is told to, the way another process on the machine
+// would: the name is in the environment, not in this project's code.
+const FOREIGN_WRITER = `
+import { test } from 'node:test';
+import { writeFileSync } from 'node:fs';
+import path from 'node:path';
+test('something else on the machine writes', () => {
+  for (const name of process.env.FOREIGN_NAMES.split(',')) {
+    writeFileSync(path.join(process.env.ESCAPE_TO, name), 'scratch');
+  }
+});
+`;
+
+test('a name no code here creates is reported by name and does not fail the run', async (t) => {
+  // What vibe runs in sibling worktrees wrote on 2026-11-03, failing every
+  // green run of #507 and #508 (#510).
+  const p = project(t, { 'foreign.test.js': FOREIGN_WRITER });
+  const names = [foreignName('edit-x.py'), foreignName('484-test3.log')];
+  const { code, stderr } = await runScript(p, { ESCAPE_TO: p.machineTmp, FOREIGN_NAMES: names.join(',') });
+
+  assert.equal(code, 0, stderr);
+  assert.match(stderr, /2 entries appeared in .* during the run, but no code in this repo creates that name, so it is not counted as a leak/);
+  for (const name of names) assert.ok(stderr.includes(`  ${name}\n`), stderr);
+  assert.doesNotMatch(stderr, /outside the run's own directory/);
+  // Not ours, so not ours to remove either.
+  assert.deepEqual(entries(p.machineTmp), [...names].sort());
+});
+
+test('a known name still fails the run when a foreign one appears beside it', async (t) => {
+  const p = project(t, { 'escape.test.js': ESCAPER, 'foreign.test.js': FOREIGN_WRITER });
+  const foreign = foreignName('edit-x.py');
+  const { code, stderr } = await runScript(p, { ESCAPE_TO: p.machineTmp, FOREIGN_NAMES: foreign });
+
+  assert.notEqual(code, 0);
+  assert.match(stderr, /1 entry appeared in .* outside the run's own directory/);
+  assert.match(stderr, /^ {2}vibe-escaped-\w{6}$/m);
+  assert.match(stderr, /no code in this repo creates that name/);
+  assert.ok(stderr.includes(`  ${foreign}\n`), stderr);
+});
+
+test("the desktop pilot's scratch is reported and not counted, and only in mkdtemp's exact shape", async (t) => {
+  // `vibe-pilot-` is a name the code makes, so it would count; the app makes it
+  // while it is open, beside the suite. `vibe-pilot-prompt-` is a test fixture's
+  // prefix, and must not hide behind it.
+  const p = project(t, {
+    'foreign.test.js': FOREIGN_WRITER,
+    'names.test.js': `const prefixes = ['vibe-pilot-', 'vibe-pilot-prompt-'];`,
+  });
+  const app = 'vibe-pilot-' + 'Ab12Cd';
+  const fixture = 'vibe-pilot-prompt-' + 'Ab12Cd';
+  const { code, stderr } = await runScript(p, { ESCAPE_TO: p.machineTmp, FOREIGN_NAMES: `${app},${fixture}` });
+
+  assert.notEqual(code, 0);
+  assert.match(stderr, new RegExp(`  ${app} \\(the desktop app's pilot makes these while it is open\\)`));
+  assert.match(stderr, new RegExp(`outside the run's own directory[^]*  ${fixture}\\n`));
+});
+
+test('a name built from a bare prefix and a value makes every new entry count, and says where', async (t) => {
+  // Unresolvable by a scan, so the check is stricter, not looser: the rule
+  // before #510.
+  const p = project(t, {
+    'foreign.test.js': FOREIGN_WRITER,
+    // Spelled through NS so this file does not itself become such a name.
+    'dynamic.test.js': `const name = (id) => '${NS}-' + id;`,
+  });
+  const foreign = foreignName('edit-x.py');
+  const { code, stderr } = await runScript(p, { ESCAPE_TO: p.machineTmp, FOREIGN_NAMES: foreign });
+
+  assert.notEqual(code, 0);
+  assert.match(stderr, /built from a bare "vibe-" and a value, so every new entry counts/);
+  assert.match(stderr, /dist\/tests\/dynamic\.test\.js:1/);
+  assert.match(stderr, new RegExp(`outside the run's own directory[^]*  ${foreign}\\n`));
+});
+
 test('a run left behind by a killed suite is removed by the next one, and a live one is not', async (t) => {
   const p = project(t, { 'pass.test.js': `import { test } from 'node:test'; test('passes', () => {});` });
 

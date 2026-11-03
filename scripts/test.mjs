@@ -30,11 +30,15 @@
 //   but a SIGKILL, a crash of this process or a power cut runs no code here at
 //   all, so each root holds the pid that made it and a root whose pid is gone
 //   is removed at the start of the next run.
-// - **Anything that reaches the real temp directory fails the run, by name.** A
-//   fixture that hard-codes `/tmp`, or a child spawned with a hand-built
-//   environment, would otherwise bring the leak back silently. `vibe-pilot-` is
-//   excluded: it is the product's own scratch, and the app may be making one
-//   while this runs.
+// - **Anything the suite can have put in the real temp directory fails the
+//   run, by name.** A fixture that hard-codes `/tmp`, or a child spawned with a
+//   hand-built environment, would otherwise bring the leak back silently. What
+//   the suite can have made is a name its code produces, read from the code at
+//   the start of the run (`temp-names.mjs`, #510); a new `vibe-*` entry no code
+//   here names was made by something else on the machine - a vibe run in a
+//   sibling worktree, on 2026-11-03 - and is reported, by name, without
+//   failing the run. The desktop pilot's scratch is set aside the same way,
+//   because the app may be making one while this runs.
 //
 // `VIBE_KEEP_TEST_TMP=1` keeps the root and prints where it is, for reading
 // what a failing case left behind. A script rather than `VAR= node ...` in
@@ -44,10 +48,10 @@ import { spawn } from 'node:child_process';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { classify, scanTempNames } from './temp-names.mjs';
 
 const ROOT_PREFIX = 'vibe-test-run-';
 const PID_FILE = 'pid';
-const IGNORED = ['vibe-pilot-'];
 
 const realTmp = tmpdir();
 
@@ -130,6 +134,8 @@ mkdirSync(sandbox);
 mkdirSync(template);
 
 const before = vibeEntries();
+// Read before the run, so the names are those of the code that is about to run.
+const names = scanTempNames(process.cwd());
 
 const child = spawn(
   process.execPath,
@@ -163,11 +169,11 @@ const status = await new Promise((resolve) => {
   });
 });
 
-const escaped = [...vibeEntries()]
+const appeared = [...vibeEntries()]
   .filter((name) => !before.has(name))
   .filter((name) => !name.startsWith(ROOT_PREFIX))
-  .filter((name) => !IGNORED.some((prefix) => name.startsWith(prefix)))
   .sort();
+const { leaked: escaped, ignored, foreign, strict } = classify(appeared, names);
 
 if (process.env['VIBE_KEEP_TEST_TMP']) {
   process.stderr.write(`test: kept ${root}\n`);
@@ -179,9 +185,36 @@ if (process.env['VIBE_KEEP_TEST_TMP']) {
   }
 }
 
+const entries = (n) => `${n} entr${n === 1 ? 'y' : 'ies'}`;
+
+// Said every time, never dropped: a name that is foreign today because nothing
+// here makes it is one a reader may know better than the scan does (#510).
+if (foreign.length > 0) {
+  process.stderr.write(
+    `test: ${entries(foreign.length)} appeared in ${realTmp} during the run, but no code in this repo ` +
+      `creates that name, so it is not counted as a leak:\n` +
+      foreign.map((name) => `  ${name}\n`).join(''),
+  );
+}
+if (ignored.length > 0) {
+  process.stderr.write(
+    `test: ${entries(ignored.length)} appeared in ${realTmp} during the run and ${ignored.length === 1 ? 'is' : 'are'} not counted:\n` +
+      ignored.map(({ name, why }) => `  ${name} (${why})\n`).join(''),
+  );
+}
+if (strict && escaped.length > 0) {
+  process.stderr.write(
+    names.files === 0
+      ? `test: no code was found to read temp names from, so every new entry counts\n`
+      : `test: a temp name is built from a bare "vibe-" and a value, so every new entry counts. ` +
+          `Give it a fixed prefix:\n` +
+          names.unresolved.map((at) => `  ${at}\n`).join(''),
+  );
+}
+
 if (escaped.length > 0) {
   process.stderr.write(
-    `test: ${escaped.length} entr${escaped.length === 1 ? 'y' : 'ies'} appeared in ${realTmp} ` +
+    `test: ${entries(escaped.length)} appeared in ${realTmp} ` +
       `outside the run's own directory, so something is not using os.tmpdir() ` +
       `or is spawning a child without the suite's environment:\n` +
       escaped.map((name) => `  ${name}\n`).join(''),
