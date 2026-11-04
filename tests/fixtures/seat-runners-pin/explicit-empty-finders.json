@@ -448,7 +448,8 @@
       "convergenceWindow": 3,
       "stallAfter": 3,
       "fixNonBlocking": true,
-      "confirmFinalFix": true
+      "confirmFinalFix": true,
+      "findingsLedger": false
     },
     "budget": {
       "maxCostUsd": 25,

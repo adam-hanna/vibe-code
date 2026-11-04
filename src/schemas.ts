@@ -511,6 +511,44 @@ export const REVIEW_SCHEMA = {
 } as const satisfies object;
 
 /**
+ * The reviewer's schema with a declared `prior_id` on each finding, for review
+ * turns under `loop.findingsLedger` (#498). Passed per turn through
+ * `TurnRequest.jsonSchema`; with the setting off no turn is given it, so
+ * `REVIEW_SCHEMA` and `FINDINGS_SCHEMA` - the objects, their bytes and the
+ * `codex/*.schema.json` files written from them - are exactly what they were.
+ *
+ * **Directly after `id`, before `severity`**, under #416's rule: a nullable
+ * field must never be the last key after content, which is where the stalls
+ * sat, and a usually-null field mid-object was measured not to stall (see the
+ * note on the finding in `FINDINGS_SCHEMA`). Built from `REVIEW_SCHEMA` rather
+ * than restated, so the rest of the finding cannot drift from it.
+ */
+const PRIOR_ID = {
+  type: ['string', 'null'],
+  description:
+    'The `id` of the entry under "Findings from earlier rounds" in the prompt that this finding ' +
+    're-raises, or null for a new finding. Only an id listed there counts.',
+} as const;
+
+const REVIEW_FINDING = REVIEW_SCHEMA.properties.findings.items;
+const { id: REVIEW_FINDING_ID, ...REVIEW_FINDING_REST } = REVIEW_FINDING.properties;
+
+export const REVIEW_LEDGER_SCHEMA = {
+  ...REVIEW_SCHEMA,
+  properties: {
+    ...REVIEW_SCHEMA.properties,
+    findings: {
+      ...REVIEW_SCHEMA.properties.findings,
+      items: {
+        ...REVIEW_FINDING,
+        required: ['id', 'prior_id', ...REVIEW_FINDING.required.filter((k) => k !== 'id')],
+        properties: { id: REVIEW_FINDING_ID, prior_id: PRIOR_ID, ...REVIEW_FINDING_REST },
+      },
+    },
+  },
+} as const satisfies object;
+
+/**
  * One verifier's vote on one finding (#388 Part C).
  *
  * Beside `FINDINGS_SCHEMA`, and its evidence item is that schema's own object

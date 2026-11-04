@@ -5,6 +5,7 @@ import { describeOutcome } from '@src/reproducer.js';
 import { nearPairs } from '@src/finder-merge.js';
 import { decidedSections } from '@src/decisions.js';
 import type { PlanDecisions } from '@src/decisions.js';
+import type { LedgerRound } from '@src/findings-ledger.js';
 import { movedByVote } from '@src/stored.js';
 import { authorOf, readEvidence, reproductionAt, severityChangesOf } from '@src/validate.js';
 import type { RoleTable } from '@src/roles.js';
@@ -1760,9 +1761,20 @@ export function reviewPrompt(
    * it: replacing vibe's text and adding the repository's are separate.
    */
   reviewMd?: ReviewStandards | undefined,
+  /**
+   * The earlier rounds' findings, by id, under `loop.findingsLedger` (#498), or
+   * absent when the setting is off.
+   *
+   * Trailing and absent-renders-nothing for the reason `chunk` is: a run with
+   * the setting off gets the prompt it got before this existed, byte for byte,
+   * continuity note included. Present switches the continuity note to its
+   * ledger wording, which asks for `prior_id`; an empty list, round 1's,
+   * renders no section.
+   */
+  ledger?: readonly LedgerRound[] | undefined,
 ): string {
   return `You are reviewing a code change against the plan it was meant to implement.${
-    round > 1 ? continuityNote(round, hasMemory, 'change') : ''
+    round > 1 ? continuityNote(round, hasMemory, 'change', ledger !== undefined) : ''
   }
 
 Read the repository as needed - the diff is context, not the whole picture. Check the surrounding code the change interacts with, and run the tests if that is the fastest way to settle a question.
@@ -1804,7 +1816,7 @@ There is no per-criterion verdict to report and no field to set. Your findings a
 
 ${block(BLOCK.review, REVIEW_BREADTH)}
 ${block(BLOCK.simple, SIMPLE_SOLUTION)}
-${standardsSection(reviewMd, false)}${chunk === undefined ? '' : chunkNote(chunk)}${reportSection(report)}${judgeSection(judge)}
+${standardsSection(reviewMd, false)}${chunk === undefined ? '' : chunkNote(chunk)}${reportSection(report)}${judgeSection(judge)}${ledgerSection(ledger)}
 ## Files changed
 
 ${changedFiles.length > 0 ? changedFiles.map((f) => `- ${f}`).join('\n') : '(none detected)'}
@@ -1963,17 +1975,82 @@ Continue from here.
  * id - which looks like new information and hides a deadlock from the
  * oscillation guard.
  */
-function continuityNote(round: number, hasMemory: boolean, subject: 'plan' | 'change'): string {
+function continuityNote(
+  round: number,
+  hasMemory: boolean,
+  subject: 'plan' | 'change',
+  /**
+   * Whether the prompt carries the findings ledger (#498). Only a review under
+   * `loop.findingsLedger` passes true; the plan critique never does, and false
+   * returns exactly the text it always did.
+   */
+  ledger = false,
+): string {
   const what = subject === 'plan' ? 'plan' : 'change';
   if (hasMemory) {
     return `\n\nThis is review round ${round}, and it continues the same conversation in which you reviewed the earlier ${what} - you have your previous findings in context.
 
-Two things follow. If a finding of yours is **still unresolved**, re-raise it with the **exact same \`id\` you used before**; do not restate it under a new name. If it was addressed, drop it and do not re-litigate it. Judging whether your own earlier objections were actually met is the main job this round.`;
+Two things follow. If a finding of yours is **still unresolved**, re-raise it with the **exact same \`id\` you used before**; do not restate it under a new name. If it was addressed, drop it and do not re-litigate it. Judging whether your own earlier objections were actually met is the main job this round.${
+      ledger ? `\n\n${LEDGER_WITH_MEMORY}` : ''
+    }`;
+  }
+  // With the ledger, the earlier findings ARE in the prompt, by id, so saying
+  // they are not reproduced here would be false (#498).
+  if (ledger) {
+    return `\n\nThis is review round ${round}. The ${what} has already been revised in response to findings from earlier rounds. This turn starts a fresh conversation, so you do not remember them, but every finding they recorded is listed by id under **Findings from earlier rounds** below. ${PRIOR_ID_RULE} Raise every defect you can see, whether it is listed or not; do not stay silent about something because it might have been addressed.`;
   }
   // Neither judge prompt renders earlier findings. Under a fresh session,
   // asking for their ids or saying they were addressed assumes unavailable
   // history and can turn an unfixed defect into silence (#49's review failure).
   return `\n\nThis is review round ${round}. The ${what} has already been revised in response to findings from earlier rounds, but **you do not have those findings** - this turn starts a fresh conversation and they are not reproduced here. Review what you are given on its own terms and raise every defect you can see, including one that may already have been raised before; do not stay silent about something because it might have been addressed. Use whatever \`id\` you would naturally choose - repeats are reconciled by the tool.`;
+}
+
+/** How a finding declares what it re-raises, said the same way to every seat (#498). */
+const PRIOR_ID_RULE =
+  'A finding that re-raises one of them sets `prior_id` to that id; a new finding sets `prior_id` to null.';
+
+const LEDGER_WITH_MEMORY = `Every finding recorded in earlier rounds, including other seats', is also listed by id under **Findings from earlier rounds** below. ${PRIOR_ID_RULE}`;
+
+/**
+ * The earlier rounds' findings, by identity only (#498).
+ *
+ * Empty for no ledger and for round 1, whose ledger has no rounds. Each round
+ * that cannot be listed says why in its own words: a missing file, one that
+ * did not parse, a link never opened, and a round a fork left in its parent
+ * are four different facts, and "unreadable" and "linked" never share a
+ * message. Never the detail, the suggested fix or anything the fixer said.
+ */
+function ledgerSection(rounds: readonly LedgerRound[] | undefined): string {
+  if (rounds === undefined || rounds.length === 0) return '';
+  const lines = rounds.flatMap((r): string[] => {
+    const at = `- Round ${String(r.round)}`;
+    switch (r.kind) {
+      case 'missing':
+        return [`${at}: ${r.file} is missing or could not be read; its findings are not listed.`];
+      case 'unparseable':
+        return [`${at}: ${r.file} could not be parsed; its findings are not listed.`];
+      case 'linked':
+        return [`${at}: ${r.file} is a link, so it was not opened; its findings are not listed.`];
+      case 'in-parent':
+        return [`${at}: its findings are in the parent run \`${r.parent}\` and were not copied into this fork.`];
+      case 'findings': {
+        const out = r.entries.map(
+          (e) => `${at} - \`${e.id}\` - ${e.severity} - ${e.title} - ${e.site} - reproducer: ${e.reproducer}`,
+        );
+        if (r.unreadable > 0) {
+          out.push(`${at}: ${String(r.unreadable)} finding entries in ${r.file} could not be read.`);
+        }
+        return out.length > 0 ? out : [`${at}: no findings.`];
+      }
+    }
+  });
+  return `
+## Findings from earlier rounds
+
+What earlier review rounds of this run raised, oldest round first - not how each was answered. It carries no detail, no suggested fix and nothing the fixer said: whether each one is still present is yours to judge from the code.
+
+${lines.join('\n')}
+`;
 }
 
 /**

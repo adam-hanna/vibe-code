@@ -1026,6 +1026,35 @@ of them at once (#403; `1`, the default, is one after another) - see *Seats at o
   `latestReport`; only the carried reviewer also has its earlier findings and earlier reports in
   context, and no reviewer is shown the dispositions. Reopening it needs a way to count a fresh
   finder's re-raise, and then the bench in #435's comments is the place to run it.
+
+  **That instrument now exists, behind `loop.findingsLedger`, off by default** (#498, part 1).
+  The decision above stands until the bench reports with it on; part 2 of #498, a fresh first
+  seat seeded with the ledger, waits for those counts. What is true:
+  - `src/findings-ledger.ts` reads the ledger once per round in `runReview`, after the round's
+    own artifact is removed, and hands it to every part and every finder. Prompt round R reads
+    `code-review-0.json` to `code-review-(R-2).json` and labels each with its index + 1, the
+    number the heading and the prompt said. It is rebuilt from the run directory each round, so
+    a resume needs no state.
+  - Each entry is the round, id, severity, title, first `code` citation and reproducer verdict
+    at `review`. Never `detail`, `suggested_fix`, a disposition, or `fix-dispositions-*.json`.
+  - A round that cannot be listed gets its own line per cause: `readArtifact`'s `absent`
+    (missing), text that does not parse or has no `findings` list (unparseable), and `linked`,
+    never opened. A fork's absent round instead says it is in the parent run
+    `forkedFrom.runId`: `commitFork` copies no `code-review-*.json`, and the parent's directory
+    is never read.
+  - Turns get `REVIEW_LEDGER_SCHEMA` through `TurnRequest.jsonSchema` (finders through the part's
+    `jsonSchema`), with `prior_id` directly after `id`, under #416's rule. Off, no request
+    carries one, so the schema objects and the files are unchanged.
+  - `attachPriorIds` reads each finding's declared `prior_id` from the turn's structured output
+    by index, never through the shared `parseFinding`, and keeps only an id the rendered ledger
+    listed: anything else is `null`, and an unlisted string records `prior_id_unknown` with the
+    seat and the value. `foundBy[].priorId` is per seat; the merged `prior_id` is the first
+    non-null in finder order; disagreement is left as recorded.
+  - `stored.ts` repairs only those two keys, at every stored finding (the six `readFinding`
+    lists, `unaddressed[].finding`, `finalFixConfirmations.claims[]`): a value that is not a
+    string or null drops that key alone, never the `foundBy` entry or the finding.
+  - Nothing reads it to decide: the oscillation guard, claims, convergence, severities, the
+    vote, the fix prompt and the scorecard are as they were. The plan critique never gets it.
 - **A Claude reviewer has its own conversation, never the author's** (#490, decided
   2026-11-03). Until then `defaultSlot` seated every Claude role on `main`, so a Claude reviewer
   judged from the planner's investigation and the implementer's own reasoning and

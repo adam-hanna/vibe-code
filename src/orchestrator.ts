@@ -20,7 +20,8 @@ import {
   groundVoteEvidence,
   refusePlaceholderPlan,
 } from '@src/evidence.js';
-import { CONFIRM_SCHEMA, FIX_SCHEMA, PLAN_VOTE_SCHEMA, REVISE_SCHEMA, VOTE_SCHEMA } from '@src/schemas.js';
+import { CONFIRM_SCHEMA, FIX_SCHEMA, PLAN_VOTE_SCHEMA, REVIEW_LEDGER_SCHEMA, REVISE_SCHEMA, VOTE_SCHEMA } from '@src/schemas.js';
+import { attachPriorIds, readLedger } from '@src/findings-ledger.js';
 import { dispositionSummary, settleDispositions, settlePlanDispositions } from '@src/dispositions.js';
 import { countBallot, countConfirmation, describeVotes, failedBallot, failedConfirmation, tally } from '@src/vote.js';
 import { describeOutcome, observe } from '@src/reproducer.js';
@@ -6343,7 +6344,15 @@ interface FinderPhase<T = never> extends SeatPhase {
    * the critique. More than one is merged by `mergeReviewReports`, as a chunked
    * reviewer's are; one is taken as it came.
    */
-  parts: (f: FinderEntry) => readonly { label: string; prompt: string }[];
+  parts: (f: FinderEntry) => readonly {
+    label: string;
+    prompt: string;
+    /**
+     * The response schema for this part's turn, or absent for the role's own.
+     * Only the review sets one, and only under `loop.findingsLedger` (#498).
+     */
+    jsonSchema?: object | undefined;
+  }[];
   /** The event a failed finder records, and the noun its sentence opens with. */
   failed: { id: string; noun: string };
   merged: (m: { seats: number; reported: number; raised: number; merge: FinderMerge }) => SeatEvent;
@@ -6353,6 +6362,12 @@ interface FinderPhase<T = never> extends SeatPhase {
    * test verdicts through this and combines them itself; the critique sets none.
    */
   extra?: (structured: unknown) => T;
+  /**
+   * Each part's parsed report with its declared `prior_id`s checked, before the
+   * guards judge it (#498). Set only by the review under `loop.findingsLedger`;
+   * absent, a finder's report is taken exactly as before.
+   */
+  priorIds?: (report: FindingsReport, structured: unknown, seat: string) => FindingsReport;
 }
 
 /** A reporting finder's slot: its report, and the phase's `extra` for each part, in part order (#404). */
@@ -6465,7 +6480,14 @@ async function runFinderSeats<T = never>(
           runTurn(
             state,
             cfg,
-            { role: phase.role, prompt: part.prompt, cwd, label: part.label, seatPath: f.path },
+            {
+              role: phase.role,
+              prompt: part.prompt,
+              cwd,
+              label: part.label,
+              seatPath: f.path,
+              ...(part.jsonSchema === undefined ? {} : { jsonSchema: part.jsonSchema }),
+            },
             turns,
             table,
           ),
@@ -6475,13 +6497,14 @@ async function runFinderSeats<T = never>(
         // - is kept beside the report, per part, and combined by the phase
         // itself (#404). The first finder still owns `reviewCoverage`.
         const structured = readStructured(outcome);
+        const parsed = parseFindings(structured);
         reports.push(
           groundAndRecord(
             state,
             cwd,
             phase.role,
             table,
-            parseFindings(structured),
+            phase.priorIds === undefined ? parsed : phase.priorIds(parsed, structured, f.path),
             outcome.activity,
           ),
         );
@@ -6900,6 +6923,30 @@ async function runReview(
   // wider. The file is rewritten by the same code path on success (#49).
   removeArtifact(state, `code-review-${state.reviewRound}.json`);
 
+  // The earlier rounds' findings, by id, under `loop.findingsLedger` (#498).
+  // Read once, after this round's own artifact is gone, and handed to every
+  // part and every finder alike. Rebuilt from the run directory each round, so
+  // a resumed round renders what an uninterrupted one would have.
+  const ledger = cfg.loop.findingsLedger ? readLedger(state) : undefined;
+  // A turn's declared `prior_id`s, checked against the ledger it was shown. An
+  // id the ledger did not list is recorded as null and said, naming the seat:
+  // a guess never counts as a re-raise. Recorded, not narration only, because
+  // this is the record a count of re-raises would be checked against.
+  const checkPriorIds = (parsed: FindingsReport, structured: unknown, seat: string): FindingsReport => {
+    if (ledger === undefined) return parsed;
+    const checked = attachPriorIds(parsed, structured, ledger.ids);
+    for (const u of checked.unknown) {
+      recordAndSay(
+        state,
+        'info',
+        'prior_id_unknown',
+        `${seat} said ${u.finding} re-raises "${u.value}", which the findings ledger does not list - recorded as a new finding`,
+        { round: state.reviewRound, seat, finding: u.finding, value: u.value },
+      );
+    }
+    return checked.report;
+  };
+
   // Cleared, not written: a coverage record published before the first turn
   // would claim the reviewer saw every file the instant before that turn failed,
   // which is the shape of overclaim this field exists to prevent.
@@ -7012,6 +7059,9 @@ async function runReview(
       // Absent when the repository has none, or it was refused or unreadable,
       // which keeps that prompt byte-identical too (#389).
       reviewMd,
+      // Absent with `loop.findingsLedger` off, which keeps every prompt
+      // byte-identical (#498).
+      ledger?.rounds,
     );
   };
   for (const [i, chunk] of chunks.entries()) {
@@ -7036,6 +7086,9 @@ async function runReview(
         // and the retry label, and a round that did not need splitting must look
         // exactly as it always did.
         label: chunked ? `review-${state.reviewRound}-part${i + 1}` : `review-${state.reviewRound}`,
+        // Only under `loop.findingsLedger`, so a default turn sends the role's
+        // own schema, the same object as before (#498).
+        ...(ledger === undefined ? {} : { jsonSchema: REVIEW_LEDGER_SCHEMA }),
       },
       turns,
       roles,
@@ -7050,7 +7103,7 @@ async function runReview(
         cwd,
         'reviewer',
         roles,
-        parseFindings(structured),
+        checkPriorIds(parseFindings(structured), structured, 'roles.reviewer'),
         outcome.activity,
       ),
     );
@@ -7141,7 +7194,9 @@ async function runReview(
               [...chunks.keys()].map((i) => ({
                 label: chunked ? `review-${round}-f${f.k}-part${i + 1}` : `review-${round}-f${f.k}`,
                 prompt: P.withFocus(reviewPromptFor(i, false, false, f.report !== false), f.focus),
+                ...(ledger === undefined ? {} : { jsonSchema: REVIEW_LEDGER_SCHEMA }),
               })),
+            ...(ledger === undefined ? {} : { priorIds: checkPriorIds }),
             failed: { id: 'review_finder_failed', noun: 'Review' },
             // Each part's test verdicts, combined below with the reviewer's (#404).
             extra: parseTestVerdicts,

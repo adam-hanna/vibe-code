@@ -890,13 +890,58 @@ export function isUnaddressed(entry: unknown): entry is UnaddressedFinding {
   );
 }
 
-function readUnaddressed(entry: unknown): UnaddressedFinding | null {
-  return isUnaddressed(entry) ? entry : null;
+/**
+ * A stored finding's declared identity (#498), repaired in place: the
+ * top-level `prior_id` and each `foundBy[].priorId`, and nothing else.
+ *
+ * A value that is neither a string nor null drops **that key alone**, with a
+ * repair naming its path. `foundBy` otherwise still rides through unvalidated,
+ * for the rule on `Finding.foundBy`: a malformed caption must not delete a
+ * claim, so neither an entry nor the finding is ever dropped here. A finding
+ * with nothing to repair is returned as the same object.
+ */
+function repairIdentity(ctx: ReadContext, f: Finding, at: string): Finding {
+  const raw = f as unknown as Record<string, unknown>;
+  const usable = (v: unknown): boolean => v === null || isString(v);
+  let out: Record<string, unknown> = raw;
+  if ('prior_id' in raw && !usable(raw['prior_id'])) {
+    ctx.repairs.replaced(`${at}.prior_id`, raw['prior_id'], 'nothing');
+    const { prior_id: _dropped, ...rest } = raw;
+    out = rest;
+  }
+  const foundBy = raw['foundBy'];
+  if (Array.isArray(foundBy)) {
+    let changed = false;
+    const entries = (foundBy as unknown[]).map((entry, j) => {
+      if (!isRecord(entry) || !('priorId' in entry) || usable(entry['priorId'])) return entry;
+      ctx.repairs.replaced(`${at}.foundBy[${j}].priorId`, entry['priorId'], 'nothing');
+      changed = true;
+      const { priorId: _dropped, ...rest } = entry;
+      return rest;
+    });
+    if (changed) out = { ...out, foundBy: entries };
+  }
+  return out === raw ? f : (out as unknown as Finding);
 }
 
-function readFinding(entry: unknown): Finding | null {
-  return hasFindingShape(entry) ? entry : null;
-}
+/** One `unaddressed` entry, its finding's identity repaired (#498). */
+const unaddressedReader =
+  (ctx: ReadContext) =>
+  (entry: unknown, at: string): UnaddressedFinding | null => {
+    if (!isUnaddressed(entry)) return null;
+    const finding = repairIdentity(ctx, entry.finding, `${at}.finding`);
+    return finding === entry.finding ? entry : { ...entry, finding };
+  };
+
+/**
+ * A stored finding, by the one shape predicate, with its declared identity
+ * repaired (#498). The repair channel comes from the caller, as every other
+ * in-place repair's does.
+ */
+const findingReader =
+  (ctx: ReadContext) =>
+  (entry: unknown, at: string): Finding | null =>
+    hasFindingShape(entry) ? repairIdentity(ctx, entry, at) : null;
 
 function readString(entry: unknown): string | null {
   return isString(entry) ? entry : null;
@@ -1220,7 +1265,7 @@ function readPendingFindings(
   }
   return {
     phase,
-    findings: repairedArray('pendingFindings.findings', raw['findings'], ctx, readFinding),
+    findings: repairedArray('pendingFindings.findings', raw['findings'], ctx, findingReader(ctx)),
   };
 }
 
@@ -1824,7 +1869,7 @@ function readFinalFixConfirmations(raw: unknown, ctx: ReadContext): FinalFixConf
   }
   const claims: Finding[] = [];
   for (const [i, entry] of (raw['claims'] as unknown[]).entries()) {
-    if (hasFindingShape(entry)) claims.push(entry);
+    if (hasFindingShape(entry)) claims.push(repairIdentity(ctx, entry, `${field}.claims[${i}]`));
     else ctx.repairs.dropped(field, `${field}.claims[${i}]`);
   }
   const findings: FinalFixConfirmation[] = [];
@@ -2929,28 +2974,28 @@ const READERS = {
   resolvedByHuman: (raw, ctx) =>
     raw === undefined ? undefined : repairedArray('resolvedByHuman', raw, ctx, readResolvedQuestion),
   carried: (raw, ctx) =>
-    raw === undefined ? undefined : repairedArray('carried', raw, ctx, readFinding),
+    raw === undefined ? undefined : repairedArray('carried', raw, ctx, findingReader(ctx)),
   advisoryAnswers: (raw, ctx) =>
     raw === undefined ? undefined : repairedArray('advisoryAnswers', raw, ctx, readAnswer),
   modelAnswers: (raw, ctx) => readModelAnswers(raw, ctx),
   declined: (raw, ctx) =>
-    raw === undefined ? undefined : repairedArray('declined', raw, ctx, readFinding),
+    raw === undefined ? undefined : repairedArray('declined', raw, ctx, findingReader(ctx)),
   acceptanceCriteria: (raw, ctx) =>
     raw === undefined
       ? undefined
       : repairedArray('acceptanceCriteria', raw, ctx, readAcceptanceCriterion),
   outstanding: (raw, ctx) =>
-    raw === undefined ? undefined : repairedArray('outstanding', raw, ctx, readFinding),
+    raw === undefined ? undefined : repairedArray('outstanding', raw, ctx, findingReader(ctx)),
   // The three #425 fields. Absent stays absent, with no repair recorded: every
   // run from before #425, and every run with `loop.fixNonBlocking` off, has none.
   planNonBlocking: (raw, ctx) =>
-    raw === undefined ? undefined : repairedArray('planNonBlocking', raw, ctx, readFinding),
+    raw === undefined ? undefined : repairedArray('planNonBlocking', raw, ctx, findingReader(ctx)),
   finalFixNonBlocking: (raw, ctx) =>
     raw === undefined ? undefined : repairedArray('finalFixNonBlocking', raw, ctx, readString),
   unaddressed: (raw, ctx) =>
-    raw === undefined ? undefined : repairedArray('unaddressed', raw, ctx, readUnaddressed),
+    raw === undefined ? undefined : repairedArray('unaddressed', raw, ctx, unaddressedReader(ctx)),
   deferred: (raw, ctx) =>
-    raw === undefined ? undefined : repairedArray('deferred', raw, ctx, readFinding),
+    raw === undefined ? undefined : repairedArray('deferred', raw, ctx, findingReader(ctx)),
   config: unvalidated<'config'>('config'),
 } satisfies { [K in StoredKey]-?: Reader<K> };
 
