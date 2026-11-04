@@ -28,6 +28,8 @@ export interface Seat {
   timeoutMs?: number;
   mcpServers?: string[];
   focus?: string;
+  /** A review finder's (#497). The form has no control for it; a save keeps what the file says. */
+  report?: boolean;
 }
 
 export type SeatKind = 'finders' | 'verifiers';
@@ -53,7 +55,7 @@ export interface SeatRow {
   focus: string;
   /**
    * The saved seat this row came from, kept so a save does not drop what the
-   * form does not edit (`mcpServers`) or round a timeout it did not touch.
+   * form does not edit (`mcpServers`, `report`) or round a timeout it did not touch.
    */
   saved: Seat | null;
 }
@@ -80,6 +82,7 @@ export function readSeats(value: unknown): Seat[] {
     if (typeof e['effort'] === 'string') seat.effort = e['effort'];
     if (typeof e['timeoutMs'] === 'number') seat.timeoutMs = e['timeoutMs'];
     if (typeof e['focus'] === 'string') seat.focus = e['focus'];
+    if (typeof e['report'] === 'boolean') seat.report = e['report'];
     if (Array.isArray(e['mcpServers'])) {
       seat.mcpServers = e['mcpServers'].filter((m): m is string => typeof m === 'string');
     }
@@ -137,6 +140,9 @@ export function toSeat(row: SeatRow, kind: SeatKind): Record<string, unknown> {
     seat['timeoutMs'] = Number.isFinite(n) ? n * MINUTE : minutes;
   }
   if (row.saved?.mcpServers !== undefined) seat['mcpServers'] = row.saved.mcpServers;
+  // As `mcpServers` is, and for any kind: a key in the wrong place reaches the
+  // core and is refused in its words, rather than vanishing on a save (#497).
+  if (row.saved?.report !== undefined) seat['report'] = row.saved.report;
   if (kind === 'finders' && row.focus.trim() !== '') seat['focus'] = row.focus.trim();
   return seat;
 }

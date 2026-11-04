@@ -924,6 +924,22 @@ seat with no code of their own. `roles.reviewer` is the first finder, byte for b
 new narration. Finders run after the first has reviewed every part, up to `review.maxParallel`
 of them at once (#403; `1`, the default, is one after another) - see *Seats at once* below.
 
+- **A finder differs from the reviewer only in memory, with one opt-in exception** (#497).
+  `review.finders[k].report: false` seats that finder without the implementer's report.
+  `reviewPromptFor` passes `undefined` as `reviewPrompt`'s `report` for every part of that seat,
+  so `reportSection` renders nothing. It does not render the "No report was recorded" notice,
+  because that notice says the run lost something, and here nothing was lost. Everything else
+  in the prompt is the seat's own. That includes `REVIEW_BREADTH`'s "beyond the implementer's
+  report" sentence, which is left alone on purpose: rewording it would change every default
+  prompt, or vary a second factor in the measurement. The key exists so the bench can measure
+  whether a seat should see the report. The issue's evidence pulls both ways, and the answer
+  is a default change that waits for those counts. The default finder carries no `report` key,
+  so it stays as #447 measured it. Only `review.finders` takes the key: `roles.reviewer` always
+  gets the report, verifiers were already blind, and `validateSeats` refuses it in
+  `critique.finders` in a sentence of its own, because a plan critique has no implementer
+  report. It is recorded in the stored config as written and nowhere new. `foundBy[].seat`
+  already names the seat.
+
 - **The dispatch guard.** `claudeDispatch` asks `slotHoldsRunContext(slot)` (`src/slots.ts`)
   before `shouldRotate` and before `recordTurnContext`. Both are about `main`: asked with a
   finder's model, which `main` was never measured under, `shouldRotate` reads "unmeasured, so

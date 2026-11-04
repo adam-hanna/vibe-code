@@ -94,7 +94,7 @@ test('a bad seat is refused by its index, in the words a role gets', () => {
   );
   refused(
     { finders: ['codex', { provider: 'codex', x: 1 }] },
-    'review.finders[1] has unknown key "x"; a finder takes provider, model, effort, timeoutMs, mcpServers and focus',
+    'review.finders[1] has unknown key "x"; a finder takes provider, model, effort, timeoutMs, mcpServers, focus and report',
   );
   refused(
     { verifiers: [{ effort: 'low' }] },

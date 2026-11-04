@@ -65,6 +65,27 @@ describe('a row as the file holds it', () => {
     });
   });
 
+  test('a hand-written report: false survives a save, and a seat without one gains none (#497)', () => {
+    const [blind, plain] = readSeats([
+      { provider: 'codex', focus: 'x', report: false },
+      { provider: 'codex', focus: 'x' },
+    ]);
+    expect(blind).toEqual({ provider: 'codex', focus: 'x', report: false });
+    expect(toSeat(toRow(blind!), 'finders')).toEqual({ provider: 'codex', focus: 'x', report: false });
+    expect(toSeat(typed(toRow(blind!), { effort: 'high' }), 'finders')).toEqual({
+      provider: 'codex',
+      effort: 'high',
+      focus: 'x',
+      report: false,
+    });
+    expect(toSeat(toRow(plain!), 'finders')).toEqual({ provider: 'codex', focus: 'x' });
+    expect(toSeat(blankRow(), 'finders')).not.toHaveProperty('report');
+  });
+
+  test('a report that is not a boolean is not read', () => {
+    expect(readSeats([{ provider: 'codex', report: 'no' }])).toEqual([{ provider: 'codex' }]);
+  });
+
   test('junk in the minutes is sent as typed, for the core to refuse in its own words', () => {
     expect(toSeat(typed(blankRow(), { provider: 'codex', minutes: 'soon' }), 'finders')).toEqual({
       provider: 'codex',

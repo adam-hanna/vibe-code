@@ -294,6 +294,15 @@ const ROLE_OBJECT_KEYS: readonly string[] = ['provider', 'model', 'effort', 'tim
 export const FINDER_KEYS: readonly string[] = [...ROLE_OBJECT_KEYS, 'focus'];
 
 /**
+ * The keys a `review.finders[i]` entry may carry: a finder's, plus `report`
+ * (#497), which seats that finder without the implementer's report. A
+ * `critique.finders[i]` entry keeps `FINDER_KEYS`, because a plan critique has
+ * no implementer report to withhold - `validateSeats` refuses the key there in
+ * a sentence of its own.
+ */
+export const REVIEW_FINDER_KEYS: readonly string[] = [...FINDER_KEYS, 'report'];
+
+/**
  * The conversation an additional review seat talks through (#388): a fresh,
  * read-only one per turn, on either provider.
  *
@@ -655,14 +664,21 @@ export interface FinderEntry {
   path: string;
   setting: RoleSetting;
   focus?: string;
+  /**
+   * Present only for a seat blinded by `review.finders[k].report: false`
+   * (#497): it reviews without the implementer's report. Absent and `true`
+   * both mean the seat is handed the report, so neither carries the key.
+   */
+  report?: false;
 }
 
 /**
  * The additional finders this config names, in order (#388 Part B).
  *
  * Read through `roleSetting`, the reader config validation used, so a bare
- * provider name and a seat object come back in one shape. `focus` was checked
- * by `validateSeats`; this only carries it. Absent section - a `state.config`
+ * provider name and a seat object come back in one shape. `focus`, and a review
+ * finder's `report`, were checked by `validateSeats`; this only carries them.
+ * Absent section - a `state.config`
  * stored before it existed - is no finders, which is what that run was.
  * `section` is `critique` for the plan critique's finders (#405).
  */
@@ -671,14 +687,23 @@ export function readFinders(cfg: Config, section: SeatSection = 'review'): Finde
   if (!Array.isArray(finders)) return [];
   return finders.map((entry: unknown, i) => {
     const path = `${section}.finders[${i}]`;
-    const setting = roleSetting(path, entry, { keys: FINDER_KEYS });
+    const setting = roleSetting(path, entry, {
+      keys: section === 'review' ? REVIEW_FINDER_KEYS : FINDER_KEYS,
+    });
     const focus = isRecord(entry) && typeof entry['focus'] === 'string' ? entry['focus'] : undefined;
-    return { k: i + 1, path, setting, ...(focus === undefined ? {} : { focus }) };
+    const blind = section === 'review' && isRecord(entry) && entry['report'] === false;
+    return {
+      k: i + 1,
+      path,
+      setting,
+      ...(focus === undefined ? {} : { focus }),
+      ...(blind ? { report: false as const } : {}),
+    };
   });
 }
 
 /** One `review.verifiers[i]` entry, read. `k` is 1-based: `v1` is `review.verifiers[0]`. */
-export type VerifierEntry = Omit<FinderEntry, 'focus'>;
+export type VerifierEntry = Omit<FinderEntry, 'focus' | 'report'>;
 
 /**
  * The review verifiers this config names, in order (#388 Part C).

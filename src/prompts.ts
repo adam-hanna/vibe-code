@@ -1293,9 +1293,13 @@ The change was too large to show in one turn, so it is being reviewed a few file
 /**
  * The most recent write turn's report, and how to read it.
  *
- * Three states, deliberately. `undefined` is a caller that makes no statement -
- * only the fixture callers do - and renders NOTHING, which is what keeps
- * `review-round1.txt` and `review-round3-memory.txt` byte-identical. `null`, or
+ * Three states, deliberately. `undefined` renders NOTHING, and it has two
+ * legitimate callers. One is the fixture callers, which make no statement about
+ * a report, and that is what keeps `review-round1.txt` and
+ * `review-round3-memory.txt` byte-identical. The other is a review seat blinded
+ * by `review.finders[k].report: false` (#497). That seat gets no section rather
+ * than the notice below, because the notice says the run's record has a gap,
+ * and withholding the report on purpose leaves none. `null`, or
  * text that is blank, is a run that recorded no readable report and renders the
  * notice: silence here would read as a clean bill of health, which is precisely
  * the failure #50 is about. A non-empty string is the report itself.
@@ -1716,8 +1720,12 @@ export function reviewPrompt(
    *
    * Trailing and three-state for the reason `chunk` is trailing: omitting it
    * renders nothing, which is what keeps the two frozen golden prompts
-   * byte-identical. `runReview` always passes it, so a real review round always
-   * carries a report section - present, or the notice saying there is none.
+   * byte-identical. `runReview` passes it for the reviewer and for every
+   * finder, so their prompts always carry a report section - present, or the
+   * notice saying there is none. The one exception is a finder blinded by
+   * `review.finders[k].report: false` (#497). `runReview` passes `undefined`
+   * for that seat, which the fixture callers also do, so its prompt has no
+   * section at all.
    */
   report?: string | null | undefined,
   /**
