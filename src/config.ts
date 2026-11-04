@@ -149,6 +149,13 @@ export const DEFAULTS: Config = {
     // pass, and the verdict is recorded and rendered. It buys nothing: no
     // round, no severity, no exit code.
     confirmFinalFix: true,
+    // Off (#498, groundwork). #435 kept the reviewer's memory on a bench that
+    // could not count a fresh finder's re-raises: matching by citation within
+    // ten lines merged neighbouring bugs. With this on, later review rounds see
+    // the earlier findings by id and declare which one each finding re-raises,
+    // so the bench can count re-raises by declared identity. Off leaves every
+    // prompt, schema and artifact byte-identical; nothing reads it to decide.
+    findingsLedger: false,
   },
   budget: {
     // NOT a spend limit on a Claude subscription - the CLI derives this from
@@ -922,6 +929,9 @@ function validate(cfg: Config): void {
   }
   if (typeof cfg.loop.confirmFinalFix !== 'boolean') {
     throw new Error('loop.confirmFinalFix must be true or false');
+  }
+  if (typeof cfg.loop.findingsLedger !== 'boolean') {
+    throw new Error('loop.findingsLedger must be true or false');
   }
   for (const key of [
     'maxPlanRounds',

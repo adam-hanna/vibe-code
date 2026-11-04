@@ -271,6 +271,18 @@ export interface LoopConfig {
    * sentence as it was before #489.
    */
   confirmFinalFix: boolean;
+  /**
+   * Whether later review rounds are shown the findings ledger and asked for a
+   * declared `prior_id` (#498, groundwork). Off by default. Code review only:
+   * the reviewer, every part of a chunked round and every finder alike; the
+   * plan critique never gets it. From round 2 on, each review prompt lists the
+   * earlier rounds' findings by id, and each finding says which of them it
+   * re-raises, checked against that list. It exists to count #435's re-raises
+   * by declared identity rather than by citation, and nothing reads it to
+   * decide anything. `false` leaves every prompt, schema and artifact exactly
+   * as it was before #498.
+   */
+  findingsLedger: boolean;
 }
 
 /**
@@ -1338,6 +1350,14 @@ export interface FoundBy {
   provider: AgentProvider;
   model: string;
   id: string;
+  /**
+   * The `prior_id` this seat declared, as checked against the ledger its prompt
+   * was shown (#498): a listed id, or null. **Absent unless `loop.findingsLedger`
+   * was on**, so a default run's `foundBy` is what it always was. Per seat
+   * because re-detection is counted per seat, and seats that disagree are each
+   * recorded as they said; nothing resolves them.
+   */
+  priorId?: string | null;
 }
 
 /** What one verifier said about one finding (#388 Part C). */
@@ -1513,6 +1533,19 @@ export interface Finding {
    * delete a claim.
    */
   foundBy?: FoundBy[];
+  /**
+   * The id from the findings ledger this finding re-raises, or null for a new
+   * one (#498). **Absent unless `loop.findingsLedger` was on**, so a default
+   * run's artifacts carry no such key, byte for byte.
+   *
+   * Checked, never taken on trust: an id the ledger rendered for that round did
+   * not list is recorded as null, with a `prior_id_unknown` event, so a guess
+   * never counts as a re-raise. With finders, it is the first non-null
+   * `foundBy[].priorId` in finder order. A record for counting only: the
+   * oscillation guard, claims, convergence, severities, the vote, the fix
+   * prompt and the scorecard never read it.
+   */
+  prior_id?: string | null;
   /**
    * What the review verifiers voted, and what the tally came to (#388 Part C).
    *

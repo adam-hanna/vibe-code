@@ -212,7 +212,26 @@ function unionEvidence(members: readonly Member[]): Evidence[] | undefined {
 }
 
 function provenance(m: Member): FoundBy {
-  return { seat: m.finder.seat, provider: m.finder.provider, model: m.finder.model, id: m.finding.id };
+  return {
+    seat: m.finder.seat,
+    provider: m.finder.provider,
+    model: m.finder.model,
+    id: m.finding.id,
+    // This seat's own checked declaration (#498), and only when it made one:
+    // absent with `loop.findingsLedger` off, so `foundBy` is what it was.
+    ...(m.finding.prior_id === undefined ? {} : { priorId: m.finding.prior_id }),
+  };
+}
+
+/**
+ * The merged finding's `prior_id` (#498): the first non-null in finder order,
+ * null when every member declared none, absent when no member carries the key.
+ * Seats that disagree are not resolved here - each keeps its own in `foundBy`.
+ */
+function priorIdOf(group: readonly Member[]): { prior_id?: string | null } {
+  if (!group.some((m) => m.finding.prior_id !== undefined)) return {};
+  const first = group.find((m) => typeof m.finding.prior_id === 'string');
+  return { prior_id: first === undefined ? null : (first.finding.prior_id ?? null) };
 }
 
 /** An id no emitted finding holds yet: `<id>-f<k>`, then `-f<k>-2`, and so on. */
@@ -265,7 +284,7 @@ export function mergeAcrossFinders(perFinder: readonly FinderReport[]): FinderMe
     // winner was judged by a guard: a guard's record is never moved onto a
     // finding it did not see. The other members' own downgrade events stay in
     // the record under the ids those finders used.
-    const { evidence: _evidence, foundBy: _foundBy, ...rest } = winner.finding;
+    const { evidence: _evidence, foundBy: _foundBy, prior_id: _priorId, ...rest } = winner.finding;
     const evidence = unionEvidence(group);
     const id = freeId(first.finding.id, first.finder.k, taken);
     taken.add(id);
@@ -277,6 +296,7 @@ export function mergeAcrossFinders(perFinder: readonly FinderReport[]): FinderMe
       // one finder and raised to P1 by another must not arrive deferred.
       ...(blocking ? { defer: false } : {}),
       ...(evidence === undefined ? {} : { evidence }),
+      ...priorIdOf(group),
       foundBy: group.map(provenance),
     };
   });

@@ -21,6 +21,7 @@ src/riskfacts.ts     what a run decided without a person, counted at plan approv
 src/fork.ts          `vibe fork`: preflight that only reads, then a commit phase that creates
 src/similarity.ts    the one similarity metric, its threshold, and the censuses behind it
 src/finder-merge.ts  one review or critique round's reports across finders, merged by claim, with foundBy; near pairs flagged to the fixer (#388, #405, #462)
+src/findings-ledger.ts  under loop.findingsLedger, the earlier review rounds' findings by id for later prompts, and each turn's prior_id checked against them (#498)
 src/vote.ts          the review and critique votes' fail-closed tally, pure: quorum, counted ballots, outcome (#388, #405)
 src/seat-group.ts    a round's finder or verifier turns, review.maxParallel or critique.maxParallel at once; a turn that ends the round stops its siblings, never the run's latch (#403)
 src/dispositions.ts  a review fix round's or a findings revision's dispositions joined onto its findings, with seats and (plan side) votes, pure (#393, #453)
