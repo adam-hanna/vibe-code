@@ -6419,7 +6419,9 @@ async function seatFinishing<T>(
  * Each finder is the phase's role on a swapped seat (`phase.table`): the same
  * `runTurn`, so its timeout, charge, heartbeat and path style follow the seat.
  * A finder never sees another's findings: every one is handed the prompt the
- * first was, memoryless, plus its focus.
+ * first was, memoryless, plus its focus - and, for a review finder that sets
+ * `report: false` (#497), without the implementer's report. That is decided in
+ * `phase.parts`, so this runner does not know about it.
  *
  * Up to `phase.maxParallel` finders at once (#403), as one `runSeatGroup`;
  * `1`, the default, is one after another exactly as before. A finder's own
@@ -6950,8 +6952,17 @@ async function runReview(
     );
   // One part's review prompt. The first finder and every additional finder are
   // handed the same arguments (#388 Part B): an additional finder differs only
-  // in having no memory, which a memoryless reviewer already renders.
-  const reviewPromptFor = (i: number, hasMemory: boolean, carriesEarlierParts: boolean): string => {
+  // in having no memory, which a memoryless reviewer already renders - with one
+  // opt-in exception. A finder blinded by `review.finders[k].report: false`
+  // (#497) is also handed no report, which is what `withReport` says. It exists
+  // so that whether a seat should see the report can be measured, and no
+  // default seat sets it.
+  const reviewPromptFor = (
+    i: number,
+    hasMemory: boolean,
+    carriesEarlierParts: boolean,
+    withReport: boolean,
+  ): string => {
     const chunk = chunks[i];
     if (chunk === undefined) throw new Error(`review part ${i + 1} does not exist`);
     const listed = listedFor(chunk);
@@ -6981,11 +6992,15 @@ async function runReview(
             carriesEarlierParts,
           }
         : undefined,
-      // Every part, deliberately - see where it is read above. Never
-      // `undefined`: that is the "no caller statement" state which renders
-      // nothing, and a real round must always say something about the
-      // report, even when the thing it says is that there is none (#50).
-      report,
+      // Every part, deliberately - see where it is read above. For the
+      // reviewer and every finder it is never `undefined`: that state renders
+      // nothing, and a real round must always say something about the report,
+      // even when the thing it says is that there is none (#50). The one
+      // exception is a finder blinded by `review.finders[k].report: false`
+      // (#497). It gets `undefined` on every part, so its prompt has no
+      // section at all - not the notice, which says the run lost a report,
+      // when nothing was lost.
+      withReport ? report : undefined,
       // Absent unless this run would actually place and run one, which is
       // what keeps a `verify.reproducers: false` review byte-identical to
       // the one before #113. Only gates with a command: a gate the run
@@ -7015,7 +7030,7 @@ async function runReview(
       cfg,
       {
         role: 'reviewer',
-        prompt: reviewPromptFor(i, hasMemory, carriesEarlierParts),
+        prompt: reviewPromptFor(i, hasMemory, carriesEarlierParts, true),
         cwd,
         // Unchanged when there is one chunk: this string is Codex's output name
         // and the retry label, and a round that did not need splitting must look
@@ -7120,11 +7135,12 @@ async function runReview(
             // Every part of the diff, as the first finder reviewed it, each
             // handed the same arguments the first was (#388 Part B): a finder
             // differs only in having no memory, which a memoryless reviewer
-            // already renders.
+            // already renders - and, when it sets `report: false` (#497), in
+            // having no report section on any part.
             parts: (f) =>
               [...chunks.keys()].map((i) => ({
                 label: chunked ? `review-${round}-f${f.k}-part${i + 1}` : `review-${round}-f${f.k}`,
-                prompt: P.withFocus(reviewPromptFor(i, false, false), f.focus),
+                prompt: P.withFocus(reviewPromptFor(i, false, false, f.report !== false), f.focus),
               })),
             failed: { id: 'review_finder_failed', noun: 'Review' },
             // Each part's test verdicts, combined below with the reviewer's (#404).

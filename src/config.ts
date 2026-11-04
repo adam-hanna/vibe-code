@@ -6,6 +6,7 @@ import {
   DEFAULT_ROLE_PROVIDERS,
   FINDER_KEYS,
   patchRoles,
+  REVIEW_FINDER_KEYS,
   providersForRoles,
   ROLE_NAMES,
   roleRefusals,
@@ -1061,8 +1062,15 @@ function validate(cfg: Config): void {
  *
  * Each seat goes through `roleSetting`, the one reader `roles.<role>` uses, so
  * what a seat may say and what a role may say cannot drift apart - only the
- * path in the message differs. A finder's `focus` is the one
- * key `roleSetting` permits without checking, so it is checked here.
+ * path in the message differs. A finder's `focus`, and a review finder's
+ * `report` (#497), are the keys `roleSetting` permits without checking, so they
+ * are checked here.
+ *
+ * `report` is the one key the two sections' finders differ in. It withholds the
+ * implementer's report from a review seat, and a plan critique has no
+ * implementer report, so in `critique.finders` it is refused before
+ * `roleSetting` reads the entry. That way the message says why, and is not the
+ * unknown-key refusal it would otherwise get by accident.
  *
  * The quorum is checked against the list in the same config, which is why it
  * is refused after the seats are read: "2 but there are only 1 verifiers" is
@@ -1090,7 +1098,16 @@ function validateSeats(section: 'review' | 'critique', value: unknown): void {
   if (!Array.isArray(verifiers)) throw new Error(`${section}.verifiers must be a list of seats, or [] for none`);
   finders.forEach((entry: unknown, i) => {
     const where = `${section}.finders[${i}]`;
-    roleSetting(where, entry, { keys: FINDER_KEYS, noun: 'a finder' });
+    if (section === 'critique' && isRecord(entry) && Object.prototype.hasOwnProperty.call(entry, 'report')) {
+      throw new Error(
+        `${where}.report is not a setting for a plan critique; a plan critique has no implementer ` +
+          'report to withhold',
+      );
+    }
+    roleSetting(where, entry, {
+      keys: section === 'review' ? REVIEW_FINDER_KEYS : FINDER_KEYS,
+      noun: 'a finder',
+    });
     if (isRecord(entry) && Object.prototype.hasOwnProperty.call(entry, 'focus')) {
       const focus = entry['focus'];
       // Blank is refused rather than read as "no focus": absent already says
@@ -1099,6 +1116,17 @@ function validateSeats(section: 'review' | 'critique', value: unknown): void {
         throw new Error(
           `${where}.focus is ${JSON.stringify(focus) ?? String(focus)}; must be a non-empty string, ` +
             'or absent for the shared prompt',
+        );
+      }
+    }
+    // Only a boolean. `false` blinds the seat (#497); `true` says what absent
+    // says, and is accepted because a person may write it to be explicit.
+    if (isRecord(entry) && Object.prototype.hasOwnProperty.call(entry, 'report')) {
+      const report = entry['report'];
+      if (typeof report !== 'boolean') {
+        throw new Error(
+          `${where}.report is ${JSON.stringify(report) ?? String(report)}; must be true or false, ` +
+            "or absent for the implementer's report",
         );
       }
     }

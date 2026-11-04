@@ -965,8 +965,14 @@ export type UnconfirmedP0 = 'block' | 'halt' | 'demote';
  * An additional finder: a role's settings, plus what to look at hardest (#388,
  * ⚑1). `focus` reaches no prompt yet; from Part B it is appended to that
  * finder's prompt, and absent means exactly the shared one.
+ *
+ * `report: false` seats a review finder without the implementer's report
+ * (#497), and `true` or absent hands it the report as every seat gets it.
+ * Review only: the type is shared with `CritiqueConfig`, and `validateSeats`
+ * refuses the key in `critique.finders`, since a plan critique has no
+ * implementer report.
  */
-export type FinderSeat = RoleSetting & { focus?: string | undefined };
+export type FinderSeat = RoleSetting & { focus?: string | undefined; report?: boolean | undefined };
 
 /** The `review` section (#388). See `Config.review`. */
 export interface ReviewConfig {

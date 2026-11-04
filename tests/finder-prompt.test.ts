@@ -22,3 +22,15 @@ test('a focus is appended under its own heading, and nothing else moves', () => 
     `${memoryless()}\n\n## Focus for this review\n\nsecurity`,
   );
 });
+
+test('a blinded finder keeps its focus: appended after a prompt with no report section (#497)', () => {
+  // `runReview` hands a `report: false` seat `undefined`, the fixture callers'
+  // state, so its prompt is the memoryless one with no section, plus its focus.
+  const blind = reviewPrompt(
+    'diff --git a/x b/x\n+one\n', ['x'], '# plan', [], 1, false,
+    undefined, undefined, undefined, undefined, undefined,
+  );
+  assert.equal(blind, memoryless());
+  assert.doesNotMatch(blind, /What the implementer says it did|No report was recorded/);
+  assert.equal(withFocus(blind, 'security'), `${memoryless()}\n\n## Focus for this review\n\nsecurity`);
+});
