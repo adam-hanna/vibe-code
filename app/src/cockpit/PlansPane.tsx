@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Badge } from '@/ui/badge';
 import { Button } from '@/ui/button';
+import { Markdown } from '../design/Markdown';
 import { Section } from './Disclosure';
 import { ofKind, planText } from './artifacts';
 import { shownRound } from './rounds';
@@ -54,6 +55,7 @@ function PlanBody({
 }) {
   const { read, failure, loading } = useArtifact(dir, runId, name, revision);
   const missing = noText(read, failure);
+  const [raw, setRaw] = useState(false);
 
   if (loading && read === null && missing === null) {
     return <p className={NOTE}>reading {name}…</p>;
@@ -68,13 +70,23 @@ function PlanBody({
   if (read === null || read.kind !== 'text') return null;
 
   const body = planText(name, read.text);
-  // `<pre>`, not a markdown renderer. The plan IS markdown and rendering it
-  // would mean shipping a parser to make prose prettier - and the thing a person
-  // reads a plan version for is what it says, in the exact words the critic was
-  // shown. A heading that lost its `##` is a heading somebody has to guess at.
+  // Rendered, by the owner's decision on #530. It was a `<pre>` for the exact
+  // words the critic was shown, and those still matter - so the raw text is one
+  // click away rather than gone, and it is the same bytes the critic read.
   return (
     <>
-      <pre className={DOCUMENT}>{body}</pre>
+      <div className="flex justify-end">
+        <Button variant="quiet" size="sm" aria-pressed={raw} onClick={() => setRaw((r) => !r)}>
+          {raw ? 'show rendered' : 'show raw text'}
+        </Button>
+      </div>
+      {raw ? (
+        <pre className={DOCUMENT}>{body}</pre>
+      ) : (
+        <div className="rounded-sm border border-rule-card bg-chrome p-4">
+          <Markdown text={body} className="text-secondary" />
+        </div>
+      )}
       {body.trim() === '' && (
         <p className={NOTE}>
           This file is empty. That is what is on disk, not a failure to read it.

@@ -1,20 +1,31 @@
 import ReactMarkdown from 'react-markdown';
 import type { Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { cn } from '@/lib/utils';
 
 /**
- * The pilot's prose, drawn as the Markdown it is written in.
+ * An agent's prose, drawn as the Markdown it is written in.
  *
  * Both CLIs and both vendors answer in GitHub-flavoured Markdown by habit, and
- * the pane drew it as preformatted text, so a reply arrived as pipes, asterisks
- * and backticks: *"Is it trying to print markdown? Do we not support markdown
- * in the pilot window?"* The prompt now says the pane renders it (`brief.ts`),
- * and this is the renderer.
+ * the pilot pane drew it as preformatted text, so a reply arrived as pipes,
+ * asterisks and backticks: *"Is it trying to print markdown? Do we not support
+ * markdown in the pilot window?"* The pilot's prompt now says the pane renders
+ * it (`brief.ts`), and this is the renderer.
  *
- * **The pilot's replies, and only those.** A person's own message stays
- * preformatted, because what they typed is what they typed. A plan stays a
- * `<pre>` for `PlansPane`'s reason: it is read for its exact words, in the form
- * the critic was shown.
+ * **Shared since #530, so it lives with the design system.** The pilot's
+ * replies, the plan, and the critique's and review's prose - a finding's detail
+ * and suggested fix, the round summary, ballot reasons, dispositions and
+ * confirmation reasons - all go through it, because all of them are an agent
+ * writing Markdown.
+ *
+ * **The plan is rendered now, by the owner's decision on #530**, which reverses
+ * this note's earlier rule that a plan stays a `<pre>` *"for its exact words"*.
+ * The exact words still matter - they are what the critic was shown - so
+ * `PlansPane` keeps a raw/rendered toggle rather than dropping the text.
+ *
+ * **What stays preformatted:** a person's own typed text (what they typed is
+ * what they typed), a citation's file excerpt, a diff, and the "unreadable"
+ * fallback that shows a file as it is on disk.
  *
  * Three rules keep it a renderer and not a browser:
  * - **No raw HTML.** `react-markdown` drops it unless told otherwise, and it is
@@ -95,9 +106,14 @@ function childrenIs(children: unknown, href: string): boolean {
   return typeof children === 'string' ? children === href : Array.isArray(children) && children.join('') === href;
 }
 
-export function Markdown({ text }: { text: string }) {
+/**
+ * `className` adds to or overrides the block's own type and colour - a finding's
+ * detail is `text-secondary` beside the pilot's `text-primary` - through `cn`,
+ * so a later utility wins.
+ */
+export function Markdown({ text, className }: { text: string; className?: string }) {
   return (
-    <div className="flex select-text flex-col gap-2.5 text-body text-primary [overflow-wrap:anywhere]">
+    <div className={cn('flex select-text flex-col gap-2.5 text-body text-primary [overflow-wrap:anywhere]', className)}>
       <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
         {text}
       </ReactMarkdown>

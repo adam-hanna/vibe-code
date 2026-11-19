@@ -78,7 +78,7 @@ import { PICK_KEY, readPick, writePick } from './pick';
 import { asReply, foldApi, foldElsewhere, holdsComposer, letGo, LINGER_MS, startElsewhere } from './elsewhere';
 import type { Elsewhere } from './elsewhere';
 import type { Pick } from './pick';
-import { Markdown } from './Markdown';
+import { Markdown } from '../design/Markdown';
 import { splitBrief } from '../cockpit/argv';
 import { wakeRound } from '../cockpit/rounds';
 import { CopyText } from './CopyText';
