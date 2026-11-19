@@ -1196,6 +1196,33 @@ the gate. With `review.verifiers: []` nothing runs: no turn, no `votes` key, no 
   Both agents were already probed on every run. A seat's turn that fails mid-turn names its own
   line (`TurnRequest.seatPath`), not `roles.reviewer`.
 
+### What each seat said, and the near pairs, kept for the window (#530)
+
+Groundwork for the review pane's per-seat view, with no behaviour change: nothing in the loop
+reads either file to decide, no prompt moves, and a round without finders writes neither.
+
+- **Each seat's own report.** The merge keeps only the winning finding's text, so a seat whose
+  finding joined another's group kept nothing of what it said but `foundBy`'s seat, model and
+  id. `runFinderSeats` now writes every reporting seat's report, as it stood before the merge
+  across seats (its own parts merged with `mergeReviewReports`, grounded, with the ids it used,
+  which are the ids `foundBy` names), to `FinderPhase.seatArtifact(k)`:
+  `code-review-<n>.seat-<k>.json` or `plan-critique-<n>.seat-<k>.json`, `k` as
+  `FinderReport.k` (0 is `roles.reviewer` or `roles.critic`). The body is the report's own keys
+  plus `round`, `k`, `seat`, `provider` and `model`. A seat that did not report this attempt has
+  its file removed, so a round bought again after a stop cannot leave an earlier attempt's
+  report under a seat that failed this time.
+- **The near pairs the fixer was told about.** `recordNearPairs` writes
+  `fix-near-pairs-<n>.json` (`round`, `answers`, `label`, `pairs`) just before a fix or final
+  fix turn, from the same findings and the same `nearPairs` the fix prompt uses, so it says
+  exactly what *Findings that may be one defect* named. `<n>` is the fix round's, as
+  `fix-dispositions-<n>.json`'s is, so it answers `code-review-<n - 1>.json`. With no pair the
+  file is removed rather than written.
+- **Written with `writeAtomic`, not `artifact`.** `artifact` narrates `artifact_written`, and
+  `seat-runners-pin` pins every narration line of a round with finders. The round's own report
+  (or the fix round's dispositions) is written after these through `artifact`, and its
+  `artifact_written` is what makes the window list the directory again, which finds these with
+  it. `seat-reports.test.ts` holds the cases.
+
 ### One finder runner and one vote runner, for two phases (#452)
 
 The review's finders and vote (#388) and the plan critique's (#405) are one mechanism:
