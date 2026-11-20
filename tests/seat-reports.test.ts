@@ -171,3 +171,30 @@ test('a critique with finders writes each seat its own report beside plan-critiq
   const one = read<SeatFile>(state, 'plan-critique-0.seat-1.json');
   assert.deepEqual([one.seat, one.findings.map((f) => f.title)], ['critique.finders[0]', ['Said otherwise']]);
 });
+
+test("a failed finder's event names its provider and model in its data, and its sentence is unchanged", async () => {
+  // Additive (#530): the window names the failed seat `<seat> <provider>/<model>`
+  // from the data rather than parsing the sentence, which already said both.
+  const state = reviewingRun({ prefix: 'vibe-seat-reports-failed-model-' });
+  const { seen } = await drive(
+    state,
+    reviewCfg(['codex']),
+    (label) => {
+      if (label === 'review-0-f1') throw new Error('the finder fell over');
+      return report([]);
+    },
+    (label) => work(state, `${label}.txt`),
+    true,
+  );
+  const event = state.events.find((e) => e.type === 'review_finder_failed');
+  assert.deepEqual(
+    { round: event?.['round'], finder: event?.['finder'], seat: event?.['seat'], label: event?.['label'], error: event?.['error'] },
+    { round: 0, finder: 1, seat: 'review.finders[0]', label: 'review-0-f1', error: 'the finder fell over' },
+  );
+  assert.equal(event?.['provider'], 'codex');
+  assert.equal(event?.['model'], 'default');
+  const said = seen.find((n) => n.id === 'review_finder_failed');
+  assert.equal(said?.message, 'Review finder 1 (review.finders[0], codex/default) failed on review-0-f1: the finder fell over');
+  assert.equal(said?.data?.['provider'], 'codex');
+  assert.equal(said?.data?.['model'], 'default');
+});
