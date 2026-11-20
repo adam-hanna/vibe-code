@@ -178,9 +178,10 @@ pub struct Remote {
     autostart: OnceLock<Arc<dyn Autostart>>,
     /// Why the last change to start at login failed, until one succeeds.
     login_error: Mutex<Option<String>>,
-    /// Moved by every `remote_set`, the window's and a phone's, under the
-    /// transition lock (#477). A retry episode belongs to one generation: a
-    /// person's change, off included, ends it.
+    /// Moved, under the transition lock, by every start outside the retry
+    /// worker (#477): the launch, a pairing code's start, and every
+    /// `remote_set`, the window's and a phone's. A retry episode belongs to one
+    /// generation, so any of those, off included, ends it.
     generation: tokio::sync::watch::Sender<u64>,
     /// The generation a retry episode is wanted for, or none. Set by [`arm`],
     /// cleared by the episode when it ends.
@@ -2546,7 +2547,8 @@ mod tests {
         reconcile_and_arm(&rig.remote, move || answer, build, None).await;
     }
 
-    /// What a pairing code's `start()` does: no patch, so the same generation.
+    /// What a pairing code's `start()` does: no patch, but `reconcile_and_arm`
+    /// still moves the generation.
     async fn pairing(rig: &Rig, answer: Answer, build: impl FnOnce(SecretKey, Option<RelayUrl>) -> Built) {
         let _guard = rig.remote.transition.lock().await;
         reconcile_and_arm(&rig.remote, move || answer, build, None).await;
