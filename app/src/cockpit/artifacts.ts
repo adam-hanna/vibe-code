@@ -588,7 +588,14 @@ export interface SeatVerdict {
 /** One judge file, with the combined verdict and every seat's own. */
 export interface JudgedFile {
   path: string;
+  /**
+   * The combined verdict as the core stored it (`justified`, `not justified`,
+   * `unjudged`), or null when this build cannot read it. Never recomputed from
+   * `seats` (#460): the core keeps the stored one when entries were dropped.
+   */
   verdict: string | null;
+  /** The reason stored with the combined verdict; null for `unjudged`. */
+  reason: string | null;
   /** Empty in a round with no finders, whose verdict is the reviewer's alone. */
   seats: readonly SeatVerdict[];
 }
@@ -621,18 +628,43 @@ function readTestChanges(v: unknown): JudgedFile[] {
       if (name === null || provider === null || model === null || said === null) continue;
       seats.push({ seat: name, provider, model, ...said });
     }
-    out.push({ path, verdict: readVerdict(row['verdict'])?.verdict ?? null, seats });
+    const combined = readVerdict(row['verdict']);
+    out.push({ path, verdict: combined?.verdict ?? null, reason: combined?.reason ?? null, seats });
   }
   return out;
 }
 
 /**
- * The judge files on which the seats did not all say the same (#404): the only
- * ones worth a line of their own, because the combined verdict already says
- * the rest. Empty in a round without finders.
+ * The judge files the seats disagreed on (#404): one seat said justified and
+ * another said not justified. The core's `disagreements` rule, so the window's
+ * count is the number the terminal's warning prints (#460): an unjudged seat
+ * beside a justified one is an omission, not a disagreement. Empty in a round
+ * without finders.
  */
 export function disagreedFiles(files: readonly JudgedFile[]): readonly JudgedFile[] {
-  return files.filter((f) => new Set(f.seats.map((s) => s.verdict)).size > 1);
+  return files.filter((f) => {
+    const said = new Set(f.seats.map((s) => s.verdict));
+    return said.has('justified') && said.has('not justified');
+  });
+}
+
+/**
+ * A judge file a person should look at (#460): anything the stored combined
+ * verdict did not call justified - `not justified`, `unjudged`, or a verdict
+ * this build could not read, which fails closed rather than passing as fine.
+ */
+export function needsLook(file: JudgedFile): boolean {
+  return file.verdict !== 'justified';
+}
+
+/** Whether any seat's own verdict is on record: a round that seated finders (#404). */
+export function seated(files: readonly JudgedFile[]): boolean {
+  return files.some((f) => f.seats.length > 0);
+}
+
+/** `code-review-<n>.json`: the review round's report, which holds its `testChanges`. */
+export function reviewReportName(round: number): string {
+  return `code-review-${String(round)}.json`;
 }
 
 export function readReport(text: string): Report | null {

@@ -14,6 +14,10 @@ are the rules the code is held to:
   connection** to the same Tauri command functions the desktop window calls. The cockpit
   never knows which side it is on, so there is one cockpit, not two. Only the modules a
   phone cannot run are swapped, under `vite build --mode mobile` (#345).
+- **What the window shows about a run, the phone shows from the same read.** A review round's
+  judge changes (#460) are one example: the card, the rail and the Review pane read
+  `code-review-<n>.json` through the same `artifact` host request the panes use, so the phone needed no frame, no
+  bridge change and no core change to show them.
 - **Full parity, and the list is still closed.** A phone may call every command the
   window may, and the allowed list in `app/remote/` is pinned against `generate_handler!`,
   so a new command is a decision about remote access made on purpose.

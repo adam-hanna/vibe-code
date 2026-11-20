@@ -6,6 +6,8 @@ import { elapsed, work as describeWork } from '../cockpit/format';
 import { SEVERITIES, gateSentence } from '../cockpit/model';
 import { STAGE_TAB } from '../cockpit/rail';
 import { phaseRound, roundTitle } from '../cockpit/rounds';
+import { RoundJudgeChanges } from '../cockpit/JudgeChanges';
+import type { JudgeSource } from '../cockpit/JudgeChanges';
 import type { Severity } from '../design';
 import type { RoundCard as Round } from '../cockpit/rounds';
 import type { GateRun } from '../cockpit/model';
@@ -98,10 +100,17 @@ const OPEN =
 export function RoundCard({
   card,
   onOpen,
+  judge,
 }: {
   card: Round;
   /** Undefined where there is nowhere to send the reader. The link is omitted. */
   onOpen?: OpenAt | undefined;
+  /**
+   * Where a review round's report is read from, for its judge changes (#460).
+   * Undefined draws no section - the in-flight card under a pane, whose round
+   * has written no report yet.
+   */
+  judge?: JudgeSource | undefined;
 }) {
   const open = card.endedAt === null;
   const counts = card.census?.counts ?? null;
@@ -260,6 +269,16 @@ export function RoundCard({
             </button>
           )}
         </div>
+      )}
+
+      {/* The round's changes to its own judge - test files and
+          `vibe.config.json` - with each verdict and its reason (#460). Read
+          from `code-review-<n>.json` rather than a frame: no frame carries the
+          reasons, and the record the core wrote is the one to agree with. A
+          not-justified or unjudged file is on the card, not behind a link,
+          and a round that changed none draws nothing. */}
+      {judge !== undefined && card.cycle === 'review' && card.round !== null && (
+        <RoundJudgeChanges source={judge} round={card.round} className={EVIDENCE} />
       )}
     </article>
   );

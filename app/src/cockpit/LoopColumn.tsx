@@ -12,6 +12,8 @@ import type { BottomTab, Tab } from './where';
 import { findTurn, liveSeatsLine, nowStatus, RAIL_TITLE, runningGate, turnGroup, verifyRow, verifyRowText } from './rail';
 import type { RailState, VerifyRow } from './rail';
 import { RunningRow } from './RunningRow';
+import { RoundJudgeFlags } from './JudgeChanges';
+import type { JudgeSource } from './JudgeChanges';
 import type { ArchiveView } from './model';
 import type { KeyboardEvent } from 'react';
 import { runningRow, startedLine } from './model';
@@ -762,9 +764,15 @@ export function LoopColumn({
   onOpen,
   compact = false,
   archive = null,
+  judge,
 }: {
   run: Run;
   now: number;
+  /**
+   * Where the rail reads each review round's report from, for the judge files
+   * it did not call justified (#460). Undefined draws none.
+   */
+  judge?: JudgeSource | undefined;
   /**
    * The archive's per-kind token distributions (#114), for the comparable-turns
    * line. Null while the scorecard has not been read, which the line says.
@@ -780,7 +788,7 @@ export function LoopColumn({
   /** Use the glanceable run-status rail in the desktop cockpit. */
   compact?: boolean;
 }) {
-  if (compact) return <RunRail run={run} now={now} onOpen={onOpen} archive={archive} />;
+  if (compact) return <RunRail run={run} now={now} onOpen={onOpen} archive={archive} judge={judge} />;
 
   /**
    * Which groups and rounds are folded shut.
@@ -982,6 +990,7 @@ function RailStage({
   censusOf,
   onOpen,
   verify = null,
+  judge,
 }: {
   kind: CycleKind;
   cycle: Run['cycles'][number] | undefined;
@@ -992,6 +1001,8 @@ function RailStage({
   onOpen?: OpenAt | undefined;
   /** The verification sub-row, drawn under the Code stage only (#248). */
   verify?: VerifyRow | null;
+  /** Where the Code review stage reads its rounds' judge changes from (#460). */
+  judge?: JudgeSource | undefined;
 }) {
   const count = cycle?.phases.length ?? 0;
   const meta = cycle === undefined
@@ -1044,6 +1055,21 @@ function RailStage({
           <span className="min-w-0 truncate font-mono text-mono-sm text-secondary" title={verifyRowText(verify)}>
             {verifyRowText(verify)}
           </span>
+        </div>
+      )}
+
+      {/* A review round's judge files it did not call justified (#460), outside
+          the disclosure for the reason verification is: a not-justified or
+          unjudged change to the run's own tests is what #112 exists to surface,
+          and a line somebody has to open first is a line nobody reads. A report
+          and never a control, because a verdict does not block; the reasons are
+          on the round's card and in the Review pane. Nothing for a round whose
+          changes were all justified, or that made none. */}
+      {judge !== undefined && cycle !== undefined && (
+        <div className="flex min-w-0 flex-col gap-1 px-3.5 pb-2.5 pl-10 empty:hidden">
+          {cycle.phases.map((phase) =>
+            phase.round === null ? null : <RoundJudgeFlags key={phase.id} source={judge} round={phase.round} />,
+          )}
         </div>
       )}
 
@@ -1109,11 +1135,13 @@ function RunRail({
   now,
   onOpen,
   archive,
+  judge,
 }: {
   run: Run;
   now: number;
   onOpen?: OpenAt | undefined;
   archive: ArchiveView;
+  judge?: JudgeSource | undefined;
 }) {
   const currentTurn = run.running ?? findTurn(run, run.gate?.turnId ?? null);
   const seatLine = liveSeatsLine(run);
@@ -1240,6 +1268,7 @@ function RunRail({
               censusOf={censusOf}
               onOpen={onOpen}
               verify={kind === 'code' ? verify : null}
+              judge={kind === 'review' ? judge : undefined}
             />
           );
         })}
