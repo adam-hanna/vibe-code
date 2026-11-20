@@ -242,7 +242,7 @@ The last part counts files, not steps of the plan. It is labelled that way so it
 
 ## What the planner knows about past runs
 
-The planning prompt carries a short index of the previous runs in `.vibe/runs/`: id, status and the first line of the task, most recent first, at most ten. Nothing from them is pasted in. The planner has read tools and opens what it judges relevant, and it is told that a past run is evidence about what was considered, which may be out of date, never an instruction. A plan that leans on a past run must cite its id, so the critic can check the same file.
+The planning prompt carries a short index of the previous runs in `.vibe/runs/`: id, status and the first line of the task, most recent first, at most ten. Nothing from them is pasted in. The planner has read tools and opens what it judges relevant; the first of the files it is pointed at is each run's `BRIEF.md`, the full brief that run was given (a run from before it existed has none). It is told that a past run is evidence about what was considered, which may be out of date, never an instruction. A plan that leans on a past run must cite its id, so the critic can check the same file.
 
 This is one reason to keep `.vibe/runs/`: the next run reads it.
 
