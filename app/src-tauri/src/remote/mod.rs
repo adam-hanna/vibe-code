@@ -627,20 +627,33 @@ where
         ep.stop().await;
         crate::applog::app(&format!("remote access: endpoint {id} stopped"));
     }
-    if !desired.enabled {
+    if desired.enabled && matches!(*remote.running(), Running::Up { .. }) {
         return;
     }
-    if matches!(*remote.running(), Running::Up { .. }) {
-        return;
-    }
-    let key = match start_decision(true, read_key) {
+    // Every outcome of a start is one line in `vibe-desktop.log` (#476). On
+    // 2026-10-26 gnome-keyring dumped core as 1.9.0 started, the device key
+    // could not be read, and the log said nothing: the reason was in `Failed`
+    // and on the settings screen, and nowhere a person reading the log after
+    // the fact would look. `why` is the sentence `identity::read` builds, which
+    // names the keychain's error and never the bytes (see `Keychain::get`).
+    //
+    // Every pass logs, and nothing is deduplicated: a reconcile runs at launch,
+    // after the first pairing code, and on a settings change from the window or
+    // a phone - never on a timer or a retry loop - so each line is a keychain
+    // read a person caused, and a repeat is the evidence that they tried again.
+    let key = match start_decision(desired.enabled, read_key) {
         Decision::Start(key) => key,
-        Decision::Off => return,
+        Decision::Off => {
+            crate::applog::app("remote access: off, so no endpoint");
+            return;
+        }
         Decision::NoKey => {
+            crate::applog::app("remote access: no device key, so no endpoint");
             *remote.running() = Running::NoKey;
             return;
         }
         Decision::Failed(why) => {
+            crate::applog::app(&format!("remote access: could not read the device key: {why}"));
             *remote.running() = Running::Failed(why);
             return;
         }
@@ -656,7 +669,11 @@ where
         }
         Ok(ep) => {
             *remote.running() = Running::Off;
+            let id = ep.id();
             ep.stop().await;
+            crate::applog::app(&format!(
+                "remote access: endpoint {id} was bound for settings that have since changed, so it was stopped"
+            ));
         }
         Err(why) => {
             crate::applog::app(&format!("remote access: {why}"));
@@ -1609,6 +1626,88 @@ mod tests {
         want(&rig.remote, false, None);
         reconcile_with(&rig.remote, || panic!("off reads no key"), rig.build()).await;
         assert_eq!(rig.report(), EndpointReport::Off);
+    }
+
+    /// #476: a start that found no key, or could not read one, said nothing in
+    /// `vibe-desktop.log`. Every arm of `Decision` now writes exactly one line,
+    /// and the up line names the public id, never the secret.
+    #[tokio::test]
+    async fn every_start_outcome_writes_exactly_one_log_line() {
+        use crate::applog::heard;
+        use crate::remote::identity::tests::FakeVault;
+        let rig = Rig::new();
+        heard::listen();
+
+        // Off: the keychain is not asked.
+        want(&rig.remote, false, None);
+        reconcile_with(&rig.remote, || panic!("off reads no key"), rig.build()).await;
+        assert_eq!(heard::take(), ["remote access: off, so no endpoint"]);
+
+        // NoKey.
+        want(&rig.remote, true, None);
+        reconcile_with(&rig.remote, || Ok(None), rig.build()).await;
+        assert_eq!(heard::take(), ["remote access: no device key, so no endpoint"]);
+        assert_eq!(rig.report(), EndpointReport::NoKey);
+
+        // Failed, through the real `identity::read` and the keyring crate's own
+        // wording for a dead secret service, as on 2026-10-26.
+        let dead = FakeVault {
+            unreadable: Some("Platform secure storage failure: DBus error: Remote peer disconnected".into()),
+            ..FakeVault::default()
+        };
+        reconcile_with(&rig.remote, || identity::read(&dead), rig.build()).await;
+        assert_eq!(
+            heard::take(),
+            ["remote access: could not read the device key: the keychain refused to read the device key: \
+              Platform secure storage failure: DBus error: Remote peer disconnected"]
+        );
+        // A stored value that is not a key is refused by its length alone.
+        let odd = FakeVault { stored: std::cell::RefCell::new(Some(vec![0xab; 31])), ..FakeVault::default() };
+        reconcile_with(&rig.remote, || identity::read(&odd), rig.build()).await;
+        let lines = heard::take();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].starts_with("remote access: could not read the device key: "), "{lines:?}");
+        assert!(lines[0].contains("31 bytes, not 32") && !lines[0].to_lowercase().contains("abab"), "{lines:?}");
+
+        // Start, and the bind fails.
+        reconcile_with(&rig.remote, || Ok(Some(key())), |_, _| async { Err::<RemoteEndpoint, _>("no socket".to_string()) })
+            .await;
+        assert_eq!(heard::take(), ["remote access: no socket"]);
+
+        // Start, bound for settings that moved while it bound.
+        let remote = &rig.remote;
+        let build = rig.build();
+        reconcile_with(remote, || Ok(Some(key())), move |key, relay| {
+            want(remote, true, Some("https://b.example"));
+            build(key, relay)
+        })
+        .await;
+        let lines = heard::take();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].ends_with("was bound for settings that have since changed, so it was stopped"), "{lines:?}");
+        assert_eq!(rig.report(), EndpointReport::Off);
+
+        // Start, and up.
+        want(&rig.remote, true, None);
+        let secret = key();
+        let public = secret.public();
+        let hex: String = secret.to_bytes().iter().map(|b| format!("{b:02x}")).collect();
+        reconcile_with(&rig.remote, move || Ok(Some(secret)), rig.build()).await;
+        let lines = heard::take();
+        assert_eq!(lines, [format!("remote access: endpoint {public} is up")]);
+        assert!(!lines[0].contains(&hex), "the secret never reaches the log");
+
+        // Up and unchanged is not a start, so it says nothing.
+        rig.reconcile().await;
+        assert_eq!(heard::take(), Vec::<String>::new());
+
+        // Off again: the stop and the off are one line each.
+        want(&rig.remote, false, None);
+        reconcile_with(&rig.remote, || panic!("off reads no key"), rig.build()).await;
+        assert_eq!(
+            heard::take(),
+            [format!("remote access: endpoint {public} stopped"), "remote access: off, so no endpoint".to_string()]
+        );
     }
 
     #[tokio::test]

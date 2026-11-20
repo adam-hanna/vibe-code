@@ -67,7 +67,13 @@ with it:
   endpoint that is up. The window's `remote_set` answers once that has happened. **Every
   `remote_set` writes its patch under that lock** (`patch_locked`), so a patch and the change
   it decides are one step: written before the lock, a phone's *off* could be acted on by the
-  window's reconcile first, closing the phone before its answer.
+  window's reconcile first, closing the phone before its answer. **Every outcome of a start is
+  one line in `vibe-desktop.log`** (#476): off, no device key, a key that could not be read (with
+  the keychain's own error, never the bytes), a bind error, an endpoint up, and one bound for
+  settings that moved meanwhile. A 1.9.0 start whose keyring daemon had crashed logged nothing,
+  and finding why took `journalctl` and a count of UDP sockets. Each pass logs, undeduplicated:
+  a reconcile runs only at launch, after the first pairing code and on a settings change, never
+  on a timer, so a repeated line is a person trying again.
 - **A phone's closing change answers first.** Turning access off from a phone closes that
   phone's own connection. So the phone's call takes the lock before it answers. It answers
   with the decided state. The stop then waits on `Written` until the peer has acknowledged
