@@ -8,6 +8,7 @@ Most files are conditional: a missing one means the run had nothing to put in it
 
 | File | What it is |
 |---|---|
+| `BRIEF.md` | The brief the run was given, exactly as the run stores it, written once when the run is created. The next run's planner is pointed at it. It is a copy for reading: vibe never reads it back, and the run's own brief stays the one in `state.json`, so editing this file changes nothing. A forked run gets its own. Runs started before it existed have none. |
 | `PLAN.md` | The approved plan. It ends with `## Assumptions`, what the planner declared it was assuming, and `## Decided without you`: the answers the answerer gave to the planner's questions, the questions left on the planner's default, and the plan critique findings carried into implementation. |
 | `DECISIONS.md` | The same four lists, one section each: `## Assumptions` (with why, and what changes if one is wrong), `## Answered by a model` (with confidence and rationale), `## Left on the planner's default` (with the default used) and `## Carried into implementation`. Written beside `PLAN.md` when the plan is approved, and by `vibe fork` from the fork's own state. vibe never reads it back. On runs started before it existed, the model answers say "not recorded for this run". |
 | `plan-<n>.json` | Each plan round: the plan, its declared assumptions, open questions, out-of-scope list and acceptance criteria. |

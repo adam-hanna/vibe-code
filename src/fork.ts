@@ -9,6 +9,7 @@ import * as P from '@src/prompts.js';
 import { planDecisions, writeDecisions } from '@src/decisions.js';
 import {
   artifact,
+  BRIEF_FILE,
   claimRunDir,
   linkedArtifactReason,
   linkedCheckpointReason,
@@ -660,6 +661,11 @@ export async function commitFork(targetDir: string, plan: ForkPlan): Promise<For
 
     // The artifacts BEFORE the state write, so there is no moment in which the
     // child exists and points at a file that is not there.
+    //
+    // The child's own brief (#500), from its own `task`, as `createRun` writes
+    // one: never copied from the parent's directory, which a run made before
+    // BRIEF.md existed does not have.
+    created.push(artifact(child, BRIEF_FILE, child.task));
     if (child.plan !== null) {
       // `renderPlanDoc`, never bare `plan_md`: this repo treats the plan
       // document as the plan plus its out-of-scope and acceptance sections, and

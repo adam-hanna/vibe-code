@@ -273,9 +273,21 @@ export function createRun(
     extraContext: init.extraContext ?? null,
     ...(init.config === undefined ? {} : { config: init.config }),
   };
+  // The brief as a file of its own (#500), for whoever reads the run afterwards:
+  // a later planner, which the past-run index points here, and a person, who
+  // otherwise has to pull `task` out of a state.json that reaches ~96KB. Written
+  // once and never read back - `state.task` stays the source of truth, so the
+  // rule that a brief is never rewritten holds, and editing this file changes
+  // nothing. Before the state write, for the order `commitFork` keeps: a kill
+  // between the two leaves a directory with no state.json, which is not a run.
+  // `writeAtomic` and not `artifact()`, so creating a run narrates nothing new.
+  writeAtomic(dir, BRIEF_FILE, task);
   saveState(state);
   return state;
 }
+
+/** Where `createRun` and `commitFork` put the run's brief (#500). Never read back. */
+export const BRIEF_FILE = 'BRIEF.md';
 
 /**
  * A stored run, checked rather than asserted - see `src/stored.ts` for the

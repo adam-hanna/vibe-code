@@ -811,7 +811,7 @@ export function priorRunsSection(runs: readonly RunSummary[]): string {
 
 ${rows.join('\n')}
 
-At most ${PRIOR_RUN_LIMIT} runs are listed here and **there may be more** - \`.vibe/runs/\` is the full list. A run directory **may** contain \`FOLLOW-UPS.md\` (what was declined or deferred, and why), \`ASSUMED.md\` (questions that ran on the planner's guess), \`OUTSTANDING.md\` (findings carried unresolved), \`PLAN.md\`, \`plan-critique-*.json\` (what the critic attacked) and \`code-review-*.json\` (what the reviewer found). Which of these exist depends on how far that run got and what it found, so treat a missing file as nothing to report rather than as a gap.
+At most ${PRIOR_RUN_LIMIT} runs are listed here and **there may be more** - \`.vibe/runs/\` is the full list. A run directory **may** contain \`BRIEF.md\` (the brief that run was given, in full), \`FOLLOW-UPS.md\` (what was declined or deferred, and why), \`ASSUMED.md\` (questions that ran on the planner's guess), \`OUTSTANDING.md\` (findings carried unresolved), \`PLAN.md\`, \`plan-critique-*.json\` (what the critic attacked) and \`code-review-*.json\` (what the reviewer found). Which of these exist depends on how far that run got and what it found, so treat a missing file as nothing to report rather than as a gap.
 
 **How to read one.**
 
