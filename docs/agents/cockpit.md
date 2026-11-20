@@ -272,6 +272,54 @@ they are waiting on. Four things in it are worth carrying:
   revision did with it, read from `plan-dispositions-<n+1>.json` by the same join) — and what stays out is the severity, the
   title and the id, which are what make a list of findings scannable.
 
+- **A panel round says it is one, without moving provenance onto the row** (#530). Since #388
+  a review or critique round can be the work of several seats, and the pane read like one
+  reviewer's report. What moved, all in `ReportPane.tsx` and read by `artifacts.ts` and
+  `model.ts`, and all drawing nothing on a round with one seat and no vote:
+  - **A panel line under `GateHead`**: *"3 seats · 2 reported · 14 findings merged into 9 · 5
+    put to a vote: 4 confirmed, 1 unconfirmed"* (`panelLine`). Seats and merge counts are the
+    merge frame's, the vote counts the report file's own `votes`, never the configured count,
+    `foundByLine`'s rule; a part neither says is left out. Beneath it, each seat that failed
+    (`review_finder_failed` / `critique_finder_failed`, which the window did not read before):
+    its config path, finder number, turn and error. **The event carries no provider or model,
+    so none is shown** rather than parsed out of the sentence. A failure is held in
+    `Run.finderFailures` until the merge frame that closes its attempt takes it
+    (`closedFailures`): the last one per seat, and never more than `finders - reported`, so a
+    failure from an attempt a resumed round replaced is never named against a seat that then
+    reported.
+  - **A consensus filter over the list**, not provenance on the row: *found by one seat*,
+    *found by every seat*, *voted on*, *voted down* (`consensusFilters`, `inConsensus`). It
+    appears only when a finding carries `foundBy` or `votes`. *Every seat* is measured against
+    the frame's `reported`, so without a frame it is not offered.
+  - **Where the seats disagreed about a test change** (#404): each judge file whose seats did
+    not all say the same, from the report's `testChanges.files[].verdicts`, with the combined
+    verdict and every seat's own. Files the seats agreed on add nothing; the combined verdict
+    already says them.
+  - **A seat's declared prior id** (#498), inside the fold: *"review.finders[0]: same as
+    earlier finding a-1"*. `priorId` is a bare id, and the ledger's round does not travel with
+    it, so the line names no round rather than guessing which earlier round held the id. An
+    unreadable value drops the key alone, as `readFoundBy` drops an entry.
+  - **The checks after the final fix** (#489), with the review round the final fix answered:
+    `final-fix-confirm-<n + 1>.json` beside `code-review-<n>.json`, classified as its own
+    kind. Its scope (the fix's own change, or the whole run's diff) and each carried finding's
+    counted verdict, with who settled it: a seat by vendor and model, its reproducer passing,
+    or *no check ran* when the diff could not be read and no turn was bought. Read from the
+    file, which the core rewrites from state on every entry; the `final_fix_confirmed` event
+    says the same counts and is not read.
+  - **Not yet:** near pairs (#462) and a per-seat view. The near pairs reached only the fix
+    prompt, and a merged-away seat's own words were kept nowhere, so both wait on the core's
+    groundwork (`fix-near-pairs-<n>.json`, `code-review-<n>.seat-<k>.json`), which ships on
+    its own; the pane reads neither yet.
+- **Agent prose is Markdown, through one renderer** (#530). `pilot/Markdown.tsx` moved to
+  `design/Markdown.tsx` and takes a `className`. It draws a finding's detail and suggested fix,
+  the round summary, ballot reasons, a disposition's reason (split off its badge by
+  `outcomeEntries`, whose `line` is `outcomeFor`'s string byte for byte) and a confirmation's
+  reason, on the review and critique sides alike. **The plan is rendered too, by the owner's
+  decision**, reversing the rule that it stayed a `<pre>` for its exact words: those words are
+  what the critic was shown, so `PlansPane` keeps a *show raw text* toggle onto the same bytes.
+  A person's own typed text, a citation's excerpt, a diff and the *unreadable* fallback stay
+  preformatted. `prose-markdown.test.ts` pins the routes.
+
 - **No issue number reaches the screen, and `copy.test.ts` is the gate.** Seven components
   carried one, each individually defensible: naming the issue that would supply a missing
   figure is how this repo keeps a gap legible. That reasoning is right about the *source* and

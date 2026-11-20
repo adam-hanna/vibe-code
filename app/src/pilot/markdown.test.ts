@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'vitest';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { Markdown } from './Markdown';
+import { Markdown } from '../design/Markdown';
 import { systemPrompt } from './brief';
 import { emptyRun } from '../cockpit/model';
 import pane from './PilotPane.tsx?raw';

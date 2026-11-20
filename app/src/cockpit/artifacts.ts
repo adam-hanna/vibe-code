@@ -43,6 +43,7 @@ export type ArtifactKind =
   | 'dispositions'
   | 'plan-dispositions'
   | 'fix-report'
+  | 'final-fix-confirm'
   | 'other';
 
 export interface Classified {
@@ -79,6 +80,9 @@ const PATTERNS: readonly { kind: ArtifactKind; re: RegExp }[] = [
   // A review fix round's report: the evidence that the round ran, when it left
   // no dispositions file - an unreadable answer, or a run from before #393.
   { kind: 'fix-report', re: /^fix-report-(\d+)\.md$/ },
+  // The final fix's confirmations (#489, read since #530). Its round is the
+  // FINAL FIX round's, so it belongs with `code-review-<round - 1>.json`.
+  { kind: 'final-fix-confirm', re: /^final-fix-confirm-(\d+)\.json$/ },
   { kind: 'answers', re: /^answers-(\d+)\.json$/ },
   { kind: 'plan', re: /^plan-(\d+)\.json$/ },
 ];
@@ -194,6 +198,13 @@ export interface FoundBy {
   provider: string;
   model: string;
   id: string;
+  /**
+   * The earlier finding this seat declared it the same as (#498): an id, or
+   * null when it declared none. Absent unless `loop.findingsLedger` was on, and
+   * absent too when the value is not one this build can read - that drops the
+   * key alone, never the entry.
+   */
+  priorId?: string | null;
 }
 
 /**
@@ -213,7 +224,14 @@ function readFoundBy(v: unknown): FoundBy[] | null {
     const model = str(row['model']);
     const id = str(row['id']);
     if (seat === null || provider === null || model === null || id === null) continue;
-    out.push({ seat, provider, model, id });
+    const prior: unknown = row['priorId'];
+    out.push({
+      seat,
+      provider,
+      model,
+      id,
+      ...(prior === null ? { priorId: null } : str(prior) === null ? {} : { priorId: str(prior) }),
+    });
   }
   return out.length === 0 ? null : out;
 }
@@ -232,6 +250,21 @@ export function foundByLine(foundBy: readonly FoundBy[], reported: number | null
   return reported === null
     ? `found by ${n} finder${foundBy.length === 1 ? '' : 's'}: ${who}`
     : `found by ${n} of ${String(reported)} finders: ${who}`;
+}
+
+/**
+ * What each seat declared a finding the same as (#498), one line per seat that
+ * named an earlier id: *"review.finders[0]: same as earlier finding a-1"*.
+ *
+ * The ledger the seat was shown names rounds, but `priorId` is the bare id and
+ * no round travels with it, so the line names none rather than guessing which
+ * earlier round held that id. Empty when no seat declared one, which is every
+ * run without `loop.findingsLedger`.
+ */
+export function priorLines(foundBy: readonly FoundBy[]): string[] {
+  return foundBy.flatMap((f) =>
+    typeof f.priorId === 'string' ? [`${f.seat}: same as earlier finding ${f.priorId}`] : [],
+  );
 }
 
 /** One verifier's ballot, as the report file has it. */
@@ -420,17 +453,22 @@ export function outcomeLine(
   else if (outcome?.kind === 'recorded') {
     const what = outcome.entry.disposition.replace(/-/g, ' ');
     const why = outcome.entry.reason === '' ? '' : ` - ${outcome.entry.reason}`;
-    // A plan round is counted from one, as the Plans and Plan critique tabs
-    // count it (`shownRound`); a fix round keeps the number in its label.
-    const round =
-      outcome.by === 'planner'
-        ? `plan round ${String(outcome.fixRound + 1)}`
-        : `${outcome.final ? 'final fix round' : 'fix round'} ${String(outcome.fixRound)}`;
-    out.push(`${outcome.by ?? 'fixer'}: ${what}${why} (${round})`);
+    out.push(`${outcome.by ?? 'fixer'}: ${what}${why} (${roundWords(outcome)})`);
   }
   if (next === 'raised-again') out.push('same id raised again next round');
   else if (next === 'not-reviewed-again') out.push('not reviewed again');
   return out;
+}
+
+/**
+ * The answering round in words. A plan round is counted from one, as the Plans
+ * and Plan critique tabs count it (`shownRound`); a fix round keeps the number
+ * in its label.
+ */
+function roundWords(outcome: Extract<FixOutcome, { kind: 'recorded' }>): string {
+  return outcome.by === 'planner'
+    ? `plan round ${String(outcome.fixRound + 1)}`
+    : `${outcome.final ? 'final fix round' : 'fix round'} ${String(outcome.fixRound)}`;
 }
 
 /**
@@ -471,6 +509,36 @@ export function revisionRan(entries: readonly ArtifactEntry[], round: number): b
  * claiming the round recorded nothing.
  */
 export function outcomeFor(id: string, a: AnsweringRound): string[] {
+  return outcomeEntries(id, a).map((e) => e.line);
+}
+
+/**
+ * The same outcome as `outcomeFor`, with the fixer's or planner's reason split
+ * off so the pane can draw it as the prose it is (#530): `head` is the line
+ * without the reason, `reason` is the reason or null. `line` is `outcomeFor`'s
+ * string, byte for byte.
+ */
+export function outcomeEntries(
+  id: string,
+  a: AnsweringRound,
+): { line: string; head: string; reason: string | null }[] {
+  const lines = outcomeLinesFor(id, a);
+  const recorded = recordedOutcome(id, a);
+  return lines.map((line, i) => {
+    if (i !== 0 || recorded === null || recorded.entry.reason === '') return { line, head: line, reason: null };
+    const what = recorded.entry.disposition.replace(/-/g, ' ');
+    return { line, head: `${recorded.by ?? 'fixer'}: ${what} (${roundWords(recorded)})`, reason: recorded.entry.reason };
+  });
+}
+
+function recordedOutcome(id: string, a: AnsweringRound): Extract<FixOutcome, { kind: 'recorded' }> | null {
+  const entry = a.file?.byId.get(id);
+  return entry !== undefined && a.listed !== null
+    ? { kind: 'recorded', fixRound: a.listed, final: a.file?.final ?? false, entry, ...(a.by === undefined ? {} : { by: a.by }) }
+    : null;
+}
+
+function outcomeLinesFor(id: string, a: AnsweringRound): string[] {
   const entry = a.file?.byId.get(id);
   const outcome: FixOutcome =
     entry !== undefined && a.listed !== null
@@ -494,6 +562,72 @@ export interface Report {
   verdict: string | null;
   summary: string | null;
   findings: readonly FullFinding[];
+  /**
+   * The judge files the round's diff touched and each seat's word on them
+   * (#112, #404), or empty: a round that touched none, or a report from before
+   * either.
+   */
+  testChanges: readonly JudgedFile[];
+}
+
+/** One seat's word on one judge file, as `testChanges.files[].verdicts` has it (#404). */
+export interface SeatVerdict {
+  seat: string;
+  provider: string;
+  model: string;
+  /** `justified`, `not justified` or `unjudged`. */
+  verdict: string;
+  reason: string | null;
+}
+
+/** One judge file, with the combined verdict and every seat's own. */
+export interface JudgedFile {
+  path: string;
+  verdict: string | null;
+  /** Empty in a round with no finders, whose verdict is the reviewer's alone. */
+  seats: readonly SeatVerdict[];
+}
+
+/** A verdict as the core stores it - `'unjudged'` or `{ justified, reason }` - in words. */
+function readVerdict(v: unknown): { verdict: string; reason: string | null } | null {
+  if (v === 'unjudged') return { verdict: 'unjudged', reason: null };
+  const row = record(v);
+  if (row === null || typeof row['justified'] !== 'boolean') return null;
+  return { verdict: row['justified'] ? 'justified' : 'not justified', reason: str(row['reason']) };
+}
+
+/** `testChanges.files`, each file and each seat dropped alone when it cannot be read. */
+function readTestChanges(v: unknown): JudgedFile[] {
+  const files = record(v)?.['files'];
+  if (!Array.isArray(files)) return [];
+  const out: JudgedFile[] = [];
+  for (const item of files as unknown[]) {
+    const row = record(item);
+    const path = row === null ? null : str(row['path']);
+    if (row === null || path === null) continue;
+    const seats: SeatVerdict[] = [];
+    for (const s of Array.isArray(row['verdicts']) ? (row['verdicts'] as unknown[]) : []) {
+      const seat = record(s);
+      if (seat === null) continue;
+      const name = str(seat['seat']);
+      const provider = str(seat['provider']);
+      const model = str(seat['model']);
+      const said = readVerdict(seat['verdict']);
+      if (name === null || provider === null || model === null || said === null) continue;
+      seats.push({ seat: name, provider, model, ...said });
+    }
+    out.push({ path, verdict: readVerdict(row['verdict'])?.verdict ?? null, seats });
+  }
+  return out;
+}
+
+/**
+ * The judge files on which the seats did not all say the same (#404): the only
+ * ones worth a line of their own, because the combined verdict already says
+ * the rest. Empty in a round without finders.
+ */
+export function disagreedFiles(files: readonly JudgedFile[]): readonly JudgedFile[] {
+  return files.filter((f) => new Set(f.seats.map((s) => s.verdict)).size > 1);
 }
 
 export function readReport(text: string): Report | null {
@@ -538,7 +672,188 @@ export function readReport(text: string): Report | null {
       });
     }
   }
-  return { verdict: str(root['verdict']), summary: str(root['summary']), findings };
+  return {
+    verdict: str(root['verdict']),
+    summary: str(root['summary']),
+    findings,
+    testChanges: readTestChanges(root['testChanges']),
+  };
+}
+
+// ---- the panel, at a glance (#530) -------------------------------------------
+
+/**
+ * The round's panel in one line: *"3 seats · 2 reported · 14 findings merged
+ * into 9 · 5 put to a vote: 4 confirmed, 1 unconfirmed"*.
+ *
+ * The seat and merge counts are the merge frame's and the vote counts are the
+ * report's own `votes` - never the configured count, `foundByLine`'s rule. A
+ * part neither source says is left out rather than filled in. Null when there
+ * is nothing to say: a round with one seat and no vote, which is every default
+ * round before #447, draws exactly what it drew before.
+ */
+export function panelLine(
+  merge: { finders: number; reported: number; findings: number | null; merged: number | null } | null,
+  findings: readonly FullFinding[],
+): string | null {
+  const parts: string[] = [];
+  if (merge !== null && merge.finders > 1) {
+    parts.push(`${String(merge.finders)} seats`, `${String(merge.reported)} reported`);
+    if (merge.findings !== null && merge.merged !== null) {
+      parts.push(`${String(merge.findings)} findings merged into ${String(merge.merged)}`);
+    }
+  }
+  const voted = findings.filter((f) => f.votes !== null);
+  if (voted.length > 0) {
+    const outcomes = new Map<string, number>();
+    for (const f of voted) {
+      const o = f.votes?.outcome ?? '';
+      outcomes.set(o, (outcomes.get(o) ?? 0) + 1);
+    }
+    const order = ['confirmed', 'unconfirmed', 'undecided'];
+    const named = [...outcomes.keys()].sort(
+      (a, b) => (order.indexOf(a) + 1 || order.length + 1) - (order.indexOf(b) + 1 || order.length + 1),
+    );
+    parts.push(
+      `${String(voted.length)} put to a vote: ${named.map((o) => `${String(outcomes.get(o) ?? 0)} ${o}`).join(', ')}`,
+    );
+  }
+  return parts.length === 0 ? null : parts.join(' · ');
+}
+
+/** The ways the findings list can be narrowed to the panel's agreement (#530). */
+export type Consensus = 'all' | 'one-seat' | 'every-seat' | 'voted-on' | 'voted-down';
+
+/** What each filter is called on its button. */
+export const CONSENSUS_WORDS: Record<Consensus, string> = {
+  all: 'all',
+  'one-seat': 'found by one seat',
+  'every-seat': 'found by every seat',
+  'voted-on': 'voted on',
+  'voted-down': 'voted down',
+};
+
+/**
+ * Whether one finding passes a filter. *Every seat* is measured against the
+ * seats that reported (`reported`), never the configured count; *voted down*
+ * is a vote whose outcome was `unconfirmed`.
+ */
+export function inConsensus(f: FullFinding, c: Consensus, reported: number | null): boolean {
+  switch (c) {
+    case 'all':
+      return true;
+    case 'one-seat':
+      return f.foundBy?.length === 1;
+    case 'every-seat':
+      return reported !== null && f.foundBy !== null && f.foundBy.length >= reported;
+    case 'voted-on':
+      return f.votes !== null;
+    case 'voted-down':
+      return f.votes?.outcome === 'unconfirmed';
+  }
+}
+
+/**
+ * The filters worth offering for a round, `all` first, or empty when the round
+ * had neither finders nor a vote - then the list is drawn as it always was.
+ * *Every seat* needs the merge frame's denominator, so it is offered only with
+ * one; the vote filters only when something was voted on.
+ */
+export function consensusFilters(findings: readonly FullFinding[], reported: number | null): Consensus[] {
+  const found = findings.some((f) => f.foundBy !== null);
+  const voted = findings.some((f) => f.votes !== null);
+  if (!found && !voted) return [];
+  const out: Consensus[] = ['all'];
+  if (found) out.push('one-seat');
+  if (found && reported !== null) out.push('every-seat');
+  if (voted) out.push('voted-on', 'voted-down');
+  return out;
+}
+
+// ---- the final fix's confirmations (#489, #530) -----------------------------
+
+/** One carried finding's confirmation, as `final-fix-confirm-<n>.json` has it. */
+export interface Confirmation {
+  id: string;
+  /** As said, and as counted: a `fixed` whose evidence resolved to nothing counts `cannot-tell`. */
+  verdict: string;
+  counted: string;
+  /** `seat`, `reproducer` or `unread-diff`. */
+  source: string;
+  seat: { provider: string; model: string; sharesImplementerVendor: boolean } | null;
+  reason: string | null;
+  countedReason: string | null;
+}
+
+export interface Confirmations {
+  /** The final fix round's number: it answers `code-review-<round - 1>.json`. */
+  round: number | null;
+  /** `since-last-review` or `whole-run`, or null when the file did not say. */
+  scope: string | null;
+  findings: readonly Confirmation[];
+}
+
+/**
+ * A final fix's confirmations, or null when the file is not JSON. An entry
+ * this build cannot read is dropped alone, as `readDispositions` drops one.
+ */
+export function readConfirmations(text: string): Confirmations | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text) as unknown;
+  } catch {
+    return null;
+  }
+  const root = record(parsed);
+  if (root === null) return null;
+  const findings: Confirmation[] = [];
+  for (const item of Array.isArray(root['findings']) ? (root['findings'] as unknown[]) : []) {
+    const row = record(item);
+    if (row === null) continue;
+    const id = str(row['id']);
+    const verdict = str(row['verdict']);
+    const counted = str(row['counted']);
+    const source = str(row['source']);
+    if (id === null || verdict === null || counted === null || source === null) continue;
+    const s = record(row['seat']);
+    const provider = s === null ? null : str(s['provider']);
+    const model = s === null ? null : str(s['model']);
+    findings.push({
+      id,
+      verdict,
+      counted,
+      source,
+      seat:
+        s === null || provider === null || model === null
+          ? null
+          : { provider, model, sharesImplementerVendor: s['sharesImplementerVendor'] === true },
+      reason: str(row['reason']),
+      countedReason: str(row['countedReason']),
+    });
+  }
+  return { round: num(root['round']), scope: str(root['scope']), findings };
+}
+
+/** What the confirmation's diff covered, in a sentence. */
+export function scopeLine(scope: string | null): string {
+  if (scope === 'since-last-review') return 'Checked against the final fix’s own change, from the commit before it to the working tree.';
+  if (scope === 'whole-run') {
+    return 'Checked against the whole run’s diff: the final fix’s own change could not be told apart from the earlier rounds’.';
+  }
+  return scope === null ? 'The file does not say what the check was shown.' : `Checked against: ${scope}.`;
+}
+
+/**
+ * Who settled one confirmation: *"checked by codex/gpt-5.5"*, *"its reproducer
+ * passed"*, or *"no check ran"* when the diff could not be read and no turn was
+ * bought - which must never read as a check.
+ */
+export function confirmedBy(c: Confirmation): string {
+  if (c.source === 'reproducer') return 'its reproducer passed after the fix';
+  if (c.source === 'unread-diff') return 'no check ran';
+  if (c.seat === null) return `source: ${c.source}`;
+  const same = c.seat.sharesImplementerVendor ? ', on the implementer’s own vendor' : '';
+  return `checked by ${c.seat.provider}/${c.seat.model}${same}`;
 }
 
 /**

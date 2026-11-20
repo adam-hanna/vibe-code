@@ -1,17 +1,35 @@
 import { useEffect, useRef, useState } from 'react';
 import { SeverityChip } from '../design';
+import { Markdown } from '../design/Markdown';
 import { Badge } from '@/ui/badge';
 import { Button } from '@/ui/button';
 import { cn } from '@/lib/utils';
 import { Counts } from './Counts';
 import { Caret, Section } from './Disclosure';
-import { ballotLine, foundByLine, ofKind, outcomeFor, readDispositions, readReport, revisionRan, votesLine } from './artifacts';
+import {
+  CONSENSUS_WORDS,
+  confirmedBy,
+  consensusFilters,
+  disagreedFiles,
+  foundByLine,
+  inConsensus,
+  ofKind,
+  outcomeEntries,
+  panelLine,
+  priorLines,
+  readConfirmations,
+  readDispositions,
+  readReport,
+  revisionRan,
+  scopeLine,
+  votesLine,
+} from './artifacts';
 import { SEVERITIES, gateSentence } from './model';
 import { DOCUMENT, EMPTY, FILE, HEAD, LABEL, NOTE, PANE } from './pane';
 import { useArtifact, useArtifacts, noText } from './useArtifacts';
 import { sizeOf } from './PlansPane';
 import type { Severity } from '../design';
-import type { Answerer, Classified, FullFinding } from './artifacts';
+import type { Answerer, Classified, Consensus, FullFinding, JudgedFile } from './artifacts';
 import type { Census, FinderMerge, FindingRow, FixDispositionsFrame } from './model';
 import type { RoundCard } from './rounds';
 import { shownRound } from './rounds';
@@ -64,8 +82,11 @@ function citation(c: FullFinding['citations'][number]): string {
 const FACTS = 'm-0 flex list-none flex-col gap-1 p-0 text-body-sm text-secondary';
 /** A caption over prose behind the fold: label weight, because it is not a title of its own. */
 const CAPTION = cn(LABEL, 'mt-2 mb-0 font-bold');
-/** Prose the report carried. `pre-wrap`, because a reviewer's paragraphs are its own. */
-const PROSE = 'm-0 whitespace-pre-wrap text-body text-secondary';
+/**
+ * Prose the report carried, drawn as the Markdown the judge wrote it in (#530).
+ * It was a `pre-wrap` paragraph, so `**foo**` and backticks showed literally.
+ */
+const PROSE = 'text-secondary';
 /** A field the report did not carry, named as absent rather than left blank. */
 const ABSENT = 'm-0 text-body-sm text-tertiary';
 
@@ -191,8 +212,11 @@ function Finding({
   row: FindingRow | null;
   /** How many finders reported this round, or null when no merge frame said. */
   reported: number | null;
-  /** What the fixer did with it and what came after, as `outcomeLine` says it (#393). */
-  outcome: readonly string[];
+  /**
+   * What the fixer did with it and what came after, as `outcomeLine` says it
+   * (#393), with the reason split off to be drawn as prose (#530).
+   */
+  outcome: readonly { line: string; head: string; reason: string | null }[];
 }) {
   const [open, setOpen] = useState(false);
   // The report file says the vote moved it; the census row only says a guard did (#388 Part C).
@@ -227,8 +251,8 @@ function Finding({
             {finding.votes !== null && <Badge>{votesLine(finding.votes)}</Badge>}
             {/* What the fixer did with it, below the vote and beside the
                 severity history (#393). Later evidence is its own badge. */}
-            {outcome.map((line) => (
-              <Badge key={line}>{line}</Badge>
+            {outcome.map((o) => (
+              <Badge key={o.line}>{o.head}</Badge>
             ))}
             {finding.deferred && <Badge>deferred — real, and for separate work</Badge>}
             {/* The guards' downgrade, which is a fact about the severity above
@@ -249,12 +273,42 @@ function Finding({
               <Badge>no reproducer was written</Badge>
             )}
           </div>
-          {/* One line per ballot: the seat, its vote and its reason. Every
-              verifier saw the same claim and none saw another's vote. */}
+          {/* The disposition's reason, under the badge that names it: prose
+              the fixer or the planner wrote, so drawn as Markdown (#530). */}
+          {outcome.some((o) => o.reason !== null) && (
+            <ul className={cn(FACTS, 'gap-2')}>
+              {outcome.map((o) =>
+                o.reason === null ? null : (
+                  <li key={o.line} className="flex flex-col gap-1">
+                    <span>{o.head}</span>
+                    <Markdown text={o.reason} className="text-body-sm text-secondary" />
+                  </li>
+                ),
+              )}
+            </ul>
+          )}
+          {/* One entry per ballot: the seat, its vote and its reason. Every
+              verifier saw the same claim and none saw another's vote. The
+              reason is the verifier's prose, drawn as Markdown (#530). */}
           {finding.votes !== null && finding.votes.ballots.length > 0 && (
-            <ul className={FACTS}>
+            <ul className={cn(FACTS, 'gap-2')}>
               {finding.votes.ballots.map((b) => (
-                <li key={b.seat}>{ballotLine(b)}</li>
+                <li key={b.seat} className="flex flex-col gap-1">
+                  <span>
+                    {b.seat}: {b.vote}
+                    {b.counted === b.vote ? '' : ` (counted as ${b.counted})`}
+                  </span>
+                  <Markdown text={b.reason} className="text-body-sm text-secondary" />
+                </li>
+              ))}
+            </ul>
+          )}
+          {/* What a seat declared this the same as, under the findings ledger
+              (#498). Nothing at all without it. */}
+          {finding.foundBy !== null && priorLines(finding.foundBy).length > 0 && (
+            <ul className={FACTS}>
+              {priorLines(finding.foundBy).map((line) => (
+                <li key={line}>{line}</li>
               ))}
             </ul>
           )}
@@ -263,14 +317,14 @@ function Finding({
           {finding.detail === null ? (
             <p className={ABSENT}>The report carried no detail for this finding.</p>
           ) : (
-            <p className={PROSE}>{finding.detail}</p>
+            <Markdown text={finding.detail} className={PROSE} />
           )}
 
           <h5 className={CAPTION}>What would fix it</h5>
           {finding.suggestedFix === null ? (
             <p className={ABSENT}>The report suggested no fix.</p>
           ) : (
-            <p className={PROSE}>{finding.suggestedFix}</p>
+            <Markdown text={finding.suggestedFix} className={PROSE} />
           )}
 
           <h5 className={CAPTION}>
@@ -355,6 +409,170 @@ export function GateHead({
   );
 }
 
+/**
+ * The round's panel in a line, under its head (#530): how many seats sat, how
+ * many reported, what the merge did, and what the vote came to - and each seat
+ * that failed, by its config path, with the error the core recorded.
+ *
+ * Nothing at all for a round with one seat and no vote, so a default round
+ * draws exactly what it did before.
+ */
+function PanelSummary({ finders, findings }: { finders: FinderMerge | null; findings: readonly FullFinding[] }) {
+  const line = panelLine(finders, findings);
+  const failed = finders?.failed ?? [];
+  if (line === null && failed.length === 0) return null;
+  return (
+    <div className="flex flex-col gap-1">
+      {line !== null && <p className="m-0 text-body-sm text-secondary">{line}</p>}
+      {failed.length > 0 && (
+        <ul className={FACTS}>
+          {failed.map((f) => (
+            <li key={`${f.seat}-${String(f.seq)}`}>
+              <Badge variant="alarm">seat failed</Badge> {f.seat}
+              {f.finder !== null && ` (finder ${String(f.finder)})`}
+              {f.label !== null && ` on ${f.label}`}
+              {f.error !== null && ` — ${f.error}`}. It contributed no findings.
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The filters over a panel round's findings (#530). Provenance stays off the
+ * finding row (#388), so a reader asking *which of these did only one seat
+ * see?* narrows the list here instead of opening every finding.
+ */
+function ConsensusBar({
+  options,
+  chosen,
+  onChoose,
+  count,
+}: {
+  options: readonly Consensus[];
+  chosen: Consensus;
+  onChoose: (c: Consensus) => void;
+  count: (c: Consensus) => number;
+}) {
+  return (
+    <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="Filter the findings by the panel">
+      <span className={LABEL}>show</span>
+      {options.map((c) => (
+        <Button
+          key={c}
+          size="sm"
+          variant={c === chosen ? 'secondary' : 'quiet'}
+          aria-pressed={c === chosen}
+          onClick={() => onChoose(c)}
+        >
+          {CONSENSUS_WORDS[c]} · {count(c)}
+        </Button>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * The judge files on which the seats did not all say the same (#404, #530).
+ * The combined verdict fails closed and is what the run acted on; this names
+ * who dissented, which the combined verdict cannot. Nothing for a round whose
+ * seats agreed, or that had one seat.
+ */
+function TestDisagreements({ files }: { files: readonly JudgedFile[] }) {
+  if (files.length === 0) return null;
+  return (
+    <>
+      <h5 className={CAPTION}>Where the seats disagreed about a change to the tests</h5>
+      <ul className={cn(FACTS, 'gap-2')}>
+        {files.map((f) => (
+          <li key={f.path} className="flex flex-col gap-1">
+            <span>
+              <code className="font-mono text-mono-sm text-primary">{f.path}</code>
+              {f.verdict !== null && (
+                <>
+                  {' '}
+                  <Badge>{f.verdict}, combined</Badge>
+                </>
+              )}
+            </span>
+            <ul className={cn(FACTS, 'pl-3')}>
+              {f.seats.map((v) => (
+                <li key={v.seat}>
+                  {v.seat} {v.provider}/{v.model}: <Badge variant={v.verdict === 'not justified' ? 'alarm' : 'quiet'}>{v.verdict}</Badge>
+                  {v.reason !== null && ` — ${v.reason}`}
+                </li>
+              ))}
+            </ul>
+          </li>
+        ))}
+      </ul>
+    </>
+  );
+}
+
+/**
+ * What the check after the final fix said about each carried finding (#489,
+ * #530), shown with the review round the final fix answered. A verdict here
+ * never moved a severity or bought a round; it is a record for a person, and
+ * the pane says which check made it - a seat, a reproducer, or none at all.
+ */
+function FinalFixChecks({
+  dir,
+  runId,
+  file,
+  revision,
+}: {
+  dir: string;
+  runId: string;
+  file: Classified;
+  revision: number;
+}) {
+  const { read, failure } = useArtifact(dir, runId, file.name, revision);
+  const missing = noText(read, failure);
+  const confirmations = read?.kind === 'text' ? readConfirmations(read.text) : null;
+  return (
+    <>
+      <h5 className={CAPTION}>After the final fix</h5>
+      {missing !== null ? (
+        <p className={NOTE}>
+          <Badge>no record</Badge> {missing}
+        </p>
+      ) : read?.kind === 'text' && confirmations === null ? (
+        <p className={NOTE}>
+          <Badge variant="alarm">unreadable</Badge> {file.name} is not the shape this build understands.
+        </p>
+      ) : confirmations === null ? (
+        <p className={NOTE}>reading {file.name}…</p>
+      ) : (
+        <>
+          <p className={NOTE}>{scopeLine(confirmations.scope)}</p>
+          {confirmations.findings.length === 0 ? (
+            <p className={NOTE}>No carried finding has a verdict yet.</p>
+          ) : (
+            <ul className={cn(FACTS, 'gap-2')}>
+              {confirmations.findings.map((c) => (
+                <li key={c.id} className="flex flex-col gap-1">
+                  <span>
+                    <Badge variant={c.counted === 'fixed' ? 'live' : c.counted === 'still-present' ? 'alarm' : 'quiet'}>
+                      {c.counted}
+                    </Badge>{' '}
+                    <code className="font-mono text-mono-sm text-primary">{c.id}</code> — {confirmedBy(c)}
+                    {c.counted !== c.verdict && `; said ${c.verdict}, counted ${c.counted}`}
+                    {c.countedReason !== null && ` (${c.countedReason})`}
+                  </span>
+                  {c.reason !== null && <Markdown text={c.reason} className="text-body-sm text-secondary" />}
+                </li>
+              ))}
+            </ul>
+          )}
+        </>
+      )}
+    </>
+  );
+}
+
 /** The round's report, once its section is open. */
 function ReportBody({
   dir,
@@ -367,6 +585,7 @@ function ReportBody({
   nextReview = null,
   notRecorded = false,
   by = 'fixer',
+  finalChecks = null,
 }: {
   dir: string;
   runId: string;
@@ -384,7 +603,10 @@ function ReportBody({
   notRecorded?: boolean;
   /** Who answered the round: the fixer for a review, the planner for a critique (#457). */
   by?: Answerer;
+  /** The `final-fix-confirm-<n+1>.json` of the final fix that answered this review, or null (#530). */
+  finalChecks?: Classified | null;
 }) {
+  const [consensus, setConsensus] = useState<Consensus>('all');
   const { read, failure, loading } = useArtifact(dir, runId, name, revision);
   const missing = noText(read, failure);
   const fixed = useArtifact(dir, runId, dispositions?.name ?? null, revision);
@@ -427,6 +649,11 @@ function ReportBody({
   }
 
   const listed = report.findings.length;
+  const reported = finders?.reported ?? null;
+  const filters = consensusFilters(report.findings, reported);
+  // A filter this round does not offer (a reread that lost the votes) reads as all.
+  const showing = filters.includes(consensus) ? consensus : 'all';
+  const shown = report.findings.filter((f) => inConsensus(f, showing, reported));
   const counted =
     census === null ? null : SEVERITIES.reduce((n, s) => n + (census.counts[s] ?? 0), 0);
 
@@ -438,15 +665,30 @@ function ReportBody({
           arithmetic wearing the gate's clothes. The loop's own sentence where it
           blocked, never one composed from the counts. */}
       <GateHead census={census} verdict={report.verdict} />
+      {/* The panel under the gate's head (#530): nothing for a one-seat round. */}
+      <PanelSummary finders={finders} findings={report.findings} />
 
       {/* The summary is the paragraph a person reads before any individual
           finding, and no frame has ever carried it. */}
-      {report.summary !== null && <p className={PROSE}>{report.summary}</p>}
+      {report.summary !== null && <Markdown text={report.summary} className={PROSE} />}
+
+      <TestDisagreements files={disagreedFiles(report.testChanges)} />
+
+      {filters.length > 0 && listed > 0 && (
+        <ConsensusBar
+          options={filters}
+          chosen={showing}
+          onChoose={setConsensus}
+          count={(c) => report.findings.filter((f) => inConsensus(f, c, reported)).length}
+        />
+      )}
 
       {listed === 0 ? (
         <p className={NOTE}>This round reported no findings at all.</p>
+      ) : shown.length === 0 ? (
+        <p className={NOTE}>No finding of this round is {CONSENSUS_WORDS[showing]}.</p>
       ) : (
-        report.findings.map((f) => (
+        shown.map((f) => (
           <Finding
             key={f.id}
             finding={f}
@@ -455,8 +697,8 @@ function ReportBody({
             // round of an earlier session - the prose is still there, and what
             // is missing is what happened to the finding afterwards.
             row={census?.findings.find((r) => r.id === f.id) ?? null}
-            reported={finders?.reported ?? null}
-            outcome={outcomeFor(f.id, answering)}
+            reported={reported}
+            outcome={outcomeEntries(f.id, answering)}
           />
         ))
       )}
@@ -470,6 +712,8 @@ function ReportBody({
           {listed} of the {counted} findings behind them.
         </p>
       )}
+
+      {finalChecks !== null && <FinalFixChecks dir={dir} runId={runId} file={finalChecks} revision={revision} />}
     </>
   );
 }
@@ -531,6 +775,12 @@ export function ReportPane({
   // `plan-critique-<n>.json` writes `plan-dispositions-<n + 1>.json`, and the
   // critique of that revision is `plan-critique-<n + 1>.json`.
   const answers = kind === 'review' ? 'dispositions' : 'plan-dispositions';
+  // The final fix's confirmations answer the review before it, as its
+  // dispositions do (#530): `final-fix-confirm-<n + 1>.json` with `code-review-<n>.json`.
+  const finalChecksFor = (round: number | null): Classified | null =>
+    kind !== 'review' || round === null
+      ? null
+      : (ofKind(entries, 'final-fix-confirm').find((c) => c.round === round + 1) ?? null);
   const answering = (round: number | null): Classified | null =>
     round === null ? null : (ofKind(entries, answers).find((c) => c.round === round + 1) ?? null);
   const nextReviewOf = (round: number | null): Classified | null =>
@@ -649,6 +899,7 @@ export function ReportPane({
             nextReview={nextReviewOf(report.round)}
             notRecorded={unrecordedFor(report.round)}
             by={kind === 'review' ? 'fixer' : 'planner'}
+            finalChecks={finalChecksFor(report.round)}
           />
         </Section>
       ))}

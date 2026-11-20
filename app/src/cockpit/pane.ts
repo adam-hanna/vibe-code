@@ -37,9 +37,9 @@ export const NOTE = 'm-0 text-body-sm text-tertiary';
 export const FILE = 'font-mono text-mono-sm text-tertiary';
 
 /**
- * A document, as it is on disk. `pre` because a plan IS markdown and rendering it
- * would mean shipping a parser to make prose prettier - the thing a person reads
- * a plan version for is the exact words the critic was shown.
+ * A document, as it is on disk: a plan's raw text behind its toggle, and a file
+ * this build could not read. A plan is rendered as Markdown by default since
+ * #530; this is the view of the exact words the critic was shown.
  */
 export const DOCUMENT =
   'm-0 whitespace-pre-wrap rounded-sm border border-rule-card bg-chrome p-4 font-mono text-mono-sm leading-relaxed text-secondary [overflow-wrap:anywhere]';

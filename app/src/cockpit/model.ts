@@ -412,6 +412,21 @@ export interface Census {
  * fallback *"The gate blocked this round."* is for a block the loop reported
  * without a reason, not for a decision nobody reported.
  */
+/**
+ * The failures a merge frame closes: the last one per seat, in arrival order,
+ * and at most `missing` of them - the seats the frame itself says did not
+ * report. A failure beyond that count belongs to an attempt the round replaced.
+ */
+export function closedFailures(pending: readonly FinderFailure[], missing: number): readonly FinderFailure[] {
+  if (missing <= 0) return [];
+  const last = new Map<string, FinderFailure>();
+  for (const f of pending) {
+    last.delete(f.seat);
+    last.set(f.seat, f);
+  }
+  return [...last.values()].slice(-missing);
+}
+
 export function gateSentence(census: Census): string | null {
   if (census.pass === null) return null;
   return census.pass ? 'The gate passed.' : (census.reason ?? 'The gate blocked this round.');
@@ -439,6 +454,31 @@ export interface FinderMerge {
   merged: number | null;
   at: number;
   /** Arrival order, as a census has it (#285): what attaches it to a round. */
+  seq: number;
+  /**
+   * The seats that failed in the attempt this merge closed (#530), off
+   * `review_finder_failed` / `critique_finder_failed`.
+   *
+   * Only failures that arrived after the previous merge frame, the last one per
+   * finder, and never more than `finders - reported` of them: a round bought
+   * again after a stop re-runs every seat, so a failure from the attempt it
+   * replaced must not be named against a seat that then reported - the core's
+   * own rule for its summary. Empty when every seat reported.
+   */
+  failed: readonly FinderFailure[];
+}
+
+/**
+ * One additional finder that failed (#388 decision 7), as the event says it:
+ * the finder's number, its config path, the turn it failed on and the first
+ * line of the error. The event carries no provider or model, so none is shown.
+ */
+export interface FinderFailure {
+  round: number | null;
+  finder: number | null;
+  seat: string;
+  label: string | null;
+  error: string | null;
   seq: number;
 }
 
@@ -757,6 +797,11 @@ export interface Run {
   censuses: readonly Census[];
   /** Every finder round's merge, oldest first (#388 Part B). Empty without finders. */
   finderMerges: readonly FinderMerge[];
+  /**
+   * Every finder failure not yet closed by a merge frame (#530). A merge frame
+   * takes what belongs to it into its own `failed` and empties this.
+   */
+  finderFailures: readonly FinderFailure[];
   /** Every round's vote tally, oldest first (#388 Part C). Empty without verifiers. */
   voteTallies: readonly VoteTally[];
   /** Every review fix round's dispositions frame, oldest first (#393). */
@@ -997,6 +1042,7 @@ export function emptyRun(): Run {
     verify: [],
     censuses: [],
     finderMerges: [],
+    finderFailures: [],
     voteTallies: [],
     fixDispositions: [],
     spend: { tokens: null, costUsd: null, codexTokens: null, charges: [] },
@@ -2113,6 +2159,31 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
               findings: num(data['findings']),
               merged: num(data['merged']),
               at,
+              seq: id(),
+              failed: closedFailures(next.finderFailures, finders - reported),
+            },
+          ],
+          finderFailures: [],
+        };
+      }
+
+      // A seat that failed (#388 decision 7). Held until the merge frame that
+      // closes its attempt, which takes it; one that no merge follows - a stop
+      // mid-round - is never drawn against a round.
+      case 'review_finder_failed':
+      case 'critique_finder_failed': {
+        const seat = str(data['seat']);
+        if (seat === null) return next;
+        return {
+          ...next,
+          finderFailures: [
+            ...next.finderFailures,
+            {
+              round: num(data['round']),
+              finder: num(data['finder']),
+              seat,
+              label: str(data['label']),
+              error: str(data['error']),
               seq: id(),
             },
           ],
