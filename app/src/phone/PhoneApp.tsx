@@ -8,10 +8,14 @@ import { listen, local } from '../transport';
 import * as api from './api';
 import { bootStep } from './boot';
 import type { PhoneSettings } from './boot';
+import { Connecting, COVER, NOTE } from './Connecting';
 import { Desktops } from './Desktops';
 import { lockGate, resync } from './link';
 import { networkSignals } from './network';
+import { opening } from './opening';
+import type { OpenAnswer } from './opening';
 import { Pair } from './Pair';
+import { called } from './reason';
 
 /**
  * The phone app (#346): the lock, the paired desktops and pairing, in front of
@@ -26,21 +30,25 @@ import { Pair } from './Pair';
  * range before the cockpit exists, and lets the held events through only once
  * the cockpit is listening (`link.ts`). Leaving a desktop reloads the page, so
  * nothing the cockpit read about one desktop is drawn for the next.
+ *
+ * While the first open dials, the loading screen says so and offers the
+ * desktops list (`Connecting.tsx`). Walking away stops the dial and drops its
+ * answer, however late it comes (`opening.ts`).
  */
 
 type Screen = 'loading' | 'desktops' | 'pair' | 'cockpit';
-
-const COVER = 'fixed inset-0 z-50 flex flex-col items-center justify-center gap-4 bg-page p-6 text-center';
-const NOTE = 'm-0 max-w-[40ch] text-body-sm text-tertiary';
 
 export function PhoneApp() {
   const [settings, setSettings] = useState<PhoneSettings | null>(null);
   const [locked, setLocked] = useState(false);
   const [screen, setScreen] = useState<Screen>('loading');
   const [problem, setProblem] = useState<string | null>(null);
+  /** The desktop the loading screen is dialling, as this phone calls it. */
+  const [dialling, setDialling] = useState<string | null>(null);
   const started = useRef(false);
   const entering = useRef(false);
   const notifyOn = useRef(true);
+  const opener = useRef(opening((id) => local<OpenAnswer>('phone_open', { id })));
   // The phone's Rust refuses the session and the release while locked, so a
   // connection that comes back under the cover waits for the unlock here.
   const gate = useRef(lockGate());
@@ -85,9 +93,12 @@ export function PhoneApp() {
   }, []);
 
   const open = useCallback(
-    async (id: string | null) => {
-      const answered = await local<{ generation?: number | null; reason?: unknown }>('phone_open', { id });
-      if (typeof answered.generation === 'number') await enter();
+    async (id: string) => {
+      const answered = await opener.current.open(id);
+      // Overtaken by a later open, or by *Choose another desktop*: the screen
+      // is the person's now, and this answer moves nothing.
+      if (answered === null) return;
+      if (answered.connected) await enter();
       else setScreen('desktops');
     },
     [enter],
@@ -100,8 +111,11 @@ export function PhoneApp() {
     try {
       const list = await api.desktops();
       const current = list.current;
-      if (current !== null && list.desktops.some((d) => d.id === current)) await open(current);
-      else setScreen('desktops');
+      const entry = list.desktops.find((d) => d.id === current);
+      if (current !== null && entry !== undefined) {
+        setDialling(called(entry));
+        await open(entry.id);
+      } else setScreen('desktops');
     } catch (err) {
       setProblem(err instanceof Error ? err.message : String(err));
       setScreen('desktops');
@@ -113,8 +127,10 @@ export function PhoneApp() {
     const stops: Promise<() => void>[] = [
       listen('phone://locked', () => lock(true)),
       // The open desktop came back after the first open failed: draw it.
+      // Not after the person walked away from the dial: a connection that came
+      // up just before the stop is not the screen they chose.
       listen('phone://connected', () => {
-        if (started.current) void enter();
+        if (started.current && opener.current.follows()) void enter();
       }),
     ];
     void (async () => {
@@ -149,6 +165,21 @@ export function PhoneApp() {
     window.location.reload();
   };
 
+  /**
+   * *Choose another desktop*, while the first open dials. Before the dial has
+   * connected, stop it and go to the list; once the cockpit is being prepared
+   * the host has begun catching that desktop's events, so leave the way the
+   * cockpit does, by stopping and reloading onto the list.
+   */
+  const choose = () => {
+    if (entering.current) {
+      void leave();
+      return;
+    }
+    setScreen('desktops');
+    void opener.current.abandon();
+  };
+
   const changed = (next: PhoneSettings) => {
     setSettings(next);
     notifyOn.current = next.notify;
@@ -180,7 +211,7 @@ export function PhoneApp() {
   if (locked) return cover;
 
   if (settings === null || screen === 'loading') {
-    return <div className={COVER}>{problem !== null && <p className={NOTE}>{problem}</p>}</div>;
+    return <Connecting dialling={dialling} problem={problem} onChoose={choose} />;
   }
 
   if (screen === 'pair') {
