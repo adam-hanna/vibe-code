@@ -44,6 +44,7 @@ export type ArtifactKind =
   | 'plan-dispositions'
   | 'fix-report'
   | 'final-fix-confirm'
+  | 'near-pairs'
   | 'other';
 
 export interface Classified {
@@ -83,6 +84,10 @@ const PATTERNS: readonly { kind: ArtifactKind; re: RegExp }[] = [
   // The final fix's confirmations (#489, read since #530). Its round is the
   // FINAL FIX round's, so it belongs with `code-review-<round - 1>.json`.
   { kind: 'final-fix-confirm', re: /^final-fix-confirm-(\d+)\.json$/ },
+  // The near pairs a fix round's prompt named (#462, written since #530). Its
+  // round is the FIX round's - `recordNearPairs` runs after the increment, in
+  // the ordinary and the final fix alike - so it answers `code-review-<round - 1>.json`.
+  { kind: 'near-pairs', re: /^fix-near-pairs-(\d+)\.json$/ },
   { kind: 'answers', re: /^answers-(\d+)\.json$/ },
   { kind: 'plan', re: /^plan-(\d+)\.json$/ },
 ];
@@ -943,4 +948,182 @@ export function readPlanMarkdown(text: string): string | null {
 export function planText(name: string, text: string): string {
   if (name.endsWith('.json')) return readPlanMarkdown(text) ?? text;
   return text;
+}
+
+// ---- what each seat said on its own (#530) ----------------------------------
+
+/**
+ * One seat of a panel round, as the pane offers it: the seat's own report file
+ * when the listing has one, and the failure the merge frame closed for it when
+ * there is one.
+ *
+ * `k` is the core's `FinderReport.k`: 0 is `roles.reviewer` (or `roles.critic`),
+ * and a finder is its place in `review.finders` (or `critique.finders`) plus
+ * one. A seat with neither a file nor a failure is still a slot, so a seat the
+ * merge counted is never silently left out.
+ */
+export interface SeatSlot {
+  k: number;
+  /** `code-review-<n>.seat-<k>.json`, or null when the listing has no such file. */
+  name: string | null;
+  failure: { seat: string; provider: string | null; model: string | null; label: string | null; error: string | null } | null;
+}
+
+/** The seat file's name, as `writeSeatReports` writes it: `<report base>.seat-<k>.json`. */
+const SEAT_FILE = /^(plan-critique|code-review)-(\d+)\.seat-(\d+)\.json$/;
+
+/**
+ * The seats of one round, `k` ascending, or empty when the listing holds no
+ * seat file for it - a round without finders, or a run from before the core
+ * kept them - so such a round draws exactly what it drew before.
+ *
+ * Classified here rather than by `classify`, which keeps one round number per
+ * name: a seat file classified as a review would add a section of its own.
+ * The seats a file is missing for come from the merge frame's `finders`, the
+ * count of seats that sat (never the configured count), each with the failure
+ * the frame closed for it when it has one.
+ */
+export function seatSlots(
+  entries: readonly ArtifactEntry[],
+  kind: 'review' | 'critique',
+  round: number,
+  merge: {
+    finders: number;
+    failed: readonly { finder: number | null; seat: string; provider?: string | null; model?: string | null; label: string | null; error: string | null }[];
+  } | null,
+): SeatSlot[] {
+  const base = kind === 'review' ? 'code-review' : 'plan-critique';
+  const files = new Map<number, string>();
+  for (const e of entries) {
+    if (e.kind !== 'file') continue;
+    const m = SEAT_FILE.exec(e.name);
+    if (m === null || m[1] !== base || Number(m[2]) !== round) continue;
+    const k = Number(m[3]);
+    if (Number.isFinite(k)) files.set(k, e.name);
+  }
+  if (files.size === 0) return [];
+  const ks = new Set(files.keys());
+  if (merge !== null) for (let k = 0; k < merge.finders; k++) ks.add(k);
+  return [...ks]
+    .sort((a, b) => a - b)
+    .map((k) => {
+      const f = merge?.failed.find((x) => x.finder === k) ?? null;
+      return {
+        k,
+        name: files.get(k) ?? null,
+        failure:
+          f === null
+            ? null
+            : { seat: f.seat, provider: f.provider ?? null, model: f.model ?? null, label: f.label, error: f.error },
+      };
+    });
+}
+
+/** One seat's own report: who it was, and the report as `readReport` reads it. */
+export interface SeatReport {
+  seat: string | null;
+  provider: string | null;
+  model: string | null;
+  report: Report;
+}
+
+/**
+ * A seat file, or null when it is not JSON or not a report. The seat's own
+ * keys (`seat`, `provider`, `model`) drop alone when unreadable, as every
+ * other reader here drops a field.
+ */
+export function readSeatReport(text: string): SeatReport | null {
+  const report = readReport(text);
+  if (report === null) return null;
+  let root: Record<string, unknown> | null = null;
+  try {
+    root = record(JSON.parse(text) as unknown);
+  } catch {
+    return null;
+  }
+  return {
+    seat: str(root?.['seat']),
+    provider: str(root?.['provider']),
+    model: str(root?.['model']),
+    report,
+  };
+}
+
+/**
+ * A seat's name on its tab: `<seat> <provider>/<model>` where the file or the
+ * failure says them, the seat's config path alone where only that is known,
+ * and its finder number where nothing is - never a vendor guessed from a path.
+ */
+export function seatLabel(slot: SeatSlot, read: SeatReport | null): string {
+  const seat = read?.seat ?? slot.failure?.seat ?? null;
+  const provider = read?.provider ?? slot.failure?.provider ?? null;
+  const model = read?.model ?? slot.failure?.model ?? null;
+  if (seat === null) return slot.k === 0 ? 'first seat' : `finder ${String(slot.k)}`;
+  return provider !== null && model !== null ? `${seat} ${provider}/${model}` : seat;
+}
+
+/**
+ * The merged finding a seat's own finding went into, by the `foundBy` entry
+ * naming that seat and that id - the seat's own ids are the ids `foundBy`
+ * names. Null when no merged finding names it.
+ */
+export function mergedAs(merged: readonly FullFinding[], seat: string | null, id: string): string | null {
+  if (seat === null) return null;
+  return merged.find((f) => f.foundBy?.some((b) => b.seat === seat && b.id === id) === true)?.id ?? null;
+}
+
+// ---- the near pairs the fixer was told about (#462, #530) -------------------
+
+/** One pair of findings the fix prompt named as possibly one defect. */
+export interface NearPair {
+  first: string;
+  second: string;
+  path: string | null;
+  gap: number | null;
+}
+
+/**
+ * `fix-near-pairs-<n>.json`, or null when it is not JSON. A pair this build
+ * cannot read (no two ids) is dropped alone; a missing `path` or `gap` drops
+ * that key's words, not the pair.
+ */
+export function readNearPairs(text: string): { answers: number | null; pairs: readonly NearPair[] } | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text) as unknown;
+  } catch {
+    return null;
+  }
+  const root = record(parsed);
+  if (root === null) return null;
+  const pairs: NearPair[] = [];
+  for (const item of Array.isArray(root['pairs']) ? (root['pairs'] as unknown[]) : []) {
+    const row = record(item);
+    if (row === null) continue;
+    const first = str(row['first']);
+    const second = str(row['second']);
+    if (first === null || second === null) continue;
+    pairs.push({ first, second, path: str(row['path']), gap: num(row['gap']) });
+  }
+  return { answers: num(root['answers']), pairs };
+}
+
+/**
+ * What one finding's fold says about the pairs it is in: *"may be the same
+ * defect as b, the fixer was told (both cite src/a.ts, 1 line apart)"*. Both
+ * findings of a pair get a line, each naming the other. Empty for a finding in
+ * no pair.
+ */
+export function nearLines(id: string, pairs: readonly NearPair[]): string[] {
+  return pairs.flatMap((p) => {
+    const other = p.first === id ? p.second : p.second === id ? p.first : null;
+    if (other === null) return [];
+    const where =
+      p.path === null
+        ? ''
+        : p.gap === null
+          ? ` (both cite ${p.path})`
+          : ` (both cite ${p.path}, ${p.gap === 0 ? 'on the same line' : `${String(p.gap)} line${p.gap === 1 ? '' : 's'} apart`})`;
+    return [`may be the same defect as ${other}, the fixer was told${where}`];
+  });
 }

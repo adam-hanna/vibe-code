@@ -997,6 +997,11 @@ of them at once (#403; `1`, the default, is one after another) - see *Seats at o
   `review_finder_failed` and that finder contributes nothing. Losing an extra seat can only leave
   out what that seat alone would have raised, so the run falls back to what a default config
   does, and `review_finders_merged` says "2 of 3 reported".
+  The event's data is `round`, `finder`, `seat`, `label`, `error`, and since #530 `provider` and
+  `model` too (as the sentence already said them), so the window names the failed seat
+  `<seat> <provider>/<model>` without parsing prose. Additive: the sentence did not move, and an
+  older run's event without the two keys is drawn as before. `critique_finder_failed` is the
+  same runner and carries the same keys.
 - **The summary reads the last merge event, not a tally of failures.** `review_finders_merged`
   is recorded, and only an attempt that finished its merge writes one; a resumed round re-reviews
   from scratch, so a `review_finder_failed` from the attempt it replaced must not lower the
@@ -1199,7 +1204,9 @@ the gate. With `review.verifiers: []` nothing runs: no turn, no `votes` key, no 
 ### What each seat said, and the near pairs, kept for the window (#530)
 
 Groundwork for the review pane's per-seat view, with no behaviour change: nothing in the loop
-reads either file to decide, no prompt moves, and a round without finders writes neither.
+reads either file to decide, no prompt moves, and a round without finders writes neither. The
+window reads both: the per-seat view in the Review and Critique panes, and the near-pair marks
+in a finding's fold (`cockpit.md`).
 
 - **Each seat's own report.** The merge keeps only the winning finding's text, so a seat whose
   finding joined another's group kept nothing of what it said but `foundBy`'s seat, model and

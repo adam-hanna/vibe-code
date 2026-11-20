@@ -6598,7 +6598,10 @@ async function runFinderSeats<T = never>(
         'warn',
         phase.failed.id,
         `${phase.failed.noun} finder ${f.k} (${f.path}, ${provider}/${model}) failed on ${label}: ${error}`,
-        { round: phase.round, finder: f.k, seat: f.path, label, error },
+        // `provider` and `model` ride in the data as well as the sentence, so
+        // the window can name the seat that failed without parsing prose
+        // (#530). Additive: the sentence and the other keys are as they were.
+        { round: phase.round, finder: f.k, seat: f.path, label, error, provider, model },
       );
       return;
     }

@@ -667,7 +667,9 @@
         "finder": 2,
         "seat": "critique.finders[1]",
         "label": "critique-1-f2",
-        "error": "finder fell over"
+        "error": "finder fell over",
+        "provider": "claude",
+        "model": "default"
       }
     },
     {
@@ -940,7 +942,9 @@
       "finder": 2,
       "seat": "critique.finders[1]",
       "label": "critique-1-f2",
-      "error": "finder fell over"
+      "error": "finder fell over",
+      "provider": "claude",
+      "model": "default"
     },
     {
       "type": "critique_finders_merged",
