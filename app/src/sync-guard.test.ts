@@ -157,8 +157,11 @@ describe("the desktop's Rust: what a command changed is announced", () => {
       expect(controlRs).toContain(`("${name}", Reach::Event("desktop://changed"))`);
     }
     expect(keysRs.match(/desktop_changed\(app, crate::remote::Changed::Keys\)/g)).toHaveLength(2);
-    // The window's remote_set, a phone's that keeps the endpoint, one that stops it, and a revoke.
-    expect(remoteRs.match(/desktop_changed\(&?app, Changed::Remote\)/g)).toHaveLength(4);
+    // The window's remote_set, a phone's that keeps the endpoint, one that stops it, a revoke,
+    // and the start at launch or after a pairing code, which said nothing until #477.
+    expect(remoteRs.match(/desktop_changed\(&?app, Changed::Remote\)/g)).toHaveLength(5);
+    // And the retry worker, on each change of state an attempt causes (#477).
+    expect(remoteRs).toMatch(/move \|\| desktop_changed\(&told, Changed::Remote\)/);
     expect(sources['./pilot/keys.ts']).toMatch(/event\.payload === 'keys'/);
     expect(sources['./remote/remote.ts']).toMatch(/event\.payload === 'remote'/);
   });
