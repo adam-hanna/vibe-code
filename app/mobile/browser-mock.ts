@@ -196,6 +196,34 @@ function desktop(command: string, args: Json): unknown {
   }
 }
 
+/**
+ * `?slowDial` (or `?slowDial=<ms>`): `phone_open` answers after a wait, for
+ * seeing the connecting screen (#478) - the recorded desktop otherwise answers
+ * at once and the screen is never drawn. The default is past the stored
+ * address's 5s budget, so the *still trying* line shows.
+ *
+ * **A stop does not cut the slowed dial short**, unlike the phone's Rust: its
+ * answer, and a `phone://connected` with it, still arrive on the clock. That is
+ * the worst case for *Choose another desktop* - a dial that connected just as
+ * the person walked away - and the list must stay on screen when it lands.
+ */
+const SLOW_DIAL = (() => {
+  if (typeof location === 'undefined') return null;
+  const asked = new URLSearchParams(location.search).get('slowDial');
+  if (asked === null) return null;
+  const ms = Number(asked);
+  return asked !== '' && Number.isFinite(ms) && ms >= 0 ? ms : 8_000;
+})();
+
+function slowOpen(): Promise<Json> {
+  return new Promise((resolve) => {
+    setTimeout(() => {
+      void emit('phone://connected', { generation: 1 });
+      resolve({ generation: 1 });
+    }, SLOW_DIAL ?? 0);
+  });
+}
+
 /** The recorded desktop, as `mock.rs`'s `phone_desktops` lists it (#346). */
 const DESKTOP_ID = 'browser-mock-desktop';
 const ID_RANGE = 2 ** 40;
@@ -232,7 +260,8 @@ mockIPC(
           link: { id: DESKTOP_ID, phase: 'up', reason: null, path: 'direct', connectMs: null },
         };
       case 'phone_open':
-        return args['id'] === null ? { generation: null } : { generation: 1 };
+        if (args['id'] === null) return { generation: null };
+        return SLOW_DIAL === null ? { generation: 1 } : slowOpen();
       case 'phone_session':
         return { generation: 1, idBase: ID_RANGE };
       case 'phone_release':

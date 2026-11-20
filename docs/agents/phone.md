@@ -194,6 +194,22 @@ travel with it:
   network signal pokes**, whether or not `online` moved (a Wi-Fi to cellular handover is online
   both sides), and calls `endpoint.network_change()`; so does every return to the foreground. A
   close the desktop explained (`NOT_PAIRED`, `VERSION_MISMATCH`, `REMOTE_OFF`) waits for a poke only.
+- **The first open after the unlock is drawn, and can be walked away from** (#478). The loading
+  screen was an empty cover for the whole dial - up to about 20s for a desktop that is off. It is
+  now `Connecting.tsx`: *Starting…* until `phone_desktops` names the desktop last open, then
+  *Connecting to* it, with a *still trying* line once `HINT_WAIT_MS` has passed (pinned to
+  `HINT_DIAL_TIMEOUT` by a test; the webview cannot see which step the dial is on, only how long it
+  has waited, so the line promises no time). *Choose another desktop* goes to the list, and
+  `phone/opening.ts` makes that safe: it sends `phone_open` with no id, which aborts the dialling
+  loop and clears the desktop last open as leaving the cockpit does; the next open is not sent
+  until that stop is answered, because Tauri runs async commands concurrently and a stop that ran
+  second would end the new dial; and every open takes a ticket, so an answer from an overtaken
+  dial - one that connected just as the stop went out - moves nothing, and `phone://connected` is
+  ignored from a stop until the next open has been sent. Once the cockpit is being prepared the
+  host has begun catching that desktop's events, so the button then leaves by reload, as the
+  cockpit's Desktops button does. `npm run dev:mobile:browser` with `?slowDial` (or
+  `?slowDial=<ms>`) delays the mock's answer to show the screen; it does not cut a slowed dial
+  short on a stop, so the late success arrives and the list has to hold.
 - **The phone's list is a file its Rust owns** (`vibe_remote::paired`), written by temporary file
   and rename, every read-modify-write under one lock, and never overwritten when it cannot be read.
   `seen` and `set_relay` never bring back a desktop an unpair removed while a probe was out.
