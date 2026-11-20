@@ -101,7 +101,44 @@ pub fn open(app: &AppHandle) -> Option<PathBuf> {
 /// copy for the build that does not.
 pub fn app(line: &str) {
     eprintln!("{line}");
+    #[cfg(test)]
+    heard::push(line);
     keep("app ", line);
+}
+
+/// What `app` was given on this thread, for a test to read (#476).
+///
+/// The file is one per process and opened from an `AppHandle`, so a test
+/// cannot point it anywhere of its own; and the parallel test threads would
+/// interleave in one file anyway. This is the line `app` is about to keep,
+/// recorded per thread, so a test that drives a caller sees exactly the lines
+/// that caller would have written, and no other test's. Nothing records until
+/// [`heard::listen`] is called, and none of it is compiled outside tests.
+#[cfg(test)]
+pub(crate) mod heard {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static LINES: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };
+    }
+
+    pub(super) fn push(line: &str) {
+        LINES.with(|lines| {
+            if let Some(lines) = lines.borrow_mut().as_mut() {
+                lines.push(line.to_string());
+            }
+        });
+    }
+
+    /// Start recording on this thread, dropping anything recorded before.
+    pub(crate) fn listen() {
+        LINES.with(|lines| *lines.borrow_mut() = Some(Vec::new()));
+    }
+
+    /// The lines recorded since `listen`, and record afresh from here.
+    pub(crate) fn take() -> Vec<String> {
+        LINES.with(|lines| lines.borrow_mut().as_mut().map(std::mem::take).unwrap_or_default())
+    }
 }
 
 /// A line the host wrote, kept but not re-printed.
