@@ -69,7 +69,7 @@ import {
   turnTimeoutMs,
 } from '@src/roles.js';
 import type { Access, FinderEntry, Role, RoleSpec, RoleTable, VerifierEntry } from '@src/roles.js';
-import { mergeAcrossFinders } from '@src/finder-merge.js';
+import { mergeAcrossFinders, nearPairs } from '@src/finder-merge.js';
 import { inlineLiteral, literal } from '@src/literal.js';
 import { runSeatGroup } from '@src/seat-group.js';
 import type { FinderMerge, FinderReport } from '@src/finder-merge.js';
@@ -119,6 +119,7 @@ import {
   takePendingFindings,
   tryRecordEvent,
   verificationCaveat,
+  writeAtomic,
   writeCheckpoint,
 } from '@src/run.js';
 import {
@@ -2263,6 +2264,30 @@ function announceFixRound(state: RunState): void {
 }
 
 /**
+ * The pairs the fix prompt is about to name under *Findings that may be one
+ * defect* (#462), recorded for the window as `fix-near-pairs-<n>.json` (#530).
+ * `<n>` is the fix round's, as `fix-dispositions-<n>.json`'s is, so it answers
+ * `code-review-<n - 1>.json`. Computed from the same findings `fixPrompt` is
+ * handed, by the same `nearPairs`, so the file says what the fixer was told.
+ *
+ * Groundwork, with no behaviour change: nothing reads it to decide, and with no
+ * pair - every review without finders - no file is written. Through
+ * `writeAtomic`, not `artifact`, so the round's narration is what it was; a
+ * stale file from an attempt that named pairs is removed when this one names
+ * none.
+ */
+function recordNearPairs(state: RunState, findings: readonly Finding[], label: string): void {
+  const name = `fix-near-pairs-${state.reviewRound}.json`;
+  const pairs = nearPairs(findings);
+  if (pairs.length === 0) {
+    removeArtifact(state, name);
+    return;
+  }
+  const body = { round: state.reviewRound, answers: state.reviewRound - 1, label, pairs };
+  writeAtomic(state.dir, name, JSON.stringify(body, null, 2));
+}
+
+/**
  * The carried-P1 final fix round: the turn, its record, the reproducers run
  * once more, OUTSTANDING.md, and the commit.
  *
@@ -2369,6 +2394,7 @@ async function runFinalFix(
   );
   for (const f of [...tolerated, ...nonBlocking]) log.info(`  ~ ${f.title}`);
 
+  recordNearPairs(state, findings, `final-fix-${state.reviewRound}`);
   const finalFix = await writeTurn(
     state,
     cfg,
@@ -2557,6 +2583,7 @@ async function runFixRound(
       blocking: blockingFindings(findings).length,
     },
   });
+  recordNearPairs(state, findings, `fix-${state.reviewRound}`);
   const fix = await writeTurn(
     state,
     cfg,
@@ -6355,6 +6382,12 @@ interface FinderPhase<T = never> extends SeatPhase {
   }[];
   /** The event a failed finder records, and the noun its sentence opens with. */
   failed: { id: string; noun: string };
+  /**
+   * The file one seat's own report is written to, beside the round's (#530):
+   * `code-review-<n>.seat-<k>.json` or `plan-critique-<n>.seat-<k>.json`, `k`
+   * as `FinderReport.k`. A record for the window; nothing in the loop reads it.
+   */
+  seatArtifact: (k: number) => string;
   merged: (m: { seats: number; reported: number; raised: number; merge: FinderMerge }) => SeatEvent;
   /**
    * A phase's own reading of each part's output, kept per part in the finder's
@@ -6424,6 +6457,40 @@ async function seatFinishing<T>(
       id: 'turn_finished',
       data: { label, role: phase.role, kind, round: phase.round },
     });
+  }
+}
+
+/**
+ * Each reporting seat's own report, as it stood before the merge across seats
+ * (#530): the seat's parts already merged with `mergeReviewReports`, grounded,
+ * and carrying the ids that seat used - the ids `foundBy` names. The merge keeps
+ * only the winning finding's text, so without this a seat whose finding joined
+ * another's group keeps nothing of what it said but its seat, model and id.
+ *
+ * Groundwork, with no behaviour change. Nothing in the loop reads these files:
+ * no prompt, guard, vote, gate or summary. Written only when the phase seated
+ * finders, so a round without them writes no new file. Written through
+ * `writeAtomic` rather than `artifact`, so the round's narration is what it
+ * was (`seat-runners-pin` pins every line); the round's own report is written
+ * after this through `artifact`, and its `artifact_written` is what tells the
+ * window to list the directory again, which finds these with it.
+ *
+ * A seat that did not report this attempt has its file removed: a round bought
+ * again after a stop must not leave an earlier attempt's report under a seat
+ * that failed this time.
+ */
+function writeSeatReports<T>(
+  state: RunState,
+  phase: FinderPhase<T>,
+  entries: readonly FinderEntry[],
+  all: readonly FinderReport[],
+): void {
+  for (const r of all) {
+    const body = { round: phase.round, k: r.k, seat: r.seat, provider: r.provider, model: r.model, ...r.report };
+    writeAtomic(state.dir, phase.seatArtifact(r.k), JSON.stringify(body, null, 2));
+  }
+  for (const f of entries) {
+    if (!all.some((r) => r.k === f.k)) removeArtifact(state, phase.seatArtifact(f.k));
   }
 }
 
@@ -6555,6 +6622,7 @@ async function runFinderSeats<T = never>(
     ...slots,
   ];
   const merge = mergeAcrossFinders(all);
+  writeSeatReports(state, phase, entries, all);
   const seats = entries.length + 1;
   const raised = all.reduce((n, r) => n + r.report.findings.length, 0);
   // Recorded, not narration only: this is the one account of how many finders
@@ -6742,6 +6810,7 @@ function critiqueFinderPhase(
       },
     ],
     failed: { id: 'critique_finder_failed', noun: 'Critique' },
+    seatArtifact: (k) => `plan-critique-${round}.seat-${k}.json`,
     merged: ({ seats, reported, raised, merge }) => ({
       id: 'critique_finders_merged',
       message:
@@ -7198,6 +7267,7 @@ async function runReview(
               })),
             ...(ledger === undefined ? {} : { priorIds: checkPriorIds }),
             failed: { id: 'review_finder_failed', noun: 'Review' },
+            seatArtifact: (k) => `code-review-${round}.seat-${k}.json`,
             // Each part's test verdicts, combined below with the reviewer's (#404).
             extra: parseTestVerdicts,
             merged: ({ seats, reported, raised, merge }) => ({
