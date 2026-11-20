@@ -71,9 +71,28 @@ with it:
   one line in `vibe-desktop.log`** (#476): off, no device key, a key that could not be read (with
   the keychain's own error, never the bytes), a bind error, an endpoint up, and one bound for
   settings that moved meanwhile. A 1.9.0 start whose keyring daemon had crashed logged nothing,
-  and finding why took `journalctl` and a count of UDP sockets. Each pass logs, undeduplicated:
-  a reconcile runs only at launch, after the first pairing code and on a settings change, never
-  on a timer, so a repeated line is a person trying again.
+  and finding why took `journalctl` and a count of UDP sockets. Each of those passes logs,
+  undeduplicated: they run only at launch, after the first pairing code and on a settings change,
+  so a repeated line from one is a person trying again.
+- **A failure that passes by itself is retried; the rest wait for the person** (#477). Once a
+  keychain read failed at launch, remote access stayed down until it was toggled: on 2026-10-26
+  gnome-keyring was back a second after its crash, and nothing asked again. Now one retry worker
+  per app tries a keychain read that failed with keyring's `PlatformFailure`, and a bind error,
+  after 2s, 5s, 15s, 30s and then every 60s while the switch is on, with no cap. The schedule is a
+  choice, not a measurement. A locked keychain or a dismissed unlock prompt (`NoStorageAccess`) is
+  never retried, because keyring unlocks a locked item and so raises the prompt: a retry would put
+  it on screen every minute. A malformed key and no key are not retried either. Settings says
+  which: *trying again by itself*, or what to do. The read runs on a blocking thread outside the
+  lock, because an unanswered prompt can hold it indefinitely. Every `remote_set` moves a
+  generation under the lock, which ends the episode, and a person's change that fails again
+  starts the schedule from its first step. Each attempt is checked under the lock before its read
+  is dispatched and again before its result is applied, so nothing is read once off, or once a
+  pairing code's start made the attempt unnecessary. The retry logs every attempt during the ramp,
+  and at the 60s cadence only a failure whose sentence changed: the log is never rotated, and a
+  desktop with no Secret Service would otherwise add 1,440 identical lines a day. It always logs
+  the recovery and the end of an episode. Each change of state an attempt causes is pushed with
+  `desktop://changed`, and so is the end of the launch's start. **Known gap**: the launch,
+  `remote_set`, phone and pairing paths still read the key under the lock.
 - **A phone's closing change answers first.** Turning access off from a phone closes that
   phone's own connection. So the phone's call takes the lock before it answers. It answers
   with the decided state. The stop then waits on `Written` until the peer has acknowledged

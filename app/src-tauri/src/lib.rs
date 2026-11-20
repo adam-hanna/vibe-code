@@ -220,7 +220,10 @@ pub fn run() {
             // The endpoint a phone dials (#342), only while the switch in
             // `remote.json` is on and only once a device key exists - with or
             // without a window (#344). It binds on Tauri's runtime and does not
-            // hold up the window.
+            // hold up the window. The retry worker first: it parks until a
+            // start fails in a way that passes by itself (#477), and a failure
+            // armed before it first runs is still seen.
+            remote::spawn_retries(app.handle());
             remote::start(app.handle());
 
             let quit = MenuItem::with_id(app, "quit", "Quit Vibe", true, None::<&str>)?;
