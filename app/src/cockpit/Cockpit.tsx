@@ -3335,6 +3335,9 @@ export function Cockpit({
                 now={now}
                 compact
                 hostPid={past ? null : (shownLive?.pid ?? null)}
+                // The review rounds' judge changes (#460), from the run the
+                // column draws and the repository the panes read.
+                judge={{ dir: shownDir, runId: shownRunId, revision: run.artifacts.length }}
                 onOpen={(next, round) => {
                   open(next, round);
                   shutSheets();

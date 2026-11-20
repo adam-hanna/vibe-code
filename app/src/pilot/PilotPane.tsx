@@ -1997,6 +1997,12 @@ ${frame.text}`, turn, origin.current))) {
     () => logOf(logRun, conversation.replies),
     [logRun, conversation.replies],
   );
+  /**
+   * Where a review card reads its round's judge changes from (#460): the
+   * log's own run, in this conversation's repository. Re-read as the run says
+   * it wrote something, the panes' rule.
+   */
+  const judge = logRun === null ? undefined : { dir, runId, revision: logRun.artifacts.length };
 
   return (
     <div className="relative flex min-h-0 flex-1 flex-col bg-panel">
@@ -2220,7 +2226,7 @@ ${frame.text}`, turn, origin.current))) {
             said. */}
         {entries.map((entry) =>
           entry.kind === 'round' ? (
-            <RoundCard key={`round-${entry.card.key}`} card={entry.card} onOpen={onOpen} />
+            <RoundCard key={`round-${entry.card.key}`} card={entry.card} onOpen={onOpen} judge={judge} />
           ) : entry.reply.cleared === true ? (
             // Where the pilot's memory starts again: a rule across the log with
             // the reason on it, because a cleared context is a fact about every

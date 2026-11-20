@@ -179,7 +179,7 @@ describe('each seat’s test verdict', () => {
   test('a round without finders, or without the field, has nothing to name', () => {
     expect(report(undefined)?.testChanges).toEqual([]);
     const solo = report({ files: [{ path: 'a.test.ts', verdict: 'unjudged' }] })?.testChanges ?? [];
-    expect(solo).toEqual([{ path: 'a.test.ts', verdict: 'unjudged', seats: [] }]);
+    expect(solo).toEqual([{ path: 'a.test.ts', verdict: 'unjudged', reason: null, seats: [] }]);
     expect(disagreedFiles(solo)).toEqual([]);
   });
 

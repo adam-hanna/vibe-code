@@ -5,12 +5,12 @@ import { Badge } from '@/ui/badge';
 import { Button } from '@/ui/button';
 import { cn } from '@/lib/utils';
 import { Counts } from './Counts';
+import { JudgeChanges } from './JudgeChanges';
 import { Caret, Section } from './Disclosure';
 import {
   CONSENSUS_WORDS,
   confirmedBy,
   consensusFilters,
-  disagreedFiles,
   foundByLine,
   inConsensus,
   mergedAs,
@@ -36,7 +36,7 @@ import { useArtifact, useArtifactReads, useArtifacts, noText } from './useArtifa
 import type { Loaded } from './useArtifacts';
 import { sizeOf } from './PlansPane';
 import type { Severity } from '../design';
-import type { Answerer, Classified, Consensus, FullFinding, JudgedFile, NearPair, SeatReport, SeatSlot } from './artifacts';
+import type { Answerer, Classified, Consensus, FullFinding, NearPair, SeatReport, SeatSlot } from './artifacts';
 import type { Census, FinderMerge, FindingRow, FixDispositionsFrame } from './model';
 import type { RoundCard } from './rounds';
 import { shownRound } from './rounds';
@@ -507,44 +507,6 @@ function ConsensusBar({
 }
 
 /**
- * The judge files on which the seats did not all say the same (#404, #530).
- * The combined verdict fails closed and is what the run acted on; this names
- * who dissented, which the combined verdict cannot. Nothing for a round whose
- * seats agreed, or that had one seat.
- */
-function TestDisagreements({ files }: { files: readonly JudgedFile[] }) {
-  if (files.length === 0) return null;
-  return (
-    <>
-      <h5 className={CAPTION}>Where the seats disagreed about a change to the tests</h5>
-      <ul className={cn(FACTS, 'gap-2')}>
-        {files.map((f) => (
-          <li key={f.path} className="flex flex-col gap-1">
-            <span>
-              <code className="font-mono text-mono-sm text-primary">{f.path}</code>
-              {f.verdict !== null && (
-                <>
-                  {' '}
-                  <Badge>{f.verdict}, combined</Badge>
-                </>
-              )}
-            </span>
-            <ul className={cn(FACTS, 'pl-3')}>
-              {f.seats.map((v) => (
-                <li key={v.seat}>
-                  {v.seat} {v.provider}/{v.model}: <Badge variant={v.verdict === 'not justified' ? 'alarm' : 'quiet'}>{v.verdict}</Badge>
-                  {v.reason !== null && ` — ${v.reason}`}
-                </li>
-              ))}
-            </ul>
-          </li>
-        ))}
-      </ul>
-    </>
-  );
-}
-
-/**
  * What the check after the final fix said about each carried finding (#489,
  * #530), shown with the review round the final fix answered. A verdict here
  * never moved a severity or bought a round; it is a record for a person, and
@@ -865,7 +827,10 @@ function ReportBody({
               finding, and no frame has ever carried it. */}
           {report.summary !== null && <Markdown text={report.summary} className={PROSE} />}
 
-          <TestDisagreements files={disagreedFiles(report.testChanges)} />
+          {/* Every change the round made to its own judge (#460), with the combined
+              verdict, its reason and, with finders seated, each seat's word. The
+              same component the round card draws, from the same record. */}
+          <JudgeChanges files={report.testChanges} />
 
           {filters.length > 0 && listed > 0 && (
             <ConsensusBar

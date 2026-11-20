@@ -293,10 +293,9 @@ they are waiting on. Four things in it are worth carrying:
     *found by every seat*, *voted on*, *voted down* (`consensusFilters`, `inConsensus`). It
     appears only when a finding carries `foundBy` or `votes`. *Every seat* is measured against
     the frame's `reported`, so without a frame it is not offered.
-  - **Where the seats disagreed about a test change** (#404): each judge file whose seats did
-    not all say the same, from the report's `testChanges.files[].verdicts`, with the combined
-    verdict and every seat's own. Files the seats agreed on add nothing; the combined verdict
-    already says them.
+  - **Every change to the run's own judge** (#404, #460): the list that was *where the seats
+    disagreed* is now the round's whole `testChanges`, drawn by `JudgeChanges` - see the bullet
+    on judge changes below.
   - **A seat's declared prior id** (#498), inside the fold: *"review.finders[0]: same as
     earlier finding a-1"*. `priorId` is a bare id, and the ledger's round does not travel with
     it, so the line names no round rather than guessing which earlier round held the id. An
@@ -334,6 +333,30 @@ they are waiting on. Four things in it are worth carrying:
     pairs name merged ids. No file says nothing; a listed file that cannot be read, or is not
     JSON, says so under the list rather than marking nothing silently. A pair this build
     cannot read drops alone.
+- **A review round's changes to its own judge are on its card, in the rail and in the Review
+  pane** (#460). Since #112 a review records a verdict on each test file and `vibe.config.json`
+  it changed, and nothing under `app/` read it: the terminal's end-of-run warning was the only
+  place a *not justified* file appeared, and a run started from the window never prints it.
+  One component, `cockpit/JudgeChanges.tsx`, over one reader, `readReport`'s `testChanges`:
+  - **The pilot's review card and the Review pane** draw every file: path, the combined verdict
+    (*justified*, *not justified*, *unjudged*) and the reason stored with it; with finders
+    seated, each seat as `<seat> <provider>/<model>` with its own verdict and reason, and
+    *"The seats disagreed on n of m files."* The card reads `code-review-<n>.json` itself
+    (`useJudgeChanges`), because no frame carries the reasons and the `test_changes_judged`
+    event is a count. The in-flight card under a pane is given no source: its round has written
+    no report.
+  - **The run path's Code review stage** names each file the round did *not* call justified,
+    outside the stage's disclosure as the verification row is, so the case #112 exists for is on
+    screen without opening anything. Justified files are left to the card.
+  - **Read as stored, never recomputed.** The combined verdict is the record's own; the core
+    keeps it when a seat's entry was dropped, so working it out from `verdicts` would disagree
+    with the core. A verdict this build cannot read is shown as *verdict unreadable* in the alarm
+    tone, not passed as justified. *Disagreed* is `src/judge.ts`'s `disagreements` rule -
+    justified against not justified; an unjudged seat is an omission - so the window's count is
+    the terminal's. `disagreedFiles` used to count any two different words, unjudged included.
+  - **A report, never a control.** No gate, button or prompt: a verdict does not block (#112).
+  - **Nothing for a round that changed no judge file**, not an empty section; a read that
+    fails, or a report not written yet, also draws nothing here - the Review pane says why.
 - **Agent prose is Markdown, through one renderer** (#530). `pilot/Markdown.tsx` moved to
   `design/Markdown.tsx` and takes a `className`. It draws a finding's detail and suggested fix,
   the round summary, ballot reasons, a disposition's reason (split off its badge by
