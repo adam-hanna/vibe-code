@@ -281,8 +281,10 @@ they are waiting on. Four things in it are worth carrying:
     merge frame's, the vote counts the report file's own `votes`, never the configured count,
     `foundByLine`'s rule; a part neither says is left out. Beneath it, each seat that failed
     (`review_finder_failed` / `critique_finder_failed`, which the window did not read before):
-    its config path, finder number, turn and error. **The event carries no provider or model,
-    so none is shown** rather than parsed out of the sentence. A failure is held in
+    its config path with `<provider>/<model>`, finder number, turn and error. The provider and
+    model come from the event's data, which carries them since the core added them for this;
+    **an older run's event has neither, and the seat is named by its path alone** rather than
+    the two being parsed out of the sentence. A failure is held in
     `Run.finderFailures` until the merge frame that closes its attempt takes it
     (`closedFailures`): the last one per seat, and never more than `finders - reported`, so a
     failure from an attempt a resumed round replaced is never named against a seat that then
@@ -306,10 +308,32 @@ they are waiting on. Four things in it are worth carrying:
     or *no check ran* when the diff could not be read and no turn was bought. Read from the
     file, which the core rewrites from state on every entry; the `final_fix_confirmed` event
     says the same counts and is not read.
-  - **Not yet:** near pairs (#462) and a per-seat view. The near pairs reached only the fix
-    prompt, and a merged-away seat's own words were kept nowhere, so both wait on the core's
-    groundwork (`fix-near-pairs-<n>.json`, `code-review-<n>.seat-<k>.json`), which ships on
-    its own; the pane reads neither yet.
+  - **What each seat said on its own**: a *report* switch under the panel line, *merged* and
+    one button per seat, labelled `<seat> <provider>/<model>` from the seat's own file (or
+    from the failure the merge closed for it), its path alone when only that is known, and
+    *finder k* before the file is read - never a vendor guessed from a path. The files are
+    `code-review-<n>.seat-<k>.json` and `plan-critique-<n>.seat-<k>.json`, which the core
+    writes beside the round (`loop.md`); `seatSlots` finds them by name and `classify` leaves
+    them `other`, so a seat file never becomes a round section. The switch appears only when
+    the listing holds a seat file for the round, so a round without finders, and a run from
+    before the files were kept, draw as before. A seat the merge frame counted (`finders`)
+    with no file is still a button, and says so in place: the failure it was closed with, or
+    that no file is in the run's directory. A file that cannot be read or is not a report says
+    so as the round's own report does. A seat's view uses the same `Finding` as the merged list,
+    its summary through `Markdown`, and **leaves out what belongs to the merged ids** - the
+    census row, the fixer's outcome, near pairs - adding instead *in the merged report as
+    `<id>`* where a merged finding's `foundBy` names that seat and id (`mergedAs`). Every seat
+    file is read when the section opens (`useArtifactReads`, one effect, since the number of
+    seats is the listing's), because the buttons are named from what is inside them.
+  - **Near pairs** (#462), inside the fold of both findings of each pair: *"may be the same
+    defect as `<id>`, the fixer was told (both cite `<path>`, n lines apart)"* (`nearLines`).
+    Read from `fix-near-pairs-<n + 1>.json` beside `code-review-<n>.json`: `recordNearPairs`
+    runs after the fix round's number has moved, in the ordinary and the final fix alike, and
+    the file's own `answers` is that number less one, so the pairing is the core's and
+    `seat-view.test.ts` reads the orchestrator to pin it. Only the merged list is marked; the
+    pairs name merged ids. No file says nothing; a listed file that cannot be read, or is not
+    JSON, says so under the list rather than marking nothing silently. A pair this build
+    cannot read drops alone.
 - **Agent prose is Markdown, through one renderer** (#530). `pilot/Markdown.tsx` moved to
   `design/Markdown.tsx` and takes a `className`. It draws a finding's detail and suggested fix,
   the round summary, ballot reasons, a disposition's reason (split off its badge by

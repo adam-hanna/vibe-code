@@ -155,6 +155,57 @@ export function useArtifact(
 }
 
 /**
+ * Several artifacts at once, each its own `Loaded`, in the order asked (#530).
+ *
+ * For a review round's seat files: their tabs are named from what is inside
+ * them, so every one is read when the round's section opens - one effect, not
+ * a hook per seat, because the number of seats is the listing's and a hook
+ * count must not move between renders. Keyed by the names joined, so the same
+ * list asked again is not read again until `revision` moves.
+ */
+export function useArtifactReads(
+  dir: string,
+  runId: string | null,
+  names: readonly string[],
+  revision = 0,
+): readonly Loaded[] {
+  const key = names.join('\n');
+  const [got, setGot] = useState<{ key: string; loaded: readonly Loaded[] }>({ key: '', loaded: [] });
+
+  useEffect(() => {
+    const asked = key === '' ? [] : key.split('\n');
+    const waiting: Loaded = { read: null, failure: null, loading: true };
+    if (runId === null || asked.length === 0 || dir.trim() === '') {
+      setGot({ key, loaded: [] });
+      return;
+    }
+    if (!host.inShell()) {
+      const failure = 'a run’s artifacts are read by the host, and there is no host in a browser';
+      setGot({ key, loaded: asked.map(() => ({ read: null, failure, loading: false })) });
+      return;
+    }
+    let cancelled = false;
+    setGot({ key, loaded: asked.map(() => waiting) });
+    void Promise.all(
+      asked.map((name) =>
+        host.artifact(dir, runId, name).then(
+          (read): Loaded => ({ read, failure: null, loading: false }),
+          (err: unknown): Loaded => ({ read: null, failure: err instanceof Error ? err.message : String(err), loading: false }),
+        ),
+      ),
+    ).then((loaded) => {
+      if (!cancelled) setGot({ key, loaded });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [dir, runId, key, revision]);
+
+  // Until the effect has run for this list, every name is still being read.
+  return got.key === key ? got.loaded : names.map(() => ({ read: null, failure: null, loading: true }));
+}
+
+/**
  * The sentence for a read that produced no text.
  *
  * One place, because the three answers are easy to collapse by accident and the

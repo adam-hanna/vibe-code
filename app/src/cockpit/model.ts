@@ -471,12 +471,16 @@ export interface FinderMerge {
 /**
  * One additional finder that failed (#388 decision 7), as the event says it:
  * the finder's number, its config path, the turn it failed on and the first
- * line of the error. The event carries no provider or model, so none is shown.
+ * line of the error, and - since the core put them in the event's data (#530) -
+ * the seat's provider and model. An older run's event has neither, and they
+ * stay null rather than being parsed out of the sentence.
  */
 export interface FinderFailure {
   round: number | null;
   finder: number | null;
   seat: string;
+  provider: string | null;
+  model: string | null;
   label: string | null;
   error: string | null;
   seq: number;
@@ -2182,6 +2186,8 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
               round: num(data['round']),
               finder: num(data['finder']),
               seat,
+              provider: str(data['provider']),
+              model: str(data['model']),
               label: str(data['label']),
               error: str(data['error']),
               seq: id(),

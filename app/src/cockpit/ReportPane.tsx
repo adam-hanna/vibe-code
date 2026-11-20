@@ -13,23 +13,30 @@ import {
   disagreedFiles,
   foundByLine,
   inConsensus,
+  mergedAs,
+  nearLines,
   ofKind,
   outcomeEntries,
   panelLine,
   priorLines,
   readConfirmations,
   readDispositions,
+  readNearPairs,
   readReport,
+  readSeatReport,
   revisionRan,
   scopeLine,
+  seatLabel,
+  seatSlots,
   votesLine,
 } from './artifacts';
 import { SEVERITIES, gateSentence } from './model';
 import { DOCUMENT, EMPTY, FILE, HEAD, LABEL, NOTE, PANE } from './pane';
-import { useArtifact, useArtifacts, noText } from './useArtifacts';
+import { useArtifact, useArtifactReads, useArtifacts, noText } from './useArtifacts';
+import type { Loaded } from './useArtifacts';
 import { sizeOf } from './PlansPane';
 import type { Severity } from '../design';
-import type { Answerer, Classified, Consensus, FullFinding, JudgedFile } from './artifacts';
+import type { Answerer, Classified, Consensus, FullFinding, JudgedFile, NearPair, SeatReport, SeatSlot } from './artifacts';
 import type { Census, FinderMerge, FindingRow, FixDispositionsFrame } from './model';
 import type { RoundCard } from './rounds';
 import { shownRound } from './rounds';
@@ -207,6 +214,8 @@ function Finding({
   row,
   reported,
   outcome,
+  near = [],
+  mergedInto = null,
 }: {
   finding: FullFinding;
   row: FindingRow | null;
@@ -217,6 +226,16 @@ function Finding({
    * (#393), with the reason split off to be drawn as prose (#530).
    */
   outcome: readonly { line: string; head: string; reason: string | null }[];
+  /**
+   * The pairs the fix prompt named this finding in, as `nearLines` says them
+   * (#462, #530): empty without `fix-near-pairs-<n>.json`, which adds nothing.
+   */
+  near?: readonly string[];
+  /**
+   * In a seat's own view (#530): the merged finding this one went into, or
+   * null. Never set in the merged view, where it would name the finding itself.
+   */
+  mergedInto?: string | null;
 }) {
   const [open, setOpen] = useState(false);
   // The report file says the vote moved it; the census row only says a guard did (#388 Part C).
@@ -246,6 +265,7 @@ function Finding({
             {/* Who found it, behind the fold and never on the row (#388 Part B).
                 A finding with no `foundBy` adds nothing here. */}
             {finding.foundBy !== null && <Badge>{foundByLine(finding.foundBy, reported)}</Badge>}
+            {mergedInto !== null && <Badge>in the merged report as {mergedInto}</Badge>}
             {/* The vote, below who found it and never on the row (#388 Part C).
                 A finding nobody voted on adds nothing here. */}
             {finding.votes !== null && <Badge>{votesLine(finding.votes)}</Badge>}
@@ -308,6 +328,15 @@ function Finding({
           {finding.foundBy !== null && priorLines(finding.foundBy).length > 0 && (
             <ul className={FACTS}>
               {priorLines(finding.foundBy).map((line) => (
+                <li key={line}>{line}</li>
+              ))}
+            </ul>
+          )}
+          {/* The pairs the fixer was asked to tell apart (#462), on both
+              findings of each pair. Nothing at all without the file. */}
+          {near.length > 0 && (
+            <ul className={FACTS}>
+              {near.map((line) => (
                 <li key={line}>{line}</li>
               ))}
             </ul>
@@ -429,6 +458,9 @@ function PanelSummary({ finders, findings }: { finders: FinderMerge | null; find
           {failed.map((f) => (
             <li key={`${f.seat}-${String(f.seq)}`}>
               <Badge variant="alarm">seat failed</Badge> {f.seat}
+              {/* Named by vendor and model where the event carried them; an
+                  older run's event did not, and says the seat alone. */}
+              {f.provider !== null && f.model !== null && ` ${f.provider}/${f.model}`}
               {f.finder !== null && ` (finder ${String(f.finder)})`}
               {f.label !== null && ` on ${f.label}`}
               {f.error !== null && ` — ${f.error}`}. It contributed no findings.
@@ -573,6 +605,128 @@ function FinalFixChecks({
   );
 }
 
+/**
+ * Which report the round's section shows (#530): the merged one, which is what
+ * the gate decided on, or one seat's own. Only drawn when the listing holds a
+ * seat file for the round, so a round without finders has no switch at all.
+ */
+function SeatSwitch({
+  labels,
+  chosen,
+  onChoose,
+}: {
+  labels: readonly { k: number; label: string }[];
+  chosen: number | null;
+  onChoose: (k: number | null) => void;
+}) {
+  return (
+    <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="Which report to show">
+      <span className={LABEL}>report</span>
+      <Button size="sm" variant={chosen === null ? 'secondary' : 'quiet'} aria-pressed={chosen === null} onClick={() => onChoose(null)}>
+        merged
+      </Button>
+      {labels.map((l) => (
+        <Button
+          key={l.k}
+          size="sm"
+          variant={chosen === l.k ? 'secondary' : 'quiet'}
+          aria-pressed={chosen === l.k}
+          onClick={() => onChoose(l.k)}
+        >
+          {l.label}
+        </Button>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * One seat's own report (#530), as it stood before the merge across seats: its
+ * own words, severities and ids. The merge kept only the winning finding's
+ * text, so this is the one place a merged-away seat's claim can be read.
+ *
+ * Drawn with the same `Finding` as the merged list, without what belongs to
+ * the merged finding - the census row, the fixer's outcome, the near pairs -
+ * because those were decided about the merged ids, not this seat's. A file the
+ * listing does not hold, or that cannot be read, says so here.
+ */
+function SeatView({
+  slot,
+  loaded,
+  label,
+  seat,
+  merged,
+}: {
+  slot: SeatSlot;
+  loaded: Loaded | null;
+  label: string;
+  seat: SeatReport | null;
+  merged: readonly FullFinding[];
+}) {
+  if (slot.name === null) {
+    const f = slot.failure;
+    return (
+      <p className={NOTE}>
+        <Badge>no report</Badge> No report of {label}’s is beside this round.{' '}
+        {f === null
+          ? 'The round’s merge counted this seat, and no file for it is in the run’s directory.'
+          : `It failed${f.label === null ? '' : ` on ${f.label}`}${f.error === null ? '' : ` — ${f.error}`}, and contributed no findings.`}
+      </p>
+    );
+  }
+  const missing = loaded === null ? null : noText(loaded.read, loaded.failure);
+  if (missing !== null) {
+    return (
+      <p className={NOTE}>
+        <Badge>no report</Badge> {missing}
+      </p>
+    );
+  }
+  if (loaded === null || loaded.read === null || loaded.read.kind !== 'text') {
+    return <p className={NOTE}>reading {slot.name}…</p>;
+  }
+  if (seat === null) {
+    return (
+      <>
+        <p className={NOTE}>
+          <Badge variant="alarm">unreadable</Badge> {slot.name} is not the report shape this build
+          understands. It is shown as it is on disk.
+        </p>
+        <pre className={DOCUMENT}>{loaded.read.text}</pre>
+      </>
+    );
+  }
+  const own = seat.report;
+  return (
+    <>
+      <p className={NOTE}>
+        What {label} reported on its own, before the merge across seats. The counts above are the
+        merged round’s, which is what the gate decided on.
+      </p>
+      {own.verdict !== null && (
+        <p className="m-0 text-body text-primary">
+          <Badge>{own.verdict}</Badge> this seat’s own verdict.
+        </p>
+      )}
+      {own.summary !== null && <Markdown text={own.summary} className={PROSE} />}
+      {own.findings.length === 0 ? (
+        <p className={NOTE}>This seat reported no findings at all.</p>
+      ) : (
+        own.findings.map((f) => (
+          <Finding
+            key={f.id}
+            finding={f}
+            row={null}
+            reported={null}
+            outcome={[]}
+            mergedInto={mergedAs(merged, seat.seat, f.id)}
+          />
+        ))
+      )}
+    </>
+  );
+}
+
 /** The round's report, once its section is open. */
 function ReportBody({
   dir,
@@ -586,6 +740,8 @@ function ReportBody({
   notRecorded = false,
   by = 'fixer',
   finalChecks = null,
+  seats = [],
+  nearPairs = null,
 }: {
   dir: string;
   runId: string;
@@ -605,8 +761,17 @@ function ReportBody({
   by?: Answerer;
   /** The `final-fix-confirm-<n+1>.json` of the final fix that answered this review, or null (#530). */
   finalChecks?: Classified | null;
+  /** The round's seats, from `seatSlots`: empty when it left no seat file (#530). */
+  seats?: readonly SeatSlot[];
+  /** The `fix-near-pairs-<n+1>.json` of the fix round that answered this review, or null (#530). */
+  nearPairs?: Classified | null;
 }) {
   const [consensus, setConsensus] = useState<Consensus>('all');
+  // Null is the merged report; a number is a seat's `k` (#530).
+  const [view, setView] = useState<number | null>(null);
+  const seatNames = seats.flatMap((slot) => (slot.name === null ? [] : [slot.name]));
+  const seatReads = useArtifactReads(dir, runId, seatNames, revision);
+  const near = useArtifact(dir, runId, nearPairs?.name ?? null, revision);
   const { read, failure, loading } = useArtifact(dir, runId, name, revision);
   const missing = noText(read, failure);
   const fixed = useArtifact(dir, runId, dispositions?.name ?? null, revision);
@@ -648,6 +813,20 @@ function ReportBody({
     );
   }
 
+  // Each seat with what its file says, read once for the tab and the view.
+  const seatViews = seats.map((slot) => {
+    const i = slot.name === null ? -1 : seatNames.indexOf(slot.name);
+    const loaded = i < 0 ? null : (seatReads[i] ?? null);
+    const seat = loaded?.read?.kind === 'text' ? readSeatReport(loaded.read.text) : null;
+    return { slot, loaded, seat, label: seatLabel(slot, seat) };
+  });
+  // A seat this round no longer offers (a reread that lost its file) reads as merged.
+  const chosen = seatViews.find((v) => v.slot.k === view) ?? null;
+
+  const nearMissing = noText(near.read, near.failure);
+  const nearRead = near.read?.kind === 'text' ? readNearPairs(near.read.text) : null;
+  const pairs: readonly NearPair[] = nearRead?.pairs ?? [];
+
   const listed = report.findings.length;
   const reported = finders?.reported ?? null;
   const filters = consensusFilters(report.findings, reported);
@@ -668,52 +847,83 @@ function ReportBody({
       {/* The panel under the gate's head (#530): nothing for a one-seat round. */}
       <PanelSummary finders={finders} findings={report.findings} />
 
-      {/* The summary is the paragraph a person reads before any individual
-          finding, and no frame has ever carried it. */}
-      {report.summary !== null && <Markdown text={report.summary} className={PROSE} />}
-
-      <TestDisagreements files={disagreedFiles(report.testChanges)} />
-
-      {filters.length > 0 && listed > 0 && (
-        <ConsensusBar
-          options={filters}
-          chosen={showing}
-          onChoose={setConsensus}
-          count={(c) => report.findings.filter((f) => inConsensus(f, c, reported)).length}
+      {/* Each seat's own report beside the merged one (#530): nothing for a
+          round that left no seat file. */}
+      {seatViews.length > 0 && (
+        <SeatSwitch
+          labels={seatViews.map((v) => ({ k: v.slot.k, label: v.label }))}
+          chosen={chosen === null ? null : chosen.slot.k}
+          onChoose={setView}
         />
       )}
 
-      {listed === 0 ? (
-        <p className={NOTE}>This round reported no findings at all.</p>
-      ) : shown.length === 0 ? (
-        <p className={NOTE}>No finding of this round is {CONSENSUS_WORDS[showing]}.</p>
+      {chosen !== null ? (
+        <SeatView slot={chosen.slot} loaded={chosen.loaded} label={chosen.label} seat={chosen.seat} merged={report.findings} />
       ) : (
-        shown.map((f) => (
-          <Finding
-            key={f.id}
-            finding={f}
-            // The census's row for the same finding, matched on the id both
-            // carry. Null on a round this window did not watch, which is every
-            // round of an earlier session - the prose is still there, and what
-            // is missing is what happened to the finding afterwards.
-            row={census?.findings.find((r) => r.id === f.id) ?? null}
-            reported={reported}
-            outcome={outcomeEntries(f.id, answering)}
-          />
-        ))
-      )}
+        <>
+          {/* The summary is the paragraph a person reads before any individual
+              finding, and no frame has ever carried it. */}
+          {report.summary !== null && <Markdown text={report.summary} className={PROSE} />}
 
-      {/* The gate's counts are the authority. If the list is shorter than they
-          say, the pane admits it rather than letting the list read as the whole
-          of what the round found. */}
-      {counted !== null && listed < counted && (
-        <p className={NOTE}>
-          The counts above are the gate’s and are what decided the round; this build could read{' '}
-          {listed} of the {counted} findings behind them.
-        </p>
-      )}
+          <TestDisagreements files={disagreedFiles(report.testChanges)} />
 
-      {finalChecks !== null && <FinalFixChecks dir={dir} runId={runId} file={finalChecks} revision={revision} />}
+          {filters.length > 0 && listed > 0 && (
+            <ConsensusBar
+              options={filters}
+              chosen={showing}
+              onChoose={setConsensus}
+              count={(c) => report.findings.filter((f) => inConsensus(f, c, reported)).length}
+            />
+          )}
+
+          {listed === 0 ? (
+            <p className={NOTE}>This round reported no findings at all.</p>
+          ) : shown.length === 0 ? (
+            <p className={NOTE}>No finding of this round is {CONSENSUS_WORDS[showing]}.</p>
+          ) : (
+            shown.map((f) => (
+              <Finding
+                key={f.id}
+                finding={f}
+                // The census's row for the same finding, matched on the id both
+                // carry. Null on a round this window did not watch, which is every
+                // round of an earlier session - the prose is still there, and what
+                // is missing is what happened to the finding afterwards.
+                row={census?.findings.find((r) => r.id === f.id) ?? null}
+                reported={reported}
+                outcome={outcomeEntries(f.id, answering)}
+                near={nearLines(f.id, pairs)}
+              />
+            ))
+          )}
+
+          {/* A near-pairs file the listing holds and this build could not use is
+              said, never dropped; no file at all says nothing. */}
+          {nearPairs !== null && nearMissing !== null && (
+            <p className={NOTE}>
+              <Badge>no record</Badge> {nearPairs.name}: {nearMissing}
+            </p>
+          )}
+          {nearPairs !== null && near.read?.kind === 'text' && nearRead === null && (
+            <p className={NOTE}>
+              <Badge variant="alarm">unreadable</Badge> {nearPairs.name} is not the shape this build
+              understands, so no finding is marked as one the fixer was told may be the same defect.
+            </p>
+          )}
+
+          {/* The gate's counts are the authority. If the list is shorter than they
+              say, the pane admits it rather than letting the list read as the whole
+              of what the round found. */}
+          {counted !== null && listed < counted && (
+            <p className={NOTE}>
+              The counts above are the gate’s and are what decided the round; this build could read{' '}
+              {listed} of the {counted} findings behind them.
+            </p>
+          )}
+
+          {finalChecks !== null && <FinalFixChecks dir={dir} runId={runId} file={finalChecks} revision={revision} />}
+        </>
+      )}
     </>
   );
 }
@@ -783,6 +993,14 @@ export function ReportPane({
       : (ofKind(entries, 'final-fix-confirm').find((c) => c.round === round + 1) ?? null);
   const answering = (round: number | null): Classified | null =>
     round === null ? null : (ofKind(entries, answers).find((c) => c.round === round + 1) ?? null);
+  // The near pairs the fix answering a review was told about (#462, #530):
+  // `recordNearPairs` numbers the file by the fix round, after the increment,
+  // in the ordinary and the final fix alike, so `fix-near-pairs-<n + 1>.json`
+  // goes with `code-review-<n>.json`. A plan revision writes none.
+  const nearPairsFor = (round: number | null): Classified | null =>
+    kind !== 'review' || round === null
+      ? null
+      : (ofKind(entries, 'near-pairs').find((c) => c.round === round + 1) ?? null);
   const nextReviewOf = (round: number | null): Classified | null =>
     round === null ? null : (reports.find((c) => c.round === round + 1) ?? null);
   // A round that ran and recorded nothing: the frame that says its answer could
@@ -900,6 +1118,8 @@ export function ReportPane({
             notRecorded={unrecordedFor(report.round)}
             by={kind === 'review' ? 'fixer' : 'planner'}
             finalChecks={finalChecksFor(report.round)}
+            nearPairs={nearPairsFor(report.round)}
+            seats={report.round === null ? [] : seatSlots(entries, kind, report.round, findersFor(report.round))}
           />
         </Section>
       ))}
