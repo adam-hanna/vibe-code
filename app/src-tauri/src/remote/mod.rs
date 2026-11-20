@@ -49,9 +49,10 @@
 //! or the endpoint not binding - is tried again after 2s, 5s, 15s, 30s and
 //! then every 60s, while remote access is on. A locked keychain, a malformed
 //! key and no key wait for the person. What bounds it: one worker per app and
-//! one episode at a time, belonging to one generation, which every
-//! `remote_set` - off included - moves, ending it; a person's change that
-//! fails again starts the schedule from its first step. One keychain read in
+//! one episode at a time, belonging to one generation. Every start outside
+//! the worker - the launch, a pairing code's, and every `remote_set`, off
+//! included - moves the generation, ending the episode; one that fails again
+//! starts the schedule from its first step. One keychain read in
 //! flight, read outside the transition lock, and checked under it before it is
 //! dispatched and again before it is applied. At the 60s cadence an unchanged
 //! failure is not logged again, and every change of state it causes is pushed
@@ -938,8 +939,8 @@ const RETRY: Schedule = Schedule {
 };
 
 impl Remote {
-    /// A person's change: any retry episode belongs to the generation before
-    /// it. Called under the transition lock.
+    /// A start outside the retry worker: any retry episode belongs to the
+    /// generation before it. Called under the transition lock.
     fn bump(&self) {
         self.generation.send_modify(|g| *g += 1);
     }
@@ -958,9 +959,8 @@ fn mark_retrying(remote: &Remote) -> bool {
 }
 
 /// Hand a failure that passes by itself to the retry worker, under the
-/// transition lock. A generation that already has an episode keeps it, so a
-/// pairing code's start during one does not restart the schedule; a person's
-/// change has moved the generation, so theirs starts it from its first step.
+/// transition lock. The start before it has moved the generation, so a new
+/// episode starts the schedule from its first step.
 fn arm(remote: &Remote) {
     if !mark_retrying(remote) {
         return;
@@ -977,13 +977,21 @@ fn arm(remote: &Remote) {
 }
 
 /// [`reconcile_locked`], then [`arm`]: what every caller outside the retry
-/// worker runs, with the transition lock held.
+/// worker runs - the launch, a pairing code's start, the window's and a
+/// phone's `remote_set` - with the transition lock held.
+///
+/// **Each moves the generation first**, so any retry episode ends and a read
+/// it has in flight is never applied. A pairing code's start has to as well:
+/// a retry that read *no key* just before the first code made one, and came
+/// back after that start's bind had failed, would otherwise have turned the
+/// newer, retryable failure into `NoKey` and stopped retrying.
 async fn reconcile_and_arm<K, B, F>(remote: &Remote, read_key: K, build: B, after: Option<Written>)
 where
     K: FnOnce() -> Result<Option<SecretKey>, Unreadable>,
     B: FnOnce(SecretKey, Option<RelayUrl>) -> F,
     F: Future<Output = Result<RemoteEndpoint, String>>,
 {
+    remote.bump();
     reconcile_locked(remote, read_key, build, after).await;
     arm(remote);
 }
@@ -1015,7 +1023,7 @@ fn ineligible(remote: &Remote, generation: u64) -> Option<&'static str> {
         return Some("remote access was turned off");
     }
     if *remote.generation.borrow() != generation {
-        return Some("a change to remote access made its own attempt");
+        return Some("another start made its own attempt");
     }
     match &*remote.running() {
         Running::Failed(failure) if failure.retryable() => None,
@@ -1058,7 +1066,7 @@ fn end_episode(remote: &Remote, generation: u64) {
 /// Why a person's change ended an episode.
 fn moved_cause(remote: &Remote) -> &'static str {
     if remote.desired().enabled {
-        "a change to remote access made its own attempt"
+        "another start made its own attempt"
     } else {
         "remote access was turned off"
     }
@@ -1098,14 +1106,14 @@ where
     }
 }
 
-/// Retry a failed start until it comes up, needs the person, or a person's
-/// change ends it.
+/// Retry a failed start until it comes up, needs the person, or another start
+/// ends it.
 ///
 /// Every attempt is checked under the transition lock twice: before its read
-/// is dispatched, so nothing is read once access is off or the endpoint no
-/// longer needs it - a locked keychain left by a pairing code's start is never
-/// asked again, which would put its prompt back up - and before its result is
-/// applied, so a read that finished after a person's change is dropped. The
+/// is dispatched, so nothing is read once access is off or another start has
+/// moved the generation - a locked keychain left by a pairing code's start is
+/// never asked again, which would put its prompt back up - and before its
+/// result is applied, so a read that finished after another start is dropped. The
 /// read itself runs on a blocking thread outside the lock, so a person's *off*
 /// never waits behind an unlock prompt.
 ///
@@ -1276,17 +1284,12 @@ fn apply_patch(app: &AppHandle, remote: &Remote, patch: &Patch) -> Result<Settin
 /// *off*, written and then waiting for the lock, was stopped by the window's
 /// reconcile, and found nothing left to hold for its own answer. The order is
 /// the transition lock, then the settings lock, everywhere.
-///
-/// A patch that was written moves the generation, under the same lock, so any
-/// retry episode ends before it can read or apply anything: the person's own
-/// change is the attempt now (#477). A refused patch changes nothing.
 async fn patch_locked<F>(remote: &Remote, apply: F) -> Result<tokio::sync::OwnedMutexGuard<()>, String>
 where
     F: FnOnce() -> Result<Settings, String>,
 {
     let guard = remote.transition.clone().lock_owned().await;
     apply()?;
-    remote.bump();
     Ok(guard)
 }
 
@@ -2549,6 +2552,15 @@ mod tests {
         reconcile_and_arm(&rig.remote, move || answer, build, None).await;
     }
 
+    /// Await `work`, failing by name after a deadline rather than hanging. A
+    /// read the test holds is released when its sender drops in the unwind.
+    async fn bounded<T>(what: &str, work: impl Future<Output = T>) -> T {
+        match tokio::time::timeout(Duration::from_secs(10), work).await {
+            Ok(done) => done,
+            Err(_) => panic!("timed out waiting for {what}"),
+        }
+    }
+
     /// Poll until `ready`, failing by name after a deadline rather than hanging.
     async fn until(what: &str, mut ready: impl FnMut() -> bool) {
         let waited = tokio::time::timeout(Duration::from_secs(10), async {
@@ -2743,7 +2755,7 @@ mod tests {
         assert_eq!(rig.built.lock().unwrap().len(), 1);
         let lines = heard::take();
         assert!(
-            lines.contains(&"remote access: retry 1: stopped: a change to remote access made its own attempt".to_string()),
+            lines.contains(&"remote access: retry 1: stopped: another start made its own attempt".to_string()),
             "{lines:?}"
         );
 
@@ -2757,9 +2769,9 @@ mod tests {
         person(&rig, true, None, Err(transient("gone")), binds(&rig)).await;
         let held = rig.remote.transition.clone().lock_owned().await;
         until("the worker is past its wait, holding the read slot", || rig.remote.read_slot.try_lock().is_err()).await;
-        // What `patch_locked` and `remote_set` do, under the lock the worker waits on.
+        // What `remote_set` does, under the lock the worker waits on: the
+        // patch, then `reconcile_and_arm`, which moves the generation.
         want(&rig.remote, true, Some("https://b.example"));
-        rig.remote.bump();
         let k = rig.key.clone();
         reconcile_and_arm(&rig.remote, move || Ok(Some(k)), binds(&rig), None).await;
         drop(held);
@@ -2770,7 +2782,7 @@ mod tests {
         assert_eq!(rig.built.lock().unwrap().len(), 1);
         let lines = heard::take();
         assert!(
-            lines.contains(&"remote access: retry 1: stopped: a change to remote access made its own attempt".to_string()),
+            lines.contains(&"remote access: retry 1: stopped: another start made its own attempt".to_string()),
             "{lines:?}"
         );
     }
@@ -2788,7 +2800,8 @@ mod tests {
         person(&rig, true, None, Err(transient("gone")), binds(&rig)).await;
         until("the retry's read is in flight", || script.in_flight.load(Ordering::SeqCst) == 1).await;
 
-        person(&rig, false, None, Err(transient("never read")), binds(&rig)).await;
+        bounded("off, while a retry's read is held", person(&rig, false, None, Err(transient("never read")), binds(&rig)))
+            .await;
         assert_eq!(script.in_flight.load(Ordering::SeqCst), 1, "off did not wait for the read");
         assert_eq!(rig.report(), EndpointReport::Off);
         until("the episode ends", || no_episode(&rig)).await;
@@ -2832,7 +2845,7 @@ mod tests {
             lines[..3],
             [
                 format!("remote access: could not read the device key: {}", transient("again").why),
-                "remote access: retry 5: stopped: a change to remote access made its own attempt".to_string(),
+                "remote access: retry 5: stopped: another start made its own attempt".to_string(),
                 format!("remote access: retry 1: could not read the device key: {}", transient("still down").why),
             ]
         );
@@ -2912,9 +2925,9 @@ mod tests {
         until("the first retry's read is in flight", || script.in_flight.load(Ordering::SeqCst) == 1).await;
         // Two of the person's changes fail while that read is held: each ends
         // the episode before it, and the newest waits for the read slot.
-        person(&rig, true, None, Err(transient("1")), binds(&rig)).await;
+        bounded("a change while a read is held", person(&rig, true, None, Err(transient("1")), binds(&rig))).await;
         tokio::time::sleep(Duration::from_millis(50)).await;
-        person(&rig, true, None, Err(transient("2")), binds(&rig)).await;
+        bounded("a second change while a read is held", person(&rig, true, None, Err(transient("2")), binds(&rig))).await;
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert_eq!(script.calls(), 1, "no second read while one is in flight");
 
@@ -2928,17 +2941,17 @@ mod tests {
         assert_eq!(
             retries,
             [
-                "remote access: retry 1: stopped: a change to remote access made its own attempt".to_string(),
-                "remote access: retry 1: stopped: a change to remote access made its own attempt".to_string(),
+                "remote access: retry 1: stopped: another start made its own attempt".to_string(),
+                "remote access: retry 1: stopped: another start made its own attempt".to_string(),
                 format!("remote access: retry 1: endpoint {id} is up"),
             ],
             "one episode at a time, each ended before the next began"
         );
     }
 
-    /// A pairing code's start does not move the generation, so the worker
-    /// learns only under the lock that its attempt is no longer wanted - and
-    /// reads nothing, which for a locked keychain would put its prompt back up.
+    /// A pairing code's start ends the episode as a person's change does, so
+    /// the worker reads nothing - which for a locked keychain would put its
+    /// prompt back up.
     #[tokio::test]
     async fn a_retry_reads_nothing_once_another_change_made_it_unnecessary() {
         const WAIT: Schedule = Schedule { ramp: &[Duration::from_millis(200); 4], steady: Duration::from_millis(200) };
@@ -2955,7 +2968,7 @@ mod tests {
         assert_eq!(script.calls(), 0);
         let lines = heard::take();
         assert!(
-            lines.contains(&"remote access: retry 1: stopped: the endpoint was started by another change".to_string()),
+            lines.contains(&"remote access: retry 1: stopped: another start made its own attempt".to_string()),
             "{lines:?}"
         );
 
@@ -2970,8 +2983,51 @@ mod tests {
         assert_eq!(script.calls(), 0, "a locked keychain is not asked again");
         let lines = heard::take();
         assert!(
-            lines.contains(&"remote access: retry 1: stopped: the last attempt needs you to act".to_string()),
+            lines.contains(&"remote access: retry 1: stopped: another start made its own attempt".to_string()),
             "{lines:?}"
+        );
+    }
+
+    /// A retry that read *no key* just before the first pairing code made one,
+    /// and came back after that code's start had failed to bind, is not
+    /// applied: it would turn a failure that passes by itself into `NoKey`,
+    /// and nothing would try again. The start's own failure is retried.
+    #[tokio::test]
+    async fn a_retry_answer_older_than_a_pairing_start_is_dropped() {
+        let rig = Arc::new(Rig::new());
+        let script = Script::new(vec![Ok(None), Ok(Some(rig.key.clone()))]);
+        let release = script.hold_next();
+        heard::listen();
+        let pushes = worker(&rig, &FAST, &script, binds(&rig));
+        want(&rig.remote, true, None);
+        bounded("the person's start", person(&rig, true, None, Err(transient("gone")), binds(&rig))).await;
+        until("the retry's read is in flight", || script.in_flight.load(Ordering::SeqCst) == 1).await;
+
+        // The read comes back with no key while the pairing code's start holds
+        // the lock, so the worker is waiting for it with that answer in hand.
+        let held = bounded("the transition lock", rig.remote.transition.clone().lock_owned()).await;
+        release.send(()).unwrap();
+        until("the read returns", || script.in_flight.load(Ordering::SeqCst) == 0).await;
+        let k = rig.key.clone();
+        reconcile_and_arm(
+            &rig.remote,
+            move || Ok(Some(k)),
+            |_, _| async { Err::<RemoteEndpoint, _>("the remote-access endpoint could not start: no network yet".to_string()) },
+            None,
+        )
+        .await;
+        drop(held);
+
+        until("the endpoint up", || up(&rig) && no_episode(&rig)).await;
+        assert_eq!(script.calls(), 2, "the stale answer was dropped, and the new episode read again");
+        assert!(!pushes.lock().unwrap().contains(&EndpointReport::NoKey), "{:?}", pushes.lock().unwrap());
+        let retries: Vec<String> = heard::take().into_iter().filter(|l| l.starts_with("remote access: retry ")).collect();
+        assert_eq!(
+            retries,
+            [
+                "remote access: retry 1: stopped: another start made its own attempt".to_string(),
+                format!("remote access: retry 1: endpoint {} is up", rig.key.public()),
+            ]
         );
     }
 }

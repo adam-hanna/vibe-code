@@ -83,11 +83,12 @@ with it:
   never retried, because keyring unlocks a locked item and so raises the prompt: a retry would put
   it on screen every minute. A malformed key and no key are not retried either. Settings says
   which: *trying again by itself*, or what to do. The read runs on a blocking thread outside the
-  lock, because an unanswered prompt can hold it indefinitely. Every `remote_set` moves a
-  generation under the lock, which ends the episode, and a person's change that fails again
-  starts the schedule from its first step. Each attempt is checked under the lock before its read
-  is dispatched and again before its result is applied, so nothing is read once off, or once a
-  pairing code's start made the attempt unnecessary. The retry logs every attempt during the ramp,
+  lock, because an unanswered prompt can hold it indefinitely. Every start outside the worker - the
+  launch, a pairing code's and every `remote_set` - moves a generation under the lock, which ends
+  the episode, and one that fails again starts the schedule from its first step. Each attempt is
+  checked under the lock before its read is dispatched and again before its result is applied, so
+  nothing is read once off, and a read that started before a pairing code made the key cannot
+  turn that code's retryable failure into *no key*. The retry logs every attempt during the ramp,
   and at the 60s cadence only a failure whose sentence changed: the log is never rotated, and a
   desktop with no Secret Service would otherwise add 1,440 identical lines a day. It always logs
   the recovery and the end of an episode. Each change of state an attempt causes is pushed with
